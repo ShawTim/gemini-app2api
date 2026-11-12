@@ -4,12 +4,40 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   root,
+  releaseWalkDirs,
+  trackedFiles,
   sourceFiles,
   checkFiles,
   checkPackageScripts,
   checkDockerRuntime,
 } from "./release-files.mjs";
+const tracked = trackedFiles(root);
+if (tracked) {
+  const untracked = execFileSync(
+    "git",
+    [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+      "--",
+      ...releaseWalkDirs,
+      "docs/assets",
+    ],
+    { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+  )
+    .split("\0")
+    .filter(Boolean);
+  assert.equal(
+    untracked.length,
+    0,
+    "untracked file in curated directory: " + untracked[0],
+  );
+}
 const source = sourceFiles();
+if (tracked)
+  for (const name of source)
+    assert(tracked.has(name), "untracked curated source: " + name);
 checkFiles(source);
 checkPackageScripts(
   JSON.parse(fs.readFileSync(path.join(root, "package.json"))).scripts,

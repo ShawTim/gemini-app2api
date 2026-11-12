@@ -25,3 +25,6 @@
 !native-wire/protobuf.mjs
 !native-wire/robin-current.mjs
 !native-wire/oauth-loopback.mjs
+**/.DS_Store
+**/.env*
+**/*.private.*

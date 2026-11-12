@@ -7,6 +7,9 @@ services:
       - "127.0.0.1:${GATEWAY_PUBLISHED_PORT:-18989}:18989"
       - "127.0.0.1:18765:18765"
     environment:
+      GATEWAY_HOST: "0.0.0.0"
+      GATEWAY_CALLBACK_HOST: "0.0.0.0"
+      GATEWAY_ALLOW_REMOTE: "1"
       GATEWAY_ADMIN_PASSWORD: ${GATEWAY_ADMIN_PASSWORD:?Set GATEWAY_ADMIN_PASSWORD in untracked .env for the non-loopback container bind}
       GATEWAY_PUBLIC_ORIGIN: "${GATEWAY_PUBLIC_ORIGIN:-http://127.0.0.1:${GATEWAY_PUBLISHED_PORT:-18989}}"
     volumes:

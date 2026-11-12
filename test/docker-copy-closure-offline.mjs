@@ -16,23 +16,47 @@ function filesUnder(relative) {
   assert.ok(!stat.isSymbolicLink(), 'no symlinks');
   return stat.isDirectory() ? fs.readdirSync(full).sort().flatMap(n => filesUnder(path.posix.join(relative, n))) : [relative];
 }
-function copiedFiles(text, rulesText) {
+function compileRules(rulesText) {
   const rules = rulesText.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-  assert.equal(rules[0], '**');
-  const includes = rules.slice(1).map(l => { assert.match(l, /^![A-Za-z0-9_./*-]+$/); return l.slice(1); });
-  const allowed = name => includes.some(p => p === name || p.endsWith('/**') && name.startsWith(p.slice(0, -2)));
+  assert.equal(rules.shift(), '**');
+  const compiled = rules.map(rule => {
+    if (rule.startsWith('!')) {
+      const p = rule.slice(1);
+      assert.match(p, /^[A-Za-z0-9_./*-]+$/);
+      return { allow: true, matches: name => p === name || (p.endsWith('/**') && name.startsWith(p.slice(0, -2))) };
+    }
+    assert.match(rule, /^\*\*\/[A-Za-z0-9_.*-]+$/);
+    const leaf = new RegExp('^' + rule.slice(3).split('*').map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$');
+    return { allow: false, matches: name => name.split('/').filter(Boolean).some(s => leaf.test(s)) };
+  });
+  return name => {
+    let state = false;
+    for (const r of compiled) if (r.matches(name)) state = r.allow;
+    return state;
+  };
+}
+function copiedFiles(text, rulesText) {
+  const allowed = compileRules(rulesText);
+  for (const denied of ['src/gateway/.DS_Store', 'src/gateway/.env', 'src/gateway/local.private.mjs'])
+    assert.equal(allowed(denied), false, 'Docker context must exclude ' + denied);
   const output = new Map();
   for (const line of text.split(/\r?\n/).filter(l => /^COPY\s/.test(l))) {
     const parts = line.trim().split(/\s+/).slice(1), dest = parts.pop();
+    while (parts[0]?.startsWith('--')) {
+      const flag = parts.shift();
+      assert.match(flag, /^--chmod=(?:a\+rX|[0-7]{3,4})$/);
+    }
     assert.ok(dest && !dest.startsWith('/') && !dest.includes('..'));
     for (const source of parts) {
       assert.match(source, /^(?:src\/|native-wire\/|bin\/|package(?:-lock)?\.json$)/);
       assert.ok(!source.includes('..'));
       const dir = fs.lstatSync(path.join(root, source)).isDirectory();
-      for (const relative of filesUnder(source)) {
+      const entries = dir ? filesUnder(source).filter(r => allowed(r)) : filesUnder(source);
+      assert.ok(entries.length > 0, 'Docker context excludes: ' + source);
+      for (const relative of entries) {
         assert.ok(allowed(relative), 'Docker context excludes: ' + relative);
         for (let parent = path.posix.dirname(relative); parent !== '.'; parent = path.posix.dirname(parent))
-          assert.ok(includes.includes(parent + '/') || allowed(parent), 'Docker context excludes parent: ' + parent);
+          assert.ok(allowed(parent + '/') || allowed(parent), 'Docker context excludes parent: ' + parent);
         const target = dir ? path.posix.join(dest, path.posix.relative(source, relative))
           : dest.endsWith('/') || dest === '.' || dest === './' ? path.posix.join(dest, path.posix.basename(source)) : dest;
         assert.ok(!output.has(target), 'duplicate COPY destination'); output.set(target, relative);

@@ -3,8 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { productTests } from "./offline-product-tests.mjs";
 export const root = path.resolve(import.meta.dirname, "..");
+export const releaseWalkDirs = [
+  "src/gateway",
+  "test/browser",
+  "test/sdk",
+  "examples",
+];
 const fixed = [
   "package.json",
   "package-lock.json",
@@ -81,22 +88,57 @@ const fixed = [
   "scripts/internal-server.mjs",
   "scripts/internal-service.mjs",
 ];
-function walk(relative) {
-  const stat = fs.lstatSync(path.join(root, relative));
+export function trackedFiles(base = root) {
+  if (!fs.lstatSync(path.join(base, ".git"), { throwIfNoEntry: false }))
+    return null;
+  const inside = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: base,
+    encoding: "utf8",
+  });
+  if (inside.status !== 0 || inside.stdout.trim() !== "true")
+    throw Error("Git worktree check failed: " + base);
+  const listed = spawnSync("git", ["ls-files", "-z"], {
+    cwd: base,
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (listed.status !== 0)
+    throw Error("git ls-files failed: " + (listed.stderr?.trim() || base));
+  return new Set(listed.stdout.split("\0").filter(Boolean));
+}
+function walk(relative, base = root, tracked = null) {
+  const stat = fs.lstatSync(path.join(base, relative));
   if (stat.isSymbolicLink())
     throw Error("Release symlink prohibited: " + relative);
-  return stat.isDirectory()
-    ? fs
-        .readdirSync(path.join(root, relative))
-        .filter((n) => !["test-results", "playwright-report", "__pycache__", ".DS_Store"].includes(n))
-        .sort()
-        .flatMap((n) => walk(relative + "/" + n))
-    : [relative];
+  if (!stat.isDirectory())
+    return !tracked || tracked.has(relative) ? [relative] : [];
+  return fs
+    .readdirSync(path.join(base, relative))
+    .filter(
+      (n) =>
+        ![
+          "test-results",
+          "playwright-report",
+          "__pycache__",
+          ".DS_Store",
+          ".venv",
+        ].includes(n),
+    )
+    .filter((n) => {
+      if (!tracked) return true;
+      const child = relative + "/" + n;
+      if (tracked.has(child)) return true;
+      const prefix = child + "/";
+      for (const item of tracked) if (item.startsWith(prefix)) return true;
+      return false;
+    })
+    .sort()
+    .flatMap((n) => walk(relative + "/" + n, base, tracked));
 }
-export function sourceFiles() {
+export function sourceFiles(base = root) {
+  const tracked = trackedFiles(base);
   const files = [...fixed];
-  for (const dir of ["src/gateway", "test/browser", "test/sdk", "examples"])
-    files.push(...walk(dir));
+  for (const dir of releaseWalkDirs) files.push(...walk(dir, base, tracked));
   files.push(
     ...productTests,
     "test/gateway-fixture.mjs",
@@ -104,29 +146,39 @@ export function sourceFiles() {
   );
   files.push(
     ...fs
-      .readdirSync(path.join(root, "docs/assets"))
+      .readdirSync(path.join(base, "docs/assets"))
       .filter((n) => /^(?:admin-v2-demo-[a-z-]+|mgga)\.(?:png|jpg)$/.test(n))
-      .map((n) => "docs/assets/" + n),
+      .map((n) => "docs/assets/" + n)
+      .filter((n) => !tracked || tracked.has(n)),
   );
-  return [...new Set(files)].sort();
+  const curated = [...new Set(files)].sort();
+  if (tracked) {
+    for (const name of curated)
+      if (!tracked.has(name)) throw Error("Untracked release file: " + name);
+  }
+  return curated;
 }
-export function checkFiles(files) {
+export function checkFiles(files, base = root) {
+  const tracked = trackedFiles(base);
   for (const name of files) {
     if (
       name.includes("..") ||
       path.isAbsolute(name) ||
-      /(?:^|\/)(?:config|research|node_modules|\.pi|test-results|playwright-report|__pycache__|\.DS_Store)(?:\/|$)|\.private\.|\.(?:dylib|so|pem|key|tgz)$/.test(
+      (name !== ".env.example" && /(?:^|\/)\.env(?:$|[^/]*)/.test(name)) ||
+      /(?:^|\/)(?:config|research|node_modules|\.pi|\.venv|test-results|playwright-report|__pycache__|\.DS_Store|oauth-profile[^/]*)(?:\/|$)|\.private\.|\.(?:dylib|so|pem|key|tgz)$/.test(
         name,
       )
     )
       throw Error("Forbidden release path: " + name);
-    const stat = fs.lstatSync(path.join(root, name));
+    if (tracked && !tracked.has(name))
+      throw Error("Untracked release file: " + name);
+    const stat = fs.lstatSync(path.join(base, name));
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)
       throw Error("Unsafe release file: " + name);
     if (/\.(?:png|jpg)$/.test(name)) continue;
-    const text = fs.readFileSync(path.join(root, name), "utf8");
+    const text = fs.readFileSync(path.join(base, name), "utf8");
     if (
-      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bya29\.[\w.-]{15,}|\b1\/\/[\w.-]{20,}|\bGOCSPX-[\w-]{10,}|\/Users\/[^\s/]+\//.test(
+      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bya29\.[\w.-]{15,}|\b1\/\/[\w.-]{20,}|\bGOCSPX-[\w-]{10,}|\bgsk_[A-Za-z0-9_-]{20,}|\/Users\/[^\s/]+\/|\/home\/[^\s/]+\/|\/Applications\/PI-Desktop[.]app/.test(
         text,
       )
     )
@@ -170,6 +222,56 @@ export function checkPackageScripts(scripts, files) {
   }
 }
 
+export function compileDockerignore(dockerignore) {
+  const rules = dockerignore
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  assert.equal(rules.shift(), "**", "Docker context must be default-deny");
+  const compiled = rules.map((rule) => {
+    if (rule.startsWith("!")) {
+      const pattern = rule.slice(1);
+      assert(
+        /^[A-Za-z0-9_./-]+(?:\*\*)?$/.test(pattern) &&
+          (!pattern.includes("*") || pattern.endsWith("/**")),
+        "Unsupported Docker allowlist rule",
+      );
+      return {
+        allow: true,
+        matches: (name) =>
+          pattern === name ||
+          (pattern.endsWith("/**") && name.startsWith(pattern.slice(0, -2))),
+      };
+    }
+    assert(
+      /^\*\*\/[A-Za-z0-9_.*-]+$/.test(rule) && !rule.includes(".."),
+      "Unsupported Docker denylist rule",
+    );
+    const leaf = new RegExp(
+      "^" +
+        rule
+          .slice(3)
+          .split("*")
+          .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+          .join("[^/]*") +
+        "$",
+    );
+    return {
+      allow: false,
+      matches: (name) =>
+        name
+          .split("/")
+          .filter(Boolean)
+          .some((part) => leaf.test(part)),
+    };
+  });
+  return (name) => {
+    let state = false;
+    for (const rule of compiled) if (rule.matches(name)) state = rule.allow;
+    return state;
+  };
+}
+
 // Deliberately validate our literal COPY/default-deny layout, not arbitrary Docker syntax.
 // Fail closed if that layout changes; the real container smoke remains mandatory in CI.
 export function checkDockerRuntime({
@@ -178,11 +280,14 @@ export function checkDockerRuntime({
   dockerignore = fs.readFileSync(path.join(root, ".dockerignore"), "utf8"),
 } = {}) {
   const approved = new Set(files), copied = new Map();
-  const rules = dockerignore.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith("#"));
-  assert.equal(rules.shift(), "**", "Docker context must be default-deny");
-  assert(rules.every(rule => /^![A-Za-z0-9_./-]+(?:\*\*)?$/.test(rule) && (!rule.includes("*") || rule.endsWith("/**"))), "Unsupported Docker allowlist rule");
-  const allowed = rules.map(rule => rule.slice(1));
-  const included = name => allowed.some(rule => rule === name || (rule.endsWith("/**") && name.startsWith(rule.slice(0, -2))));
+  const included = compileDockerignore(dockerignore);
+  for (const forbidden of [
+    "src/gateway/.DS_Store",
+    "src/gateway/.env",
+    "src/gateway/.env.local",
+    "src/gateway/local.private.mjs",
+  ])
+    assert(!included(forbidden), "Docker context leaks untracked pattern: " + forbidden);
   const checkContext = name => {
     assert(included(name), "Docker context excludes: " + name);
     for (let parent = path.posix.dirname(name); parent !== "."; parent = path.posix.dirname(parent))
@@ -190,6 +295,10 @@ export function checkDockerRuntime({
   };
   for (const line of dockerfile.split(/\r?\n/).map(line => line.trim()).filter(line => /^COPY\s/i.test(line))) {
     const parts = line.split(/\s+/).slice(1), destination = parts.pop();
+    while (parts[0]?.startsWith("--")) {
+      const flag = parts.shift();
+      assert(/^--chmod=(?:a\+rX|[0-7]{3,4})$/.test(flag), "Unsupported Docker COPY option: " + flag);
+    }
     assert(parts.length && parts.every(name => /^[A-Za-z0-9_./-]+$/.test(name) && !name.startsWith("--") && !name.split("/").includes("..")), "Unsupported Docker COPY source");
     assert(destination && !path.posix.isAbsolute(destination) && !destination.split("/").includes("..") && /^[A-Za-z0-9_./-]+$/.test(destination), "Unsupported Docker COPY destination");
     assert(parts.length === 1 || destination.endsWith("/"), "Docker multi-source COPY must target a directory");

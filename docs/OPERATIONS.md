@@ -134,7 +134,7 @@ HTTP server bounds: at most `128` concurrent sockets, `64` headers, `30s` reques
 Long reasoning turns on `gemini-argon` defer downstream SSE bytes until the first `2,048` bytes of text, first validated tool call, or turn completion arrives (the gateway never emits fake heartbeat tokens). Ensure your IDE, SDK, or reverse-proxy stream-idle timeout exceeds your configured gateway `timeoutMs` (default `180,000 ms`). For example, if using PI-Desktop with a 5-minute (`300,000 ms`) gateway timeout, quit any running instance and launch with a matching sidecar idle ceiling:
 
 ```sh
-PI_DESKTOP_STREAM_IDLE_TIMEOUT_MS=360000 /Applications/PI-Desktop.app/Contents/MacOS/PI-Desktop
+open -a PI-Desktop --env PI_DESKTOP_STREAM_IDLE_TIMEOUT_MS=360000
 ```
 
 Client retries remain caller-controlled: the gateway never records a local replay ban on failed prompts, sends `X-Should-Retry: false` only on exhausted zero-output `GENERATION_FAILED` responses (Chat `422` / Responses `400`), and treats account preference as soft affinity rather than a hard session lock. Account management actions (rename, toggle, delete, quota/subscription refresh, terms acceptance) remain available even while generation is in flight.
@@ -163,7 +163,7 @@ To publish on a custom host port, set `GATEWAY_PUBLISHED_PORT` in your untracked
 GATEWAY_PUBLISHED_PORT=28989
 ```
 
-`docker compose up -d` maps `127.0.0.1:28989` to container port `18989` and derives `GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:28989` automatically (unless overridden by an explicit `GATEWAY_PUBLIC_ORIGIN`, such as an `https://` reverse-proxy URL). When using `docker run` directly instead of Compose, pass `-e GATEWAY_PUBLIC_ORIGIN=...` alongside `GATEWAY_ADMIN_PASSWORD`. Note that Google OAuth loopback callbacks always target `localhost:18765`; on a headless remote host, use SSH local port forwarding (`-L 18989:127.0.0.1:18989 -L 18765:127.0.0.1:18765`) during sign-in rather than exposing port `18765` publicly.
+`docker compose up -d` maps `127.0.0.1:28989` to container port `18989`, enables the container bridge listener (`GATEWAY_HOST=0.0.0.0`, `GATEWAY_CALLBACK_HOST=0.0.0.0`, `GATEWAY_ALLOW_REMOTE=1`), and derives `GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:28989` automatically (unless overridden by an explicit `GATEWAY_PUBLIC_ORIGIN`, such as an `https://` reverse-proxy URL). The image itself defaults to `GATEWAY_HOST=127.0.0.1` and `GATEWAY_CALLBACK_HOST=127.0.0.1` without `GATEWAY_ALLOW_REMOTE=1` so an unprefixed `-p` flag cannot expose plaintext HTTP on LAN. When using `docker run` directly instead of Compose, bind host loopback explicitly alongside container hardening and bridge flags (`-p 127.0.0.1:18989:18989 -p 127.0.0.1:18765:18765 --init --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m -e GATEWAY_HOST=0.0.0.0 -e GATEWAY_CALLBACK_HOST=0.0.0.0 -e GATEWAY_ALLOW_REMOTE=1 -e GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:18989 -e GATEWAY_ADMIN_PASSWORD`). Note that Google OAuth loopback callbacks always target `localhost:18765`; on a headless remote host, use SSH local port forwarding (`-L 18989:127.0.0.1:18989 -L 18765:127.0.0.1:18765`) during sign-in rather than exposing port `18765` publicly.
 
 如需更改對外連接埠，可在私密 `.env` 設定 `GATEWAY_PUBLISHED_PORT=28989`，Compose 會自動同步對映與 `GATEWAY_PUBLIC_ORIGIN`（容器內部仍監聽 `18989`；OAuth callback 固定為本機 `18765`，遠端主機請透過 SSH port forwarding 完成登入，切勿公開曝露 `18765`）。容器以 `uid 1000`、唯讀根目錄、獨立 `/data` volume 與 `16 MiB` `noexec,nosuid` `/tmp` 運行；停止服務請用 `docker compose stop`，避免誤用 `down -v` 刪除持久化憑證。
 

@@ -43,16 +43,6 @@ export function installNetworkGuard() {
   syncBuiltinESMExports();
   return { allowed, get blocked() { return blocked; } };
 }
-export async function loadPiRuntime() {
-  const dir = process.env.PI_RUNTIME_CHUNKS || '/Applications/PI-Desktop.app/Contents/Resources/agent-runtime/chunks';
-  // These aliases identify the installed Desktop bundle used in this investigation.
-  // Fail explicitly when the bundle changes; do not silently substitute a fake client.
-  const file = path.join(dir, 'chunk-L6KWFN3U.js');
-  const { a: SettingsManager, f: SessionManager, g: ModelRuntime, h: ResourceLoader, i: createAgentSession, j: sdk } = await import(pathToFileURL(file));
-  assert.equal(typeof createAgentSession, 'function');
-  assert.equal(typeof sdk.shouldCompact, 'function');
-  return { SettingsManager, SessionManager, ModelRuntime, ResourceLoader, createAgentSession, sdk, file, sha256: sha256(file) };
-}
 export async function gatewayFixture({ scratch, guard, respond, onBody, maxRequests = 16, recovery = false }) {
   const [{ StateStore, defaults }, { createGateway }, { lengthDelimited: m, varintField: v }, { protocolError }] = await Promise.all([
     import(pathToFileURL(path.join(ROOT, 'src/gateway/state.mjs'))),
@@ -131,26 +121,4 @@ export async function gatewayFixture({ scratch, guard, respond, onBody, maxReque
   guard.allowed.add(base);
   return { dir, base, key: key.key, app, store, requests, wires, get attempts() { return attempts; },
     async close() { app.server.closeAllConnections?.(); await app.close(); guard.allowed.delete(base); fs.rmSync(dir, { recursive: true, force: true }); } };
-}
-export async function piSession({ runtime, fixture, window = 256000, seed, tools = [], settings = {} }) {
-  const { SettingsManager, SessionManager, ModelRuntime, ResourceLoader, createAgentSession } = runtime;
-  const credentials = { async list() { return []; }, async read() { return undefined; }, async modify() { throw Error('NO_CREDENTIAL_WRITE'); }, async delete() { throw Error('NO_CREDENTIAL_DELETE'); } };
-  const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
-  modelRuntime.registerProvider('offline-gateway', { baseUrl: fixture.base + '/v1', apiKey: fixture.key, api: 'openai-completions', models: [
-    { id: 'gemini-argon', name: 'Offline fixture', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: window, maxTokens: 16000 },
-  ] });
-  await modelRuntime.refresh({ allowNetwork: false });
-  const model = modelRuntime.getModel('offline-gateway', 'gemini-argon');
-  const manager = SessionManager.inMemory(fixture.dir);
-  await seed?.(manager, model);
-  const settingsManager = SettingsManager.inMemory({ cacheWarming: 'off', ...settings }, { projectTrusted: false });
-  const loader = new ResourceLoader({ cwd: fixture.dir, agentDir: process.env.PI_CODING_AGENT_DIR, settingsManager,
-    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    systemPrompt: 'Offline synthetic client acceptance. Preserve the synthetic task and constraints.', appendSystemPrompt: [] });
-  await loader.reload();
-  assert.equal(loader.getExtensions().extensions.length, 0);
-  const { session } = await createAgentSession({ cwd: fixture.dir, agentDir: process.env.PI_CODING_AGENT_DIR, modelRuntime, model,
-    settingsManager, sessionManager: manager, resourceLoader: loader, noTools: 'all', customTools: tools, tools: tools.map(t => t.name), thinkingLevel: 'high' });
-  await session.bindExtensions({ mode: 'rpc' });
-  return { session, manager, model, settingsManager, async close() { await session.abort(); session.dispose(); } };
 }
