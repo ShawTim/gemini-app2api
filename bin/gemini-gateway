@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+/** Release CLI. Foreground lifecycle; never launches or hooks a desktop App. */
+import { StateStore, fault } from "../src/gateway/state.mjs";
+import { loadLocalEnvironment } from "../src/gateway/environment.mjs";
+const [command = "help", ...args] = process.argv.slice(2);
+async function input() {
+  let bytes = 0,
+    text = "";
+  for await (const b of process.stdin) {
+    bytes += b.length;
+    if (bytes > 1024 * 1024) throw fault("INPUT_TOO_LARGE");
+    text += b;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw fault("INVALID_JSON");
+  }
+}
+try {
+  loadLocalEnvironment();
+  if (command === "start") {
+    if (args.length) throw fault("UNSUPPORTED_ARGUMENT");
+    await import("../src/gateway-server.mjs");
+  } else if (command === "init") {
+    if (args.length) throw fault("UNSUPPORTED_ARGUMENT");
+    const store = new StateStore();
+    console.log(
+      JSON.stringify({ initialized: true, directory: store.directory }),
+    );
+  } else if (command === "import-profile") {
+    const store = new StateStore();
+    store.lock();
+    try {
+      store.importProfile(await input());
+      console.log(JSON.stringify({ profileImported: true }));
+    } finally {
+      store.unlock();
+    }
+  } else if (command === "create-key") {
+    const store = new StateStore();
+    store.lock();
+    try {
+      console.log(JSON.stringify(store.createKey(args.join(" ") || "CLI key")));
+    } finally {
+      store.unlock();
+    }
+  } else if (command === "reset-admin") {
+    throw fault("ADMIN_PASSWORD_MANAGED_BY_ENV", 409);
+  } else if (command === "status") {
+    const origin =
+      process.env.GATEWAY_PUBLIC_ORIGIN ||
+      `http://127.0.0.1:${process.env.PORT || 18989}`;
+    const res = await fetch(new URL("/ready", origin), {
+      signal: AbortSignal.timeout(3000),
+      redirect: "error",
+    });
+    console.log(JSON.stringify(await res.json()));
+    if (!res.ok) process.exitCode = 1;
+  } else if (command === "help")
+    console.log(`Gemini App2API · Native Direct Gateway
+
+  gemini-gateway init           Initialize private state; admin password comes from .env / environment
+  gemini-gateway import-profile Read official OAuth client profile JSON on stdin (server stopped)
+  gemini-gateway start          Foreground server; Ctrl-C / SIGTERM for graceful shutdown
+  gemini-gateway status         Readiness only; never invokes a model
+  gemini-gateway create-key LABEL  Print a new API key ONCE (server stopped)
+  Admin password: edit untracked .env GATEWAY_ADMIN_PASSWORD and restart (no state-password reset)
+
+State: GATEWAY_DATA_DIR (default ~/.gemini-app2api), private and independent of legacy config.
+Google login: open /admin; enter the configured admin password, or skip it on local passwordless mode. You perform Google/MFA.
+No App, dylib, IPC or tool executor. Tools use an explicitly disclosed prompt protocol.`);
+  else throw fault("UNKNOWN_COMMAND");
+} catch (error) {
+  console.error(
+    JSON.stringify({
+      error: {
+        code: /^[A-Z0-9_]+$/.test(error.code ?? "") ? error.code : "CLI_FAILED",
+      },
+    }),
+  );
+  process.exitCode = 1;
+}

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/ShawTim/gemini-app2api/security/policy
+    about: Report credential exposure or another vulnerability privately, as described in SECURITY.md.

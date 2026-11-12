@@ -1,0 +1,77 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { fixture } from './gateway-fixture.mjs';
+import { parse, varintField as integer, lengthDelimited as message } from '../native-wire/protobuf.mjs';
+import { frameGrpcMessage } from '../native-wire/robin-current.mjs';
+import { acceptGoogleMainTerms, termsRpc, TERMS_VERSION_RPC, TERMS_ACCEPT_RPC } from '../src/gateway/terms.mjs';
+
+test('explicit OAuth consent accepts only returned main terms; failure/cancel retain login without generation or touching other accounts', async t => {
+  const calls = []; let rejectAccept = false, holdVersion = false, omitNumericVersion = false;
+  const connect = origin => {
+    assert.equal(origin, 'https://robinfrontend-pa.googleapis.com');
+    const client = new EventEmitter(); client.destroy = () => {};
+    client.request = headers => {
+      const request = new EventEmitter(); request.close = () => {}; request.rstCode = 0;
+      request.end = framed => {
+        assert.equal(headers.authorization, 'Bearer synthetic-login-access');
+        const path = headers[':path'], fields = parse(framed.subarray(5)); calls.push({ path, fields });
+        if (path === TERMS_VERSION_RPC && holdVersion) return;
+        queueMicrotask(() => {
+          request.emit('response', { ':status': 200 });
+          const payload = path === TERMS_VERSION_RPC ? Buffer.concat([integer(1, 17), ...(omitNumericVersion ? [] : [integer(2, 25)]), message(3, Buffer.alloc(0))]) : Buffer.alloc(0);
+          request.emit('data', frameGrpcMessage(payload));
+          request.emit('trailers', { 'grpc-status': path === TERMS_ACCEPT_RPC && rejectAccept ? '9' : '0', ...(path === TERMS_ACCEPT_RPC && rejectAccept ? { 'grpc-message': encodeURIComponent('Synthetic acceptance rejected for synthetic@example.invalid') } : {}) }); request.emit('end');
+        });
+      };
+      return request;
+    };
+    return client;
+  };
+  const f = await fixture({ accountCount: 1, termsAccept: (token, options) => acceptGoogleMainTerms(token, { ...options, rpc: (token, path, payload, { signal }) => termsRpc(token, path, payload, { signal, connect }) }) });
+  t.after(f.close);
+  const prior = structuredClone(f.store.data.accounts[0]);
+  f.app.accounts.login = async () => ({ authorizationUrl: 'https://accounts.google.com/o/oauth2/auth?synthetic', done: Promise.resolve({ accessToken: 'synthetic-login-access', refreshToken: 'synthetic-login-refresh', expiresInSeconds: 3600 }), close() {} });
+  const begin = async () => { const r = await f.admin('accounts/login', { method: 'POST', body: { acceptTerms: true } }); assert.equal(r.status, 201); return (await r.json()).flowId; };
+  const settle = async id => { for (let i = 0; i < 50 && f.app.accounts.flow(id).status === 'pending'; i++) await new Promise(resolve => setImmediate(resolve)); return f.app.accounts.flow(id); };
+  assert.equal(calls.length, 0);
+  const first = await begin();
+  assert.equal((await settle(first)).status, 'completed');
+  assert.deepEqual(calls.map(c => c.path), [TERMS_VERSION_RPC, TERMS_ACCEPT_RPC]);
+  assert.deepEqual(calls[0].fields.map(f => f.number), [1, 2]);
+  assert.deepEqual(calls[1].fields.map(f => f.number), [4, 5, 6, 7, 10]);
+  const metadata = parse(calls[0].fields.find(f => f.number === 2).payload);
+  assert.equal(metadata.find(f => f.number === 4).payload[0], 21);
+  assert.equal(metadata.find(f => f.number === 5).payload[0], 1);
+  assert.deepEqual(calls[1].fields.find(f => f.number === 7).payload, calls[0].fields.find(f => f.number === 2).payload);
+  assert.equal(calls[1].fields.find(f => f.number === 5).payload[0], 21);
+  assert.equal(calls[1].fields.find(f => f.number === 6).payload[0], 25);
+  assert.equal(calls[1].fields.some(f => f.number === 1), false);
+  assert.equal(calls[1].fields.find(f => f.number === 4).payload.toString(), 'gemini-app2api/1.0');
+  const added = f.store.data.accounts[1]; assert.equal(added.terms.status, 'accepted'); assert.equal(added.terms.version, 25);
+  assert.equal(f.app.accounts.list()[1].authenticationStatus, 'signed_in');
+  assert.ok(Object.values(f.app.accounts.list()[1].modelStates).every(s => s.state === 'unverified'));
+  assert.deepEqual(f.store.data.accounts[0], prior); assert.equal(f.seen.length, 0);
+  rejectAccept = true;
+  const failed = await begin(), failure = await settle(failed);
+  assert.equal(failure.status, 'failed'); assert.equal(failure.errorCode, 'TOS_PRECONDITION_REQUIRED');
+  assert.equal(failure.termsStatus, 'error');
+  assert.equal(failure.termsEvidence.operation, 'accept'); assert.equal(failure.termsEvidence.grpcStatus, 9);
+  assert.match(failure.termsEvidence.upstreamMessage, /\[email redacted\]/);
+  assert.equal(added.terms.evidence.grpcStatus, 9);
+  assert.equal(f.store.data.accounts.length, 2); assert.equal(added.terms.status, 'error');
+  assert.equal(f.app.accounts.list()[1].authenticationStatus, 'signed_in');
+  assert.equal(calls.length, 4); assert.equal(f.seen.length, 0);
+  holdVersion = true;
+  const cancelled = await begin();
+  for (let i = 0; i < 50 && calls.length < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.app.accounts.flow(cancelled).phase, 'terms');
+  f.app.accounts.cancelFlow(cancelled); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.app.accounts.flow(cancelled).status, 'cancelled'); assert.equal(calls.length, 5);
+  assert.deepEqual(f.store.data.accounts[0], prior); assert.equal(f.seen.length, 0);
+  holdVersion = false; omitNumericVersion = true;
+  const missingNumber = await begin(), missing = await settle(missingNumber);
+  assert.equal(missing.status, 'failed'); assert.equal(missing.errorCode, 'TOS_VERSION_MISSING');
+  assert.equal(calls.length, 6); assert.equal(calls.at(-1).path, TERMS_VERSION_RPC);
+  assert.deepEqual(f.store.data.accounts[0], prior); assert.equal(f.seen.length, 0);
+});

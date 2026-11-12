@@ -1,0 +1,90 @@
+name: Bug report
+description: Something behaves differently from the documented contract.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write in English or 繁體中文 — either is fine.
+
+        **Never paste credentials.** That includes `.env` contents, OAuth profiles or
+        tokens, the admin password, client API keys, and Google account identifiers or
+        email addresses. Redact logs before pasting them.
+
+        For credential exposure or other security issues, use the Security link instead
+        of a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, including the HTTP status and any client-side error.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Which documented behaviour or contract you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: |
+        The smallest request or click path that shows the problem. Paste the request
+        shape with model, API style and streaming mode, not your API key.
+    validations:
+      required: true
+  - type: dropdown
+    id: api
+    attributes:
+      label: Endpoint / area
+      options:
+        - POST /v1/chat/completions (JSON)
+        - POST /v1/chat/completions (SSE)
+        - POST /v1/responses (JSON)
+        - POST /v1/responses (SSE)
+        - GET /v1/models
+        - Admin console
+        - CLI (bin/gemini-gateway)
+        - Docker / Compose
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model alias
+      placeholder: gemini-argon
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "22.x"
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Docker
+        - Windows / WSL
+        - Other
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted output
+      description: Relevant server log lines or response bodies, with credentials and account identifiers removed.
+      render: text
+  - type: checkboxes
+    id: safe
+    attributes:
+      label: Confirmation
+      options:
+        - label: I removed every credential, token, API key, and account identifier from this report.
+          required: true
+        - label: I am reporting ordinary behaviour, not a security vulnerability.
+          required: true

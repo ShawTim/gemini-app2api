@@ -1,0 +1,85 @@
+name: Release checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  current-contract:
+    name: Current contract suite
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run only reviewed synthetic contract checks
+        run: node scripts/run-current-contract.mjs --run
+        env:
+          PI_SCRATCH_DIR: ${{ runner.temp }}
+      - name: Check Docker COPY import closure without building an image
+        run: node --import ./scripts/offline-contract-network-guard.mjs test/docker-copy-closure-offline.mjs
+        env:
+          PI_SCRATCH_DIR: ${{ runner.temp }}
+      - name: Preserve scoped reports separately from legacy suite results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-contract-${{ matrix.os }}
+          path: ${{ runner.temp }}/current-contract-*/
+          if-no-files-found: warn
+  offline:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Verify staged product runner isolation
+        run: node scripts/verify-offline-product-runner.mjs
+        env:
+          PI_SCRATCH_DIR: ${{ runner.temp }}
+      - name: Gate the historical entrypoint on reviewed tracked tests
+        run: node --import ./scripts/offline-contract-network-guard.mjs test/historical-entry-gate-offline.mjs
+        env:
+          PI_SCRATCH_DIR: ${{ runner.temp }}
+      - name: Run reviewed product tests from a clean staged source
+        run: node scripts/run-offline-product.mjs --run
+        env:
+          PI_SCRATCH_DIR: ${{ runner.temp }}
+      - name: Preserve product reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-product-${{ matrix.os }}
+          path: ${{ runner.temp }}/offline-product-*/result.json
+          if-no-files-found: warn
+      - run: npm run test:release
+      - run: node bin/gemini-gateway help
+  browser-sdk-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: python -m pip install -r test/sdk/requirements.txt
+      - run: npm run test:browser
+      - run: node scripts/sdk-smoke.mjs
+      - run: docker build -t gemini-app2api-smoke .
+      - name: Docker runtime and actual Compose startup smoke
+        run: node scripts/docker-smoke.mjs
