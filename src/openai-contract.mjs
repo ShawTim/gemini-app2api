@@ -10,9 +10,9 @@ import { RESPONSE_TOOL_IDENTITIES, normalizeResponsesTools, responsesCallFields 
 import { toResponsesUsage } from './openai-usage.mjs';
 
 const fail = (code, status = 400) => { throw protocolError(code, status); };
-export const NATIVE_MODELS = Object.freeze(['gemini-argon', 'gemini-flash', 'gemini-flash-lite']);
-// Native ModeCategory wire values: ULTRA=8, FAST=1, FLASH_LITE=6. Never auto/Plus.
-export const MODEL_MODES = Object.freeze({ 'gemini-argon': 8, 'gemini-flash': 1, 'gemini-flash-lite': 6 });
+export const NATIVE_MODELS = Object.freeze(['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
+// Native ModeCategory wire values: ULTRA=8, FAST=1 (Gemini 4 Hydrogen), FLASH_LITE=6. Never auto/Plus.
+export const MODEL_MODES = Object.freeze({ 'gemini-argon': 8, 'gemini-hydrogen': 1, 'gemini-flash-lite': 6 });
 // Ordinary effort hints must never opt into native asynchronous Deep Think (3).
 // Extended thinking (2) is the existing normal-turn default, not an ordered scale.
 export const REASONING_EFFORT_LEVELS = Object.freeze({ none: 0, minimal: 0, low: 1, medium: 2, high: 2, xhigh: 2 });

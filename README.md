@@ -112,7 +112,7 @@ Point any supported **OpenAI-compatible** client at your gateway:
 |---|---|
 | **Base URL** | `http://127.0.0.1:18989/v1` (or your HTTPS reverse-proxy URL `/v1`) |
 | **API Key** | Client key generated in **API keys** (never your admin password or Google token) |
-| **Model** | `gemini-argon` (Pro reasoning/coding), `gemini-flash`, or `gemini-flash-lite` |
+| **Model** | `gemini-argon` (Pro reasoning/coding), `gemini-hydrogen` (Gemini 4 Hydrogen), or `gemini-flash-lite` |
 | **Endpoints** | `/v1/chat/completions` or `/v1/responses` ([supported contract](docs/API_SUPPORT.md)) |
 
 Verify model discovery (zero quota used):
@@ -137,7 +137,7 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 <summary><strong>Cursor</strong></summary>
 
 1. Open **Cursor Settings → Models**.
-2. Add custom model `gemini-argon` (and optionally `gemini-flash`).
+2. Add custom model `gemini-argon` (and optionally `gemini-hydrogen`).
 3. Enable **Override OpenAI Base URL**, set it to `http://127.0.0.1:18989/v1` (note: Cursor requires a publicly reachable HTTPS tunnel/reverse-proxy if its cloud relay mediates requests in your mode), and paste your gateway client API key.
 
 </details>
@@ -175,7 +175,7 @@ wire_api = "responses"
 <details>
 <summary><strong>Cherry Studio / Open WebUI / OpenAI SDKs</strong></summary>
 
-- **Cherry Studio / Open WebUI:** Add an OpenAI provider with API Host `http://127.0.0.1:18989/v1`, paste your gateway client key, and fetch `/v1/models` (`gemini-argon`, `gemini-flash`, `gemini-flash-lite`).
+- **Cherry Studio / Open WebUI:** Add an OpenAI provider with API Host `http://127.0.0.1:18989/v1`, paste your gateway client key, and fetch `/v1/models` (`gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite`).
 - **Official JS & Python SDKs:** See runnable caller-tool loop examples in [`examples/client.mjs`](examples/client.mjs) and [`examples/client.py`](examples/client.py). Always replay complete conversation history (including `tool_call_id` / `call_id` pairs) on every turn.
 
 </details>
@@ -187,7 +187,7 @@ wire_api = "responses"
 | Model Alias | Role & Tier | Native Mode | Advertised Context Metadata |
 |---|---|---:|---|
 | **`gemini-argon`** | **Flagship Pro-tier mode** for complex coding, architecture, and multi-step agent loops | `8` | `context_window: 128000` (advisory client budget) |
-| **`gemini-flash`** | Low-latency everyday reasoning and fast interactive tasks | `FAST` (`1`) | Not advertised |
+| **`gemini-hydrogen`** | **Gemini 4 Hydrogen** for low-latency everyday reasoning and fast interactive tasks (upstream Hydrogen attribution verified) | `FAST` (`1`) | Not advertised |
 | **`gemini-flash-lite`** | High-throughput lightweight tasks | `6` | Not advertised |
 
 > Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. `context_window: 128000` is an advisory hint for client-side context management—not an enforced token cap or upstream guarantee.

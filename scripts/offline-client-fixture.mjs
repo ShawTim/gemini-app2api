@@ -59,8 +59,8 @@ export async function gatewayFixture({ scratch, guard, respond, onBody, maxReque
   const accounts = { list: () => [{ id: 'synthetic-account', enabled: true, status: 'ready', authenticationStatus: 'signed_in' }],
     getValidAccessToken: async () => 'synthetic-never-network', recordProviderSuccess() {}, recordUpstreamError() {}, close() {} };
   const str = (n, s) => m(n, Buffer.from(s));
-  const frame = (text, complete) => m(1003, m(1, Buffer.concat([
-    m(1, Buffer.concat([str(1, 'synthetic-response'), m(2, str(1, text))])), v(9, complete ? 1 : 0), v(41, 8), v(42, 2) ])));
+  const frame = (text, complete, mode = 8) => m(1003, m(1, Buffer.concat([
+    m(1, Buffer.concat([str(1, 'synthetic-response'), m(2, str(1, text))])), v(9, complete ? 1 : 0), ...(mode === 1 ? [str(30, 'Used 4 Hydrogen High model')] : []), v(41, mode), v(42, 2) ])));
   const requests = [], wires = [];
   let attempts = 0;
   const app = createGateway({ store, accounts, allowFailover: false, allowQuotaFailover: recovery, allowEmptyResponseFailover: recovery, allowAutomaticRecovery: recovery,
@@ -73,7 +73,7 @@ export async function gatewayFixture({ scratch, guard, respond, onBody, maxReque
         if (descriptor.emitHeaders) yield { type: 'headers', httpStatus: 200 };
         const snapshots = descriptor.snapshots ?? (descriptor.text !== undefined ? [descriptor.text] : []);
         for (let i = 0; i < snapshots.length; i++) {
-          yield { type: 'frame', bytes: frame(snapshots[i], !descriptor.error && i === snapshots.length - 1) };
+          yield { type: 'frame', bytes: frame(snapshots[i], !descriptor.error && i === snapshots.length - 1, options.modeCategory ?? 8) };
           await sleep(descriptor.delayMs ?? 5);
         }
         if (descriptor.error) throw protocolError(descriptor.error, descriptor.status ?? 502);

@@ -69,7 +69,7 @@ test('soft-error recovery requires clean terminal requested-model evidence and e
     { outputFailureReason: 'unknown' }, { outputFailureSource: 'native_status' }, { outputToolCalls: 1 }, { phase: 'read' }]) {
     assert.equal(automaticRecoveryKind(error(extra), 'gemini-argon'), null, JSON.stringify(extra));
   }
-  assert.equal(automaticRecoveryKind(error(), 'gemini-flash'), null);
+  assert.equal(automaticRecoveryKind(error(), 'gemini-hydrogen'), null);
 });
 
 test('reset, downgrade, refusal and incomplete evidence take precedence over a failure-looking answer', async () => {

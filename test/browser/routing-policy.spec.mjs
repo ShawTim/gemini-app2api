@@ -13,7 +13,7 @@ test('deployment-excluded account remains visible and signed in, without any pro
     await expect(b).toBeVisible(); await expect(b.locator('[data-routing-excluded]')).toHaveText('Not used for requests');
     await b.locator('[data-account-details] > summary').click();
     await expect(b.locator('.definition')).toContainText('Signed in');
-    await expect(b.locator('[data-provider-model="gemini-flash"]')).toHaveAttribute('data-provider-state', 'unverified');
+    await expect(b.locator('[data-provider-model="gemini-hydrogen"]')).toHaveAttribute('data-provider-state', 'unverified');
     await expect(b.locator('.daily-test [data-action="test-model"]')).toBeDisabled();
     await page.locator('#language-toggle').click(); await expect(b.locator('[data-routing-excluded]')).toHaveText('不會用於請求');
     expect(f.seen).toHaveLength(0); expect(providerRequests).toBe(0); expect(JSON.stringify(f.store.data.accounts[1])).toBe(before);

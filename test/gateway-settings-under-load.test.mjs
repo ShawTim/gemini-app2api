@@ -84,7 +84,7 @@ test('PATCH settings during generation is durable and concurrent requests retain
   assert.ok(f.app.overview().requests.every(r => r.cancellationSource === undefined));
 });
 
-test('legacy compaction keys stay inert during settings saves and explicit Flash generation still works', async t => {
+test('legacy compaction keys stay inert during settings saves and explicit Hydrogen generation still works', async t => {
   const f = await fixture({ allowFailover: false });
   const gate = gated(); t.after(async () => { gate.release(); await f.close(); });
   Object.assign(f.store.data.settings, { contextCompaction: true, compactionThresholdBytes: 16384 }); f.store.save();
@@ -93,8 +93,8 @@ test('legacy compaction keys stay inert during settings saves and explicit Flash
   assert.equal(Object.hasOwn(restored.settings(), 'contextCompaction'), false);
   assert.deepEqual(fs.readFileSync(f.store.file), bytes, 'loading legacy state must not rewrite it');
   stub(f, gate);
-  const pending = send(f, 'explicit_flash_settings', 'gemini-flash');
-  await until(() => f.seen.length === 1, 'explicit Flash turn');
+  const pending = send(f, 'explicit_hydrogen_settings', 'gemini-hydrogen');
+  await until(() => f.seen.length === 1, 'explicit Hydrogen turn');
   assert.equal(f.seen[0].modeCategory, 1);
   // Authentication legitimately updates key lastUsedAt before the settings save.
   const accounts = structuredClone(f.store.data.accounts), keys = structuredClone(f.store.data.keys);
@@ -108,7 +108,7 @@ test('legacy compaction keys stay inert during settings saves and explicit Flash
   const done = await pending; assert.equal(done.status, 200); noCompaction(done, f); await done.text();
   assert.equal(f.app.overview().requests[0].cancellationSource, undefined);
   await until(() => f.app.overview().metrics.active === 0);
-  const after = await send(f, 'explicit_flash_settings');
+  const after = await send(f, 'explicit_hydrogen_settings');
   assert.equal(after.status, 200); noCompaction(after, f); await after.text();
   assert.deepEqual(f.seen.map(x => x.modeCategory), [1, 8]); fullHistory(f);
 });

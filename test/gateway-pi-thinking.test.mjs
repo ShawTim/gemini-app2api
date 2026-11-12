@@ -9,7 +9,7 @@ import { fixture } from './gateway-fixture.mjs';
 const user = { role: 'user', content: 'Reply OK.' };
 test('PI high and xhigh stay on normal extended thinking, never async Deep Think', async t => {
   const f = await fixture({ turns: ['OK', 'OK'], allowFailover: false }); t.after(() => f.close());
-  for (const model of ['gemini-argon', 'gemini-flash']) {
+  for (const model of ['gemini-argon', 'gemini-hydrogen']) {
     const r = await f.api('/v1/chat/completions', { method: 'POST', body: { model, messages: [user], reasoning_effort: 'high', max_completion_tokens: 16000 } });
     assert.equal(r.status, 200); assert.equal((await r.json()).choices[0].message.content, 'OK');
     assert.equal(f.seen.at(-1).thinkingLevel, 2);
@@ -39,7 +39,7 @@ test('unsupported async result is explicit incomplete output and never retried b
   const stub = "I'm on it. Responses with Deep Think can take some time, so check back in a bit.\n\n http://googleusercontent.com/agentic_processing_chip/0";
   const f = await fixture({ turns: [stub, stub, 'Must not run'], allowFailover: false }); t.after(() => f.close());
   const client = new OpenAI({ baseURL: f.base + '/v1', apiKey: f.key.key, maxRetries: 2, timeout: 5000 });
-  const { data, response } = await client.chat.completions.create({ model: 'gemini-flash', messages: [user], reasoning_effort: 'high' }).withResponse();
+  const { data, response } = await client.chat.completions.create({ model: 'gemini-hydrogen', messages: [user], reasoning_effort: 'high' }).withResponse();
   assert.equal(response.status, 200); assert.equal(response.headers.get('x-gemini-incomplete'), 'true');
   assert.equal(data.status, 'incomplete'); assert.equal(data.choices[0].finish_reason, null);
   assert.equal(data.error.code, 'NATIVE_ASYNC_RESPONSE_UNSUPPORTED'); assert.equal(data.incomplete_details.code, 'NATIVE_ASYNC_RESPONSE_UNSUPPORTED');
@@ -61,7 +61,7 @@ test('zero-output stream resets end as terminal GENERATION_FAILED and SDK retrie
   const failure = Object.assign(new Error('synthetic stream reset'), { code: 'NATIVE_STREAM_RESET' });
   const f = await fixture({ turns: [failure], allowFailover: false }); t.after(() => f.close());
   const client = new OpenAI({ baseURL: f.base + '/v1', apiKey: f.key.key, maxRetries: 2, timeout: 5000 });
-  await assert.rejects(client.chat.completions.create({ model: 'gemini-flash', messages: [user], reasoning_effort: 'high' }), e =>
+  await assert.rejects(client.chat.completions.create({ model: 'gemini-hydrogen', messages: [user], reasoning_effort: 'high' }), e =>
     e.status === 422 && e.code === 'GENERATION_FAILED' && e.type === 'server_error' && e.error?.upstream_code === 'NATIVE_STREAM_RESET' &&
     e.error?.upstream_status === 502 && e.error?.client_action === 'stop_turn' && e.headers.get('x-should-retry') === 'false');
   assert.equal(f.seen.length, 1);

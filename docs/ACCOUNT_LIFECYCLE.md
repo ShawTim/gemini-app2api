@@ -47,7 +47,7 @@ Automated consent tests (`test/gateway-onboarding.test.mjs` and `test/browser/te
 | `rejected` | A model-scoped upstream precondition rejection was observed. | Diagnostic only; no local admission block. |
 | `blocked`, `scope: account` | Legacy unscoped rejection metadata. | Diagnostic only; not an eligibility veto. |
 
-登入、模型證據及本地路由資格分開顯示。`verified` 只表示曾經成功，有時間及模式證據，唔保證將來永遠可用。舊錯誤冇模型欄位時會明確標示，而唔捏造 Flash／Argon 分別測過。
+登入、模型證據及本地路由資格分開顯示。`verified` 只表示曾經成功，有時間及模式證據，唔保證將來永遠可用。舊錯誤冇模型欄位時會明確標示，而唔捏造 Hydrogen／Argon 分別測過。
 
 Neither an API caller nor an admin `PATCH` can mark a model verified: the request normalizer rejects caller state fields, and account `PATCH` rejects provider-state fields. Only the backend records a validated model outcome. Re-signing into Google does not silently clear an observed upstream rejection.
 
@@ -60,7 +60,7 @@ API caller 或 admin `PATCH` 都唔可以自行填「已驗證」。只有後端
 - `defaultModel`, `eligibleAccounts`, `verifiedAccounts`, `upstreamVerified`
 - `automaticModelProbes: false`
 
-A newly signed-in account can produce `ready: true` with `upstreamVerified: false`. Readiness `503` means no eligible default-model account exists under local auth, enablement, routing, and capacity constraints—not that a historical rejection must be manually cleared. Counts reflect local observations rather than background billable probes, and a `gemini-flash` success never manufactures `gemini-argon` verification.
+A newly signed-in account can produce `ready: true` with `upstreamVerified: false`. Readiness `503` means no eligible default-model account exists under local auth, enablement, routing, and capacity constraints—not that a historical rejection must be manually cleared. Counts reflect local observations rather than background billable probes, and a `gemini-hydrogen` success never manufactures `gemini-argon` verification.
 
 ## No manual model unlock / 無模型人手解鎖流程
 

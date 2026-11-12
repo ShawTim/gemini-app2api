@@ -161,7 +161,7 @@ function sdkFixture() {
     openTurn: (_token, options) => {
       const hasResult = canonical.messages.at(-1).role === 'tool';
       const output = hasResult ? 'Based on caller: ' + canonical.messages.at(-1).content : canonical.tools.length ? '```tool_call\n{"name":"lookup","arguments":{"key":"fixture"}}\n```' : 'Hello 世界';
-      const bytes = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from(output)))), v(41, options.modeCategory), v(42, options.thinkingLevel), v(9, 1)])));
+      const bytes = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from(output)))), ...(options.modeCategory === 1 ? [m(30, Buffer.from('Used 4 Hydrogen High model'))] : []), v(41, options.modeCategory), v(42, options.thinkingLevel), v(9, 1)])));
       return { events: { async *[Symbol.asyncIterator]() { yield { type: 'frame', bytes }; yield { type: 'end', httpStatus: 200, grpcStatus: 0 }; } }, cancel() {} };
     },
   });

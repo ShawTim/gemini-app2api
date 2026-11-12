@@ -7,10 +7,10 @@ import { lengthDelimited as m, varintField as v } from '../protobuf.mjs';
 const tools = [{ type: 'function', function: { name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } } }];
 const request = (extra = {}) => ({ messages: [{ role: 'user', content: 'fixture prompt' }], ...extra });
 const fence = '```tool_call\n{"name":"exec_command","arguments":{"cmd":"ls"}}\n```';
-const frame = (text = 'ok', { mode = 8, complete = true, thinking = 2, fallback, downgrade, nativeTools = false } = {}) => m(1003, m(1, Buffer.concat([
+const frame = (text = 'ok', { mode = 8, complete = true, thinking = 2, attribution = mode === 1 ? 'Used 4 Hydrogen High model' : undefined, fallback, downgrade, nativeTools = false } = {}) => m(1003, m(1, Buffer.concat([
   ...(text === null ? [] : [m(1, m(2, m(1, Buffer.from(text))))]),
   ...(mode === null ? [] : [v(41, mode)]), ...(thinking === null ? [] : [v(42, thinking)]),
-  v(9, Number(complete)), ...(fallback === undefined ? [] : [v(11, fallback)]), ...(downgrade === undefined ? [] : [v(31, downgrade)]), ...(nativeTools ? [m(7, Buffer.alloc(0))] : []),
+  v(9, Number(complete)), ...(fallback === undefined ? [] : [v(11, fallback)]), ...(attribution === undefined || attribution === null ? [] : [m(30, Buffer.from(attribution))]), ...(downgrade === undefined ? [] : [v(31, downgrade)]), ...(nativeTools ? [m(7, Buffer.alloc(0))] : []),
 ])));
 const event = bytes => ({ type: 'frame', bytes });
 const end = (grpcStatus = 0, httpStatus = 200) => ({ type: 'end', grpcStatus, httpStatus });
@@ -36,9 +36,9 @@ function response() {
 const rejects = (promise, code, status = 502) => assert.rejects(promise, error => error.code === code && error.status === status && !error.message.includes('fixture'));
 
 test('advertised models are exact modes 8/1/6, selected model labels and unique result ids', async () => {
-  assert.deepEqual(NATIVE_MODELS, ['gemini-argon', 'gemini-flash', 'gemini-flash-lite']);
+  assert.deepEqual(NATIVE_MODELS, ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
   const ids = new Set();
-  for (const [model, mode] of [['gemini-argon', 8], ['gemini-flash', 1], ['gemini-flash-lite', 6]]) {
+  for (const [model, mode] of [['gemini-argon', 8], ['gemini-hydrogen', 1], ['gemini-flash-lite', 6]]) {
     const { p, state } = fixture([event(frame('ok', { mode })), end()]);
     const result = await p.runTurn('a', request({ model: 'models/' + model }));
     assert.equal(result.model, model); assert.equal(result.content, 'ok');
@@ -66,7 +66,7 @@ test('synchronous thinking values are forwarded; returned thinking is resolved e
 
 test('invalid requests are rejected before token access or inference', async () => {
   const { p, state } = fixture();
-  for (const [extra, code] of [[{ model: 'gpt-4' }, 'UNSUPPORTED_MODEL'], [{ reasoning_effort: 'unknown' }, 'INVALID_REASONING_EFFORT'], [{ thinking_level: 5 }, 'INVALID_THINKING_LEVEL'], [{ tools, tool_choice: 'required', messages: [{ role: 'tool', tool_call_id: 'x', content: 'fake' }] }, 'INVALID_TOOL_RESULT']]) await rejects(p.runTurn('a', request(extra)), code, 400);
+  for (const [extra, code] of [[{ model: 'gpt-4' }, 'UNSUPPORTED_MODEL'], [{ model: 'gemini-flash' }, 'UNSUPPORTED_MODEL'], [{ model: 'models/gemini-flash' }, 'UNSUPPORTED_MODEL'], [{ reasoning_effort: 'unknown' }, 'INVALID_REASONING_EFFORT'], [{ thinking_level: 5 }, 'INVALID_THINKING_LEVEL'], [{ tools, tool_choice: 'required', messages: [{ role: 'tool', tool_call_id: 'x', content: 'fake' }] }, 'INVALID_TOOL_RESULT']]) await rejects(p.runTurn('a', request(extra)), code, 400);
   assert.equal(state.auth, 0); assert.equal(state.opened, 0);
 });
 
@@ -197,4 +197,78 @@ test('final mode, boolean completion evidence, resolved thinking and setup error
 
 test('empty initialization with no completion or gRPC terminal status is incomplete, not a successful empty turn', async () => {
   await rejects(fixture([event(m(1003,Buffer.alloc(0))),end(null)]).p.runTurn('a',request()),'INCOMPLETE_NATIVE_RESPONSE');
+});
+
+test('gemini-hydrogen enforces field 30 Hydrogen attribution across buffered, incremental and error paths', async () => {
+  for (const attribution of ['Used 4 Hydrogen High model', 'Used 4 Hydrogen model']) {
+    const deltas = [];
+    const { p } = fixture([event(frame('ok', { mode: 1, attribution })), end()]);
+    const result = await p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => deltas.push(item), { incrementalOutput: true });
+    assert.equal(result.model, 'gemini-hydrogen');
+    assert.equal(result.attribution, attribution);
+    assert.equal(deltas.filter(d => d.content).map(d => d.content).join(''), 'ok');
+  }
+  for (const attribution of ['Used 3.5 Flash model', 'Used 3.5 Flash Thinking model', null, '']) {
+    for (const incrementalOutput of [false, true]) {
+      let secondFrameRead = false;
+      const { p, state } = fixture([], {
+        openTurn: () => ({
+          events: { async *[Symbol.asyncIterator]() {
+            yield event(frame('LEAKED_TEXT\n' + fence, { mode: 1, attribution, complete: true }));
+            if (attribution && !/\bhydrogen\b/i.test(attribution)) secondFrameRead = true;
+            yield end();
+          } },
+          cancel() { state.cancelled++; },
+        }),
+      });
+      const deltas = [];
+      await assert.rejects(
+        p.runTurn('a', request({ model: 'gemini-hydrogen', tools }), item => deltas.push(item), { incrementalOutput }),
+        error => error.code === 'MODEL_DOWNGRADE_REJECTED' && error.status === 502 && error.unverifiedOutput === true && error.partialResult === undefined,
+      );
+      assert.equal(secondFrameRead, false);
+      assert.deepEqual(deltas.filter(d => d.content || d.call), []);
+    }
+  }
+  // Delayed attribution withholds incremental text until Hydrogen attribution arrives.
+  const stages = [];
+  const delayed = fixture([], {
+    openTurn: () => ({
+      events: { async *[Symbol.asyncIterator]() {
+        yield event(frame('hello ', { mode: 1, attribution: null, complete: false }));
+        stages.push(deltas.filter(d => d.content).map(d => d.content).join(''));
+        yield event(frame('hello world', { mode: 1, attribution: 'Used 4 Hydrogen High model', complete: true }));
+        yield end();
+      } },
+      cancel() {},
+    }),
+  });
+  const deltas = [];
+  const ok = await delayed.p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => deltas.push(item), { incrementalOutput: true });
+  assert.deepEqual(stages, ['']);
+  assert.equal(ok.content, 'hello world');
+  assert.equal(deltas.filter(d => d.content).map(d => d.content).join(''), 'hello world');
+
+  // Stream reset before Hydrogen attribution never flushes or attaches partialResult.
+  const resetDeltas = [];
+  const resetFixture = fixture([], {
+    openTurn: () => ({
+      events: { async *[Symbol.asyncIterator]() {
+        yield event(frame('unverified partial', { mode: 1, attribution: null, complete: false }));
+        throw Object.assign(new Error('reset'), { code: 'NATIVE_STREAM_RESET' });
+      } },
+      cancel() {},
+    }),
+  });
+  await assert.rejects(
+    resetFixture.p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => resetDeltas.push(item), { incrementalOutput: true }),
+    error => error.code === 'NATIVE_STREAM_RESET' && error.unverifiedOutput === true && error.partialResult === undefined,
+  );
+  assert.deepEqual(resetDeltas.filter(d => d.content || d.call), []);
+
+  // Duplicate or invalid wire type on field 30 fails with INVALID_NATIVE_RESPONSE.
+  const dupAttr = m(1003, m(1, Buffer.concat([m(30, Buffer.from('Used 4 Hydrogen model')), m(30, Buffer.from('Used 4 Hydrogen High model')), v(41, 1), v(9, 1)])));
+  await rejects(fixture([event(dupAttr), end()]).p.runTurn('a', request({ model: 'gemini-hydrogen' })), 'INVALID_NATIVE_RESPONSE');
+  const badAttrWire = m(1003, m(1, Buffer.concat([v(30, 1), v(41, 1), v(9, 1)])));
+  await rejects(fixture([event(badAttrWire), end()]).p.runTurn('a', request({ model: 'gemini-hydrogen' })), 'INVALID_NATIVE_RESPONSE');
 });

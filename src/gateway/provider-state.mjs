@@ -1,6 +1,8 @@
 import { MODEL_MODES, NATIVE_MODELS } from "../openai-contract.mjs";
 import { safeAccountError } from "./native-evidence.mjs";
 export { NATIVE_MODELS as ACCOUNT_MODELS };
+export const hasHydrogenAttribution = (value) =>
+  typeof value === "string" && /\bhydrogen\b/i.test(value);
 const time = (value) =>
   Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
 const unchecked = () => ({
@@ -25,7 +27,8 @@ export function modelState(account, model) {
   if (
     value?.state === "verified" &&
     time(value.checkedAt) &&
-    value.mode === MODEL_MODES[model]
+    value.mode === MODEL_MODES[model] &&
+    (model !== "gemini-hydrogen" || value.attributionVerified === true)
   )
     return {
       state: "verified",
@@ -70,13 +73,15 @@ export function verifiedState(model, result, now = Date.now()) {
   if (
     !NATIVE_MODELS.includes(model) ||
     result?.model !== model ||
-    result.resolvedModeCategory !== MODEL_MODES[model]
+    result.resolvedModeCategory !== MODEL_MODES[model] ||
+    (model === "gemini-hydrogen" && !hasHydrogenAttribution(result.attribution))
   )
     return null;
   return {
     state: "verified",
     checkedAt: now,
     mode: result.resolvedModeCategory,
+    ...(model === "gemini-hydrogen" ? { attributionVerified: true } : {}),
   };
 }
 export function rejectedState(error) {

@@ -20,7 +20,7 @@ for (const width of [390, 1440]) test(`advanced test request keeps confirmation 
   await open(page);
   await expect(page.locator('nav a')).toHaveText(['Accounts', 'API keys', 'Settings']);
   await expect(page.locator('#playground-review')).toBeDisabled();
-  await page.locator('#playground-model').selectOption('gemini-flash');
+  await page.locator('#playground-model').selectOption('gemini-hydrogen');
   await page.locator('#playground-prompt').fill('Synthetic test message');
   await page.locator('#playground-review').click();
   await expect(page.locator('#dialog-title')).toHaveText('Send a model request?');
@@ -28,7 +28,7 @@ for (const width of [390, 1440]) test(`advanced test request keeps confirmation 
   await page.locator('#playground-review').click(); await page.locator('#dialog-confirm').click();
   await expect(page.locator('#playground-output')).toHaveText('Synthetic answer');
   await expect(page.locator('#playground-result')).toContainText('HTTP 200');
-  await expect(page.locator('#playground-result')).toContainText('gemini-flash');
+  await expect(page.locator('#playground-result')).toContainText('gemini-hydrogen');
   await expect(page.locator('#playground-result')).toContainText(/\d[\d,.]* ms/);
   expect(f.seen).toHaveLength(1); expect(f.seen[0].modeCategory).toBe(1);
   await page.locator('#test-response-details-toggle').click();

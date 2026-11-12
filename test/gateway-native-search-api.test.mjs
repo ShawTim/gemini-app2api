@@ -169,7 +169,7 @@ test("native opt-in rejects mixed tools/history, invalid modes/types and oversiz
   for (const extra of [
     { native_search: "true" },
     { model: "gemini-flash-lite" },
-    { model: "gemini-flash" },
+    { model: "gemini-hydrogen" },
     { thinking_level: 1 },
     { tool_choice: "none" },
     { parallel_tool_calls: false },

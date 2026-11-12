@@ -34,6 +34,7 @@ const failWithEvidence = (code, evidence) => {
   throw Object.assign(protocolError(code, 502), { nativeEvidence: evidence });
 };
 const utf8 = new TextDecoder('utf-8', { fatal: true });
+const HYDROGEN_ATTRIBUTION = /\bhydrogen\b/i;
 function one(fields, number) {
   const found = fields.filter(field => field.number === number);
   if (found.length > 1) fail('INVALID_NATIVE_RESPONSE');
@@ -47,7 +48,12 @@ function frameInfo(bytes) {
   if (!client) return null;
   const fields = parse(client.payload);
   // Ambiguous evidence must not be resolved by a decoder's first/last field rule.
-  for (const n of [1, 9, 11, 31, 41, 42]) one(fields, n);
+  for (const n of [1, 9, 11, 30, 31, 41, 42]) one(fields, n);
+  const attribution = one(fields, 30);
+  if (attribution) {
+    if (attribution.wire !== 2 || attribution.payload.length > 4096) fail('INVALID_NATIVE_RESPONSE');
+    try { utf8.decode(attribution.payload); } catch { fail('INVALID_NATIVE_RESPONSE'); }
+  }
   const info = decodeClientGenerateResponse(client.payload);
   if (info.hasToolOperations) fail('UNSUPPORTED_NATIVE_TOOL_EVENT');
   for (const n of [9, 11]) {
@@ -180,9 +186,11 @@ export class NativeDirectProvider {
     context.signal?.addEventListener('abort', abort, { once: true });
     timer = setTimeout(() => stop(protocolError('NATIVE_TURN_TIMEOUT', 504)), timeoutMs);
     const bounded = promise => Promise.race([promise, deadline]);
+    const requiresHydrogen = body.model === 'gemini-hydrogen';
     let rawText = '', frames = 0, received = 0, observedMode = null, observedThinking = null;
     let modelComplete = false, ended = false, grpc = null, httpStatus = null, downgrade = false, phase = 'auth';
-    let observedFallback = null, downgradeReason = null;
+    let observedFallback = null, downgradeReason = null, observedAttribution = null;
+    const attributionVerified = () => !requiresHydrogen || HYDROGEN_ATTRIBUTION.test(observedAttribution ?? '');
     let snapshotId = null, revisionCount = 0, quotaObservation = null, quotaFrames = 0;
     let emptyResponseReason = null, outputObserved = false, responseLimitReason = null, outputFailureReason = null;
     const outputShape = { nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeStructuredOutputPresent: false, nativeRefusalPresent: false };
@@ -277,6 +285,10 @@ export class NativeDirectProvider {
           observedFallback = info.fallback ?? observedFallback;
           downgradeReason = info.downgradeReason ?? downgradeReason;
           observedMode = info.resolvedModeCategory ?? observedMode;
+          if (info.attribution !== null && info.attribution.length > 0) {
+            observedAttribution = info.attribution;
+            if (requiresHydrogen && !HYDROGEN_ATTRIBUTION.test(info.attribution)) downgrade = true;
+          }
           // Final generate evidence must name the requested mode. Prior proven
           // rejection is sticky; an unresolved zero is not a proven downgrade.
           if (observedMode !== null && observedMode !== 0 && observedMode !== modeCategory) downgrade = true;
@@ -322,7 +334,7 @@ export class NativeDirectProvider {
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
           }
-          if (incremental && observedMode === modeCategory && liveSyncedLength < rawText.length) {
+          if (incremental && observedMode === modeCategory && attributionVerified() && liveSyncedLength < rawText.length) {
             const delta = rawText.slice(liveSyncedLength);
             liveSyncedLength = rawText.length;
             await publish(liveSplitter.push(delta));
@@ -350,6 +362,7 @@ export class NativeDirectProvider {
       if (/^\s*I'm on it\.\s*Responses with Deep Think can take some time, so check back in a bit\.\s*https?:\/\/googleusercontent\.com\/agentic_processing_chip\/\d+\s*$/i.test(rawText)) fail('NATIVE_ASYNC_RESPONSE_UNSUPPORTED', 422);
       if (!modelComplete) fail('INCOMPLETE_NATIVE_RESPONSE');
       if (observedMode !== modeCategory) fail('MISSING_NATIVE_MODE_EVIDENCE');
+      if (!attributionVerified()) fail('MODEL_DOWNGRADE_REJECTED');
       if (outputShape.nativeRefusalPresent) fail('NATIVE_RESPONSE_REFUSED', 422);
       if (!rawText.trim()) {
         if (outputShape.nativeShareableTextBytes || outputShape.nativeStructuredOutputPresent) fail('NATIVE_OUTPUT_NOT_TEXT', 422);
@@ -376,7 +389,7 @@ export class NativeDirectProvider {
       if (body.parallel_tool_calls === false && calls.length > 1) fail('PARALLEL_TOOL_CALLS_DISABLED');
       validateToolCompletion(calls, policy);
       if (!calls.length && !content.trim()) { emptyResponseReason = 'post_parse_empty'; fail('EMPTY_NATIVE_RESPONSE'); }
-      const result = { ...identity, resolvedModeCategory: observedMode, content, calls, frames, thinkingLevel: observedThinking, continued: false };
+      const result = { ...identity, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), content, calls, frames, thinkingLevel: observedThinking, continued: false };
       const effort = body.reasoning_effort ?? body.reasoning?.effort;
       if (effort !== undefined) result.requestedReasoningEffort = effort;
       result.ignoredTokenParameters = ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined);
@@ -392,7 +405,7 @@ export class NativeDirectProvider {
       note('provider_success');
       return result;
     } catch (error) {
-      const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && observedMode === modeCategory;
+      const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && observedMode === modeCategory && attributionVerified();
       if (incremental && modeVerified && !sinkFailed) {
         try { await publish(liveSplitter.flush()); }
         catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }

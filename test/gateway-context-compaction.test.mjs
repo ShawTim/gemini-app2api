@@ -67,11 +67,11 @@ test('legacy state keys are inert and opening the state does not rewrite account
   assert.equal(f.store.data.settings.contextCompaction, true); // retained only, never activated
 });
 
-for (const size of [100, 140000]) for (const model of ['gemini-argon', 'gemini-flash']) test(`${model}, history=${size}: only the explicitly selected model receives full input`, async t => {
+for (const size of [100, 140000]) for (const model of ['gemini-argon', 'gemini-hydrogen']) test(`${model}, history=${size}: only the explicitly selected model receives full input`, async t => {
   const f = await fixture({ allowFailover: false }); t.after(f.close);
   const body = { ...payload({ size, tail: 14 }), model };
   const r = await send(f, body); assert.equal(r.status, 200); await r.text(); noCompaction(f, r);
-  assert.deepEqual(f.seen.map(x => x.modeCategory), [model === 'gemini-flash' ? 1 : 8]);
+  assert.deepEqual(f.seen.map(x => x.modeCategory), [model === 'gemini-hydrogen' ? 1 : 8]);
   fullHistory(f.seen[0].messages[0].content, body);
 });
 

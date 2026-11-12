@@ -31,7 +31,12 @@ export const responseTools = tools.map((t) => ({
 }));
 export const toolBlock =
   '```tool_call\n{"name":"fixture_lookup","arguments":{"key":"sample"}}\n```';
-export const textFrame = (text, mode = 8, thinking = 2) =>
+export const textFrame = (
+  text,
+  mode = 8,
+  thinking = 2,
+  attribution = mode === 1 ? "Used 4 Hydrogen High model" : null,
+) =>
   m(
     1003,
     m(
@@ -40,6 +45,9 @@ export const textFrame = (text, mode = 8, thinking = 2) =>
         m(1, m(2, m(1, Buffer.from(text)))),
         v(9, 1),
         v(11, 0),
+        ...(typeof attribution === "string"
+          ? [m(30, Buffer.from(attribution))]
+          : []),
         v(31, 0),
         v(41, mode),
         v(42, thinking),
@@ -128,12 +136,20 @@ export async function fixture({
                 code: "REQUEST_CANCELLED",
                 status: 499,
               });
+            const frameMode = next.mode ?? options.modeCategory;
             yield {
               type: "frame",
               bytes: textFrame(
                 typeof next === "string" ? next : next.text,
-                next.mode ?? options.modeCategory,
+                frameMode,
                 next.thinking ?? options.thinkingLevel,
+                typeof next === "object" &&
+                  next !== null &&
+                  Object.hasOwn(next, "attribution")
+                  ? next.attribution
+                  : frameMode === 1
+                    ? "Used 4 Hydrogen High model"
+                    : null,
               ),
             };
             yield {

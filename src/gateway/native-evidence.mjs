@@ -54,7 +54,7 @@ export function safeAccountError(value) {
       typeof value.code === "string" && /^[A-Z0-9_]{1,80}$/.test(value.code)
         ? value.code
         : "NATIVE_TURN_FAILED",
-    ...(NATIVE_MODELS.includes(value.model)
+    ...(NATIVE_MODELS.includes(value.model) || value.model === "gemini-flash"
       ? { model: value.model }
       : {}),
     nativeEvidence,

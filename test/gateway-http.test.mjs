@@ -53,7 +53,7 @@ test("HTTP health and readiness separate, models require API key and admin cooki
   const models = await f.api("/v1/models").then((r) => r.json());
   assert.deepEqual(
     models.data.map((m) => m.id),
-    ["gemini-argon", "gemini-flash", "gemini-flash-lite"],
+    ["gemini-argon", "gemini-hydrogen", "gemini-flash-lite"],
   );
   const hostStatus = await new Promise((resolve, reject) => {
     const request = http.get(

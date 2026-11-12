@@ -20,9 +20,9 @@ test('compact account model buttons send once to the selected account, show OK/F
     await expect(page.locator('textarea')).toHaveCount(0);
     await card.locator('[data-account-details] > summary').click();
     const row = model => card.locator(`[data-provider-model="${model}"]`);
-    await row('gemini-flash').locator('[data-action="test-model"]').click();
-    await expect(row('gemini-flash').locator('[data-model-test-result]')).toHaveText('OK');
-    await expect(row('gemini-flash').locator('[data-model-test-result]')).toHaveClass(/\bok\b/);
+    await row('gemini-hydrogen').locator('[data-action="test-model"]').click();
+    await expect(row('gemini-hydrogen').locator('[data-model-test-result]')).toHaveText('OK');
+    await expect(row('gemini-hydrogen').locator('[data-model-test-result]')).toHaveClass(/\bok\b/);
     await expect(page.locator('#action-dialog')).not.toBeVisible();
     expect(f.seen).toHaveLength(1); expect(f.seen[0].modeCategory).toBe(1);
     expect(tokens).toEqual(['acc-0']); expect(f.store.data.accounts[0].enabled).toBe(false);
@@ -31,8 +31,8 @@ test('compact account model buttons send once to the selected account, show OK/F
     await expect(row('gemini-argon').locator('[data-model-test-result]')).toHaveClass(/\bfail\b/);
     expect(tokens).toEqual(['acc-0', 'acc-0']); expect(f.seen).toHaveLength(2);
     await expect(page.locator('[data-account-card="acc-1"] [data-action="test-model"]').first()).toBeDisabled();
-    expect((await f.admin('accounts/acc-1/test', { method: 'POST', body: { model: 'gemini-flash' } })).status).toBe(403);
-    expect((await f.request('/admin/api/accounts/acc-0/test', { method: 'POST', body: { model: 'gemini-flash' } })).status).toBe(403);
+    expect((await f.admin('accounts/acc-1/test', { method: 'POST', body: { model: 'gemini-hydrogen' } })).status).toBe(403);
+    expect((await f.request('/admin/api/accounts/acc-0/test', { method: 'POST', body: { model: 'gemini-hydrogen' } })).status).toBe(403);
     expect(tokens).toEqual(['acc-0', 'acc-0']);
     await card.locator('[data-action="toggle-account"]').click();
     await expect.poll(() => f.store.data.accounts[0].enabled).toBe(true);

@@ -36,6 +36,7 @@ const providerFor = (output) =>
             1,
             Buffer.concat([
               m(1, m(2, m(1, Buffer.from(output)))),
+              ...(options.modeCategory === 1 ? [m(30, Buffer.from("Used 4 Hydrogen High model"))] : []),
               v(41, options.modeCategory),
               v(42, options.thinkingLevel),
               v(9, 1),

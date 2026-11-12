@@ -44,7 +44,7 @@ test('all models and APIs route only to the allowed account, while excluded acco
 test('allowed-account transient failure cannot fail over to an excluded account even when failover is enabled', async t => {
   const f = await setup(t, { allowFailover: true, turns: [Object.assign(Error('Synthetic'), { code: 'NATIVE_CONNECTION_FAILED', status: 502 }), 'DO_NOT_CONSUME_B'] });
   const b = JSON.stringify(f.store.data.accounts[1]);
-  const r = await f.api('/v1/chat/completions', { method: 'POST', body: chat('gemini-flash') });
+  const r = await f.api('/v1/chat/completions', { method: 'POST', body: chat('gemini-hydrogen') });
   assert.equal(r.status, 422); const error = (await r.json()).error;
   assert.equal(error.code, 'GENERATION_FAILED'); assert.equal(error.upstream_code, 'NATIVE_CONNECTION_FAILED');
   assert.equal(error.upstream_status, 502); assert.equal(error.client_action, 'stop_turn');
@@ -53,7 +53,7 @@ test('allowed-account transient failure cannot fail over to an excluded account 
 });
 
 test('capacity and disabled A cannot borrow excluded B; historical model rejection does not block A', async t => {
-  const f = await setup(t), model = 'gemini-flash';
+  const f = await setup(t), model = 'gemini-hydrogen';
   f.app.pool.stats('acc-0').inFlight = 2;
   let r = await f.api('/v1/chat/completions', { method: 'POST', body: chat(model) }); assert.equal(r.status, 503); await r.text();
   f.app.pool.stats('acc-0').inFlight = 0;
@@ -77,12 +77,12 @@ test('capacity and disabled A cannot borrow excluded B; historical model rejecti
 test('soft affinity rechecks the copied allowlist even with general retry disabled', async () => {
   const accounts = { list: () => [{ id: 'acc-0', enabled: true, status: 'ready' }, { id: 'acc-1', enabled: true, status: 'ready' }] };
   const unrestricted = new AccountPool(accounts);
-  await unrestricted.run({ owner: 'synthetic-owner', sessionId: 'old-session', model: 'gemini-flash' }, async () => 'Synthetic');
+  await unrestricted.run({ owner: 'synthetic-owner', sessionId: 'old-session', model: 'gemini-hydrogen' }, async () => 'Synthetic');
   const entry = [...unrestricted.sessions.values()][0]; entry.accountId = 'acc-1';
   const ids = ['acc-0'], restricted = new AccountPool(accounts, { routingAccountIds: ids, allowFailover: false }); ids.push('acc-1');
   restricted.sessions = unrestricted.sessions;
   const seen = [];
-  const result = await restricted.run({ owner: 'synthetic-owner', sessionId: 'old-session', model: 'gemini-flash' }, async id => { seen.push(id); return 'Synthetic'; });
+  const result = await restricted.run({ owner: 'synthetic-owner', sessionId: 'old-session', model: 'gemini-hydrogen' }, async id => { seen.push(id); return 'Synthetic'; });
   assert.equal(result.accountId, 'acc-0'); assert.deepEqual(seen, ['acc-0']);
   assert.equal(restricted.routingAllowed('acc-1'), false);
 });

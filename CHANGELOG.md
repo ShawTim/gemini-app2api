@@ -2,6 +2,10 @@
 
 Release notes for Gemini App2API.
 
+## Unreleased
+
+- Replaced `gemini-flash` (`400 UNSUPPORTED_MODEL`) with `gemini-hydrogen` (Gemini 4 Hydrogen on `FAST` mode `1`), enforcing upstream Hydrogen model attribution in `ClientGenerateResponse` field `30` and failing closed (`502 MODEL_DOWNGRADE_REJECTED`) when legacy Flash or unattributed responses are served.
+
 ## 1.0.0 — 2026-11-12
 
 First public release: a self-hosted Node.js gateway that connects your own Gemini

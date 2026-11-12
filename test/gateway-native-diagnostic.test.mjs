@@ -194,7 +194,7 @@ test('HTTP headers/body cannot enable diagnostics; admin tests/playground/Flash/
     assert.equal(response.status, 200); await response.text();
     assert.equal(fs.existsSync(file(f.store.directory, 'arm')), true);
   }
-  response = await send(f, { ...body, model: 'gemini-flash' });
+  response = await send(f, { ...body, model: 'gemini-hydrogen' });
   assert.equal(response.status, 200); await response.text();
   f.app.provider.runNativeSearch = async () => ({ id: 'synthetic', model: 'gemini-argon', content: 'Synthetic search', calls: [], created: 0 });
   response = await send(f, { ...body, native_search: true });

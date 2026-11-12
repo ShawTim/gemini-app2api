@@ -28,9 +28,9 @@ test('PI automatic Chat token caps are ignored, replay-safe hints, not prompt/na
   assert.equal(normalizeChatRequest({ ...payload(), temperature: 1 }).temperature, undefined);
 });
 
-test('PI Argon/Flash Chat JSON and SSE succeed and explicitly disclose unenforced token hints', async t => {
+test('PI Argon/Hydrogen Chat JSON and SSE succeed and explicitly disclose unenforced token hints', async t => {
   const f = await fixture({ turns: ['OK', 'OK', 'OK', 'OK', 'OK'] }); t.after(() => f.close());
-  for (const model of ['gemini-argon', 'gemini-flash']) for (const stream of [false, true]) {
+  for (const model of ['gemini-argon', 'gemini-hydrogen']) for (const stream of [false, true]) {
     const r = await f.api('/v1/chat/completions', { method: 'POST', body: payload(model, stream) });
     assert.equal(r.status, 200);
     assert.equal(r.headers.get('x-gemini-token-limit'), 'not-enforced');
@@ -95,7 +95,7 @@ test('PI TypeBox literal and mixed unions retain argument checks; malformed sche
 test('known Google async processing stubs never complete normally; ordinary text is unaffected', async t => {
   const stub = "I'm on it. Responses with Deep Think can take some time, so check back in a bit.\n\n http://googleusercontent.com/agentic_processing_chip/0";
   const f = await fixture({ turns: [stub, stub, stub, stub, 'The processing indicator is not a final answer.'], allowFailover: false }); t.after(() => f.close());
-  for (const [model, stream] of [['gemini-argon', false], ['gemini-flash', true]]) {
+  for (const [model, stream] of [['gemini-argon', false], ['gemini-hydrogen', true]]) {
     const before = f.seen.length;
     const r = await f.api('/v1/chat/completions', { method: 'POST', body: payload(model, stream) });
     assert.equal(r.status, 200);

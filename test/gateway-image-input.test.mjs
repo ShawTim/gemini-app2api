@@ -79,7 +79,7 @@ test('image count, decoded byte/dimension and independent text budgets remain bo
 
 test('canonical images are idempotent and retain ordered user/history association, never base64 prompt text', () => {
   const messages = [{ role: 'system', content: 'system fixture' }, user([{ type: 'text', text: 'first' }, image()]), { role: 'assistant', content: 'prior answer' }, user([image(url(JPEG, 'image/jpeg')), { type: 'text', text: 'second' }])];
-  const body = normalizeChatRequest({ model: 'gemini-flash', messages });
+  const body = normalizeChatRequest({ model: 'gemini-hydrogen', messages });
   assert.deepEqual(normalizeChatRequest(body), body);
   const prompt = buildCanonicalPrompt(body);
   assert.equal(prompt.images.length, 2); assert.deepEqual(prompt.images.map(x => x.data), [PNG, JPEG]);
@@ -219,7 +219,7 @@ test('image turns retain downgrade/reset verification and never release failed o
   const reset = Object.assign(Error('synthetic'), { code: 'NATIVE_STREAM_RESET', status: 502 });
   const f = await fixture({ accountCount: 1, allowFailover: false, turns: [{ text: 'must not leak', mode: 6 }, reset] }); t.after(() => f.close());
   for (const code of ['MODEL_DOWNGRADE_REJECTED', 'NATIVE_STREAM_RESET']) {
-    const res = await f.api('/v1/chat/completions', { method: 'POST', body: { model: 'gemini-flash', stream: true, messages: [user()] } });
+    const res = await f.api('/v1/chat/completions', { method: 'POST', body: { model: 'gemini-hydrogen', stream: true, messages: [user()] } });
     // Zero-output reset is an allowlisted terminal GENERATION_FAILED (Chat422) keeping the upstream cause;
     // a proven downgrade keeps its own 502 classification.
     assert.equal(res.status, code === 'NATIVE_STREAM_RESET' ? 422 : 502); assert.match(res.headers.get('content-type'), /application\/json/);

@@ -55,7 +55,7 @@ test("six effort names map explicitly and survive canonical re-normalization on 
     xhigh: 2,
   });
   for (const api of ["chat", "responses"])
-    for (const model of ["gemini-argon", "gemini-flash", "gemini-flash-lite"])
+    for (const model of ["gemini-argon", "gemini-hydrogen", "gemini-flash-lite"])
       for (const [effort, level] of Object.entries(REASONING_EFFORT_LEVELS)) {
         const canonical = normalize(api, {
           ...input(api),
