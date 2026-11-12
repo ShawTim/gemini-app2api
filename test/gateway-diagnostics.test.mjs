@@ -180,13 +180,15 @@ test("Google grpc-message is decoded and preserved verbatim, with only sensitive
     "com.google.assistant.boq.bard.application.utils.BardStatusException: Before proceeding, please accept our terms of service.";
   assert.equal(decodeGrpcMessage(encodeURIComponent(original)), original);
   assert.equal(decodeGrpcMessage("bad%escape"), "bad%escape");
+  const gskSecret = "gsk_" + "A1b2C3d4_E5f6-G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U";
   const safe = sanitizeUpstreamMessage(
-    "user@example.invalid Bearer SYNTHETIC_PRIVATE " + ["ya29", "SYNTHETIC_PRIVATE"].join(".") + " https://accounts.google.com/o/oauth2/auth?code=PRIVATE 123456789012345",
+    "user@example.invalid Bearer SYNTHETIC_PRIVATE " + ["ya29", "SYNTHETIC_PRIVATE"].join(".") + " " + gskSecret + " https://accounts.google.com/o/oauth2/auth?code=PRIVATE 123456789012345",
   );
   assert.doesNotMatch(
     safe,
-    /example.invalid|SYNTHETIC_PRIVATE|https:\/\/|123456789012345/,
+    /example.invalid|SYNTHETIC_PRIVATE|gsk_|A1b2C3d4|https:\/\/|123456789012345/,
   );
+  assert.match(safe, /\[identifier redacted\]/);
   assert.ok(sanitizeUpstreamMessage("x ".repeat(10000)).length <= 2048);
 });
 

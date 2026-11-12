@@ -112,14 +112,18 @@ export class AccountPool {
     if (!ACCOUNT_MODELS.includes(model)) throw fault("UNSUPPORTED_MODEL");
     if (typeof owner !== "string" || !owner) throw fault("INVALID_OWNER", 401);
     if (sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) throw fault("INVALID_SESSION_ID");
-    const id = sessionId ?? crypto.randomUUID(), key = keyOf(owner, id);
-    let session = this.sessions.get(key);
+    const id = sessionId ?? crypto.randomUUID(), key = sessionId !== undefined ? keyOf(owner, sessionId) : null;
+    let session = key !== null ? this.sessions.get(key) : null;
     if (session && !session.inFlight && this.now() - session.lastUsedAt > this.settings().sessionTtlMs) { this.sessions.delete(key); session = null; }
+    if (session && key !== null) {
+      this.sessions.delete(key);
+      this.sessions.set(key, session);
+    }
     if (!session) {
-      this.prune();
+      if (key !== null) this.prune();
       session = { id: "ses_" + crypto.randomBytes(10).toString("hex"), owner, accountId: null, model: null, lastFailure: null,
         turns: 0, lastUsedAt: this.now(), inFlight: false, activeRequests: 0, requestSequence: 0, outcomeSequence: 0 };
-      this.sessions.set(key, session);
+      if (key !== null) this.sessions.set(key, session);
     }
     const sequence = ++session.requestSequence;
     session.activeRequests++; session.inFlight = true;
@@ -131,11 +135,10 @@ export class AccountPool {
     const maxAttempts = this.allowAutomaticRecovery || this.allowQuotaFailover || this.allowEmptyResponseFailover ? 4 : 3;
     try {
       if (signal?.aborted) throw fault('REQUEST_CANCELLED', 499);
-      const eligibleIds = new Set(this.available(model).map(a => a.id));
       const boundaryRecovery = remembered?.model === model ? remembered : null;
       for (let attempt = 0; attempt < maxAttempts + quotaFailures; attempt++) {
         if (signal?.aborted) throw fault("REQUEST_CANCELLED", 499);
-        let choices = this.available(model).filter(a => eligibleIds.has(a.id) && !tried.has(a.id));
+        let choices = this.available(model).filter(a => !tried.has(a.id));
         const carried = attempt === 0 ? boundaryRecovery : null;
         if (carried) {
           const alternatives = choices.filter(a => a.id !== carried.accountId);
@@ -173,7 +176,7 @@ export class AccountPool {
           if (error.responseStarted === true) throw error;
           // A turn that was interrupted before showing the caller anything usable
           // may be replaced once. This is not a splice: no output was committed.
-          const shortOutputRetry = error.shortOutput === true && shortOutputRecoveries === 0;
+          const shortOutputRetry = error.shortOutput === true && error.code !== "NATIVE_RESPONSE_REFUSED" && shortOutputRecoveries === 0;
           const generalRetry = this.allowFailover && ['quota', 'transient'].includes(kind) && attempt + 1 < 3;
           if (quotaRetry) quotaFailures++;
           if (!(automaticKind || quotaRetry || emptyRetry || generalRetry || shortOutputRetry) || attempt + 1 >= maxAttempts + quotaFailures) throw error;
@@ -182,7 +185,7 @@ export class AccountPool {
           if (automaticKind === 'tool_protocol') formatRecoveryCode = error.code;
           previous = { id: account.id, reason: automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind), quotaFailover: quotaRetry,
             emptyRecovery: emptyRetry, shortOutputRecovery: shortOutputRetry, automaticRecovery: !!automaticKind };
-          if (!this.available(model).some(a => eligibleIds.has(a.id) && !tried.has(a.id))) throw error;
+          if (!this.available(model).some(a => !tried.has(a.id))) throw error;
         } finally { this.#releaseAccount(account.id, stat); }
       }
       throw fault("NO_AVAILABLE_ACCOUNTS", 503);
@@ -198,6 +201,10 @@ export class AccountPool {
       }
       session.activeRequests--; session.inFlight = session.activeRequests > 0;
       session.lastUsedAt = this.now();
+      if (key !== null && this.sessions.get(key) === session) {
+        this.sessions.delete(key);
+        this.sessions.set(key, session);
+      }
     }
   }
 }

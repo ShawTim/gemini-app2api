@@ -29,17 +29,17 @@ export class Security {
     const now = this.now();
     for (const [k, v] of this.attempts)
       if (v.until <= now) this.attempts.delete(k);
-    const prior = this.attempts.get(address) ?? {
-      count: 0,
-      until: now + 60000,
-    };
-    if (prior.count >= 8) throw fault("LOGIN_RATE_LIMITED", 429);
-    if (this.attempts.size >= 1024 && !this.attempts.has(address))
+    const prior = this.attempts.get(address);
+    if (prior && prior.count >= 8) throw fault("LOGIN_RATE_LIMITED", 429);
+    if (!prior && this.attempts.size >= 1024)
       throw fault("LOGIN_RATE_LIMITED", 429);
-    prior.count++;
-    this.attempts.set(address, prior);
-    if (!this.store.verifyRuntimePassword(password))
+    if (!this.store.verifyRuntimePassword(password)) {
+      const next = prior ?? { count: 0, until: now + 60000 };
+      next.count++;
+      this.attempts.set(address, next);
       throw fault("INVALID_ADMIN_LOGIN", 401);
+    }
+    this.attempts.delete(address);
     return this.issueSession(address);
   }
   sweep() {
@@ -50,13 +50,14 @@ export class Security {
     this.sweep();
     const raw = req.headers.cookie ?? "";
     if (typeof raw !== "string" || raw.length > 4096) return null;
-    const token = raw
-      .split(";")
-      .map((s) => s.trim())
-      .find((s) => s.startsWith("gateway_admin="))
-      ?.slice(14);
-    const session = this.sessions.get(token);
-    return session ? { ...session, token } : null;
+    for (const part of raw.split(";")) {
+      const trimmed = part.trim();
+      if (!trimmed.startsWith("gateway_admin=")) continue;
+      const token = trimmed.slice(14);
+      const session = this.sessions.get(token);
+      if (session) return { ...session, token };
+    }
+    return null;
   }
   requireAdmin(req) {
     const session = this.session(req);

@@ -17,18 +17,51 @@ const commonPrefixBytes = (prior, next) => {
   while (i < limit && prior.charCodeAt(i) === next.charCodeAt(i)) i++;
   return Buffer.byteLength(prior.slice(0, i));
 };
-async function write(res, chunk) {
+function abortReasonFault(signal) {
+  return signal?.reason?.code === 'REQUEST_DEADLINE'
+    ? fault('NATIVE_TURN_TIMEOUT', 504)
+    : fault('REQUEST_CANCELLED', 499);
+}
+async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
   if (res.destroyed || res.writableEnded) throw fault('REQUEST_CANCELLED', 499);
   if (res.write(chunk) !== false) return;
+  if (signal?.aborted) {
+    if (!res.destroyed && !res.writableEnded) res.destroy?.();
+    throw abortReasonFault(signal);
+  }
   await new Promise((resolve, reject) => {
-    const cleanup = () => { res.off('drain', drain); res.off('close', close); res.off('error', close); };
+    let timer = null;
+    const cleanup = () => {
+      if (timer !== null) clearTimeout(timer);
+      res.off('drain', drain);
+      res.off('close', close);
+      res.off('error', close);
+      signal?.removeEventListener('abort', onAbort);
+    };
     const drain = () => { cleanup(); resolve(); };
     const close = () => { cleanup(); reject(fault('REQUEST_CANCELLED', 499)); };
-    res.once('drain', drain); res.once('close', close); res.once('error', close);
+    const onAbort = () => {
+      cleanup();
+      if (!res.destroyed && !res.writableEnded) res.destroy?.();
+      reject(abortReasonFault(signal));
+    };
+    const onTimeout = () => {
+      cleanup();
+      if (!res.destroyed && !res.writableEnded) res.destroy?.();
+      reject(fault('NATIVE_TURN_TIMEOUT', 504));
+    };
+    res.once('drain', drain);
+    res.once('close', close);
+    res.once('error', close);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (Number.isFinite(writeTimeoutMs) && writeTimeoutMs > 0) {
+      timer = setTimeout(onTimeout, writeTimeoutMs);
+    }
     if (res.destroyed || res.writableEnded) close();
+    else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, deferEmptyStart = false } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000 } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
     requestedThinkingLevel: thinkingLevel, ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }) };
   let started = false, settled = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
@@ -43,6 +76,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, estimated: true };
   };
   const output = [];
+  const sendWire = chunk => write(res, chunk, signal, writeTimeoutMs);
   const responseId = () => meta.id.startsWith('resp_') ? meta.id : 'resp_' + meta.id.replace(/^chatcmpl-/, '');
   const chatBase = () => ({ id: meta.id, object: 'chat.completion.chunk', created: meta.created, model: meta.model,
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning_effort: meta.requestedReasoningEffort }) });
@@ -52,10 +86,10 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     usage: status === 'in_progress' ? null : toResponsesUsage(estimateUsage()),
     parallel_tool_calls: parallelToolCalls, ...(meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning: { effort: meta.requestedReasoningEffort } }) });
-  const sendChat = (delta, finish_reason = null) => write(res, 'data: ' + JSON.stringify({ ...chatBase(),
+  const sendChat = (delta, finish_reason = null) => sendWire('data: ' + JSON.stringify({ ...chatBase(),
     ...(finish_reason && meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
     choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: estimateUsage() } : {}) }) + '\n\n');
-  const sendResponse = (type, data) => write(res, 'event: ' + type + '\ndata: ' + JSON.stringify({ type, sequence_number: sequence++, ...data }) + '\n\n');
+  const sendResponse = (type, data) => sendWire('event: ' + type + '\ndata: ' + JSON.stringify({ type, sequence_number: sequence++, ...data }) + '\n\n');
   async function finishResponseItems() {
     for (const item of output) {
       if (item.status === 'completed') continue;
@@ -124,7 +158,9 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     }
     if (event.response && !started) meta = { ...meta, ...event.response };
     if (typeof event.content === 'string' && event.content.length) {
-      if ((bytes += Buffer.byteLength(event.content)) > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
+      const nextBytes = bytes + Buffer.byteLength(event.content);
+      if (nextBytes > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
+      bytes = nextBytes;
       await start(event.response);
       content += event.content;
       if (!stream) return;
@@ -134,7 +170,9 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       await emitHeld();
     }
     if (event.call) {
-      if (calls.length >= 32 || (bytes += Buffer.byteLength(JSON.stringify(event.call))) > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
+      const nextBytes = bytes + Buffer.byteLength(JSON.stringify(event.call));
+      if (calls.length >= 32 || nextBytes > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
+      bytes = nextBytes;
       await start(event.response);
       calls.push(event.call);
       if (!stream) return;
@@ -153,9 +191,11 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   async function complete(result) {
     if (settled) return;
     if (!stream) {
-      settled = true;
+      const resultCalls = Array.isArray(result.calls) ? result.calls : [];
       const outputBytes = Buffer.byteLength(result.content ?? '') +
-        (result.calls ?? []).reduce((total, call) => total + Buffer.byteLength(JSON.stringify(call)), 0);
+        resultCalls.reduce((total, call) => total + Buffer.byteLength(JSON.stringify(call)), 0);
+      if (resultCalls.length > 32 || outputBytes > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
+      settled = true;
       (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...result, parallelToolCalls, usage: estimateUsage(outputBytes) });
       return;
     }
@@ -176,8 +216,8 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     await emitHeld();
     if (route === 'chat') {
       await sendChat({}, calls.length ? 'tool_calls' : 'stop');
-      if (includeUsage) await write(res, 'data: ' + JSON.stringify({ ...chatBase(), choices: [], usage: estimateUsage() }) + '\n\n');
-      await write(res, 'data: [DONE]\n\n');
+      if (includeUsage) await sendWire('data: ' + JSON.stringify({ ...chatBase(), choices: [], usage: estimateUsage() }) + '\n\n');
+      await sendWire('data: [DONE]\n\n');
     } else {
       await finishResponseItems();
       await sendResponse('response.completed', { response: response('completed') });
@@ -186,13 +226,26 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   }
   async function interrupt(error) {
     if (settled || res.destroyed || res.writableEnded) return false;
-    const partial = error.partialResult ?? { ...meta, content, calls };
-    if (!started && !partial.content?.length && !partial.calls?.length) return false;
+    if (error?.unverifiedOutput === true) {
+      if (!started) { discard(); return false; }
+      content = content.slice(0, publishedLength);
+      bytes = Buffer.byteLength(content) + calls.reduce((total, call) => total + Buffer.byteLength(JSON.stringify(call)), 0);
+    }
+    const partial = error?.partialResult ?? { ...meta, content, calls };
+    const partialCalls = Array.isArray(partial.calls) ? partial.calls : [];
+    const partialBytes = Buffer.byteLength(partial.content ?? '') +
+      partialCalls.reduce((total, call) => total + Buffer.byteLength(JSON.stringify(call)), 0);
+    if (partialCalls.length > 32 || partialBytes > MAX) {
+      if (!started) discard();
+      throw fault('RESPONSE_TOO_LARGE', 502);
+    }
+    if (!started && error?.code === 'RESPONSE_TOO_LARGE') { discard(); return false; }
+    if (!started && !partial.content?.length && !partialCalls.length) return false;
     const detail = { code: safeCode(error), type: error.status === 429 ? 'rate_limit_error' : error.status === 401 ? 'authentication_error' : error.status < 500 ? 'invalid_request_error' : 'server_error', message: safeCode(error) };
     res.incomplete = true;
     if (!stream) {
       settled = true;
-      (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...partial, parallelToolCalls, incomplete: true, incompleteDetails: { reason: 'upstream_interrupted', code: detail.code }, outputError: detail });
+      (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...partial, calls: partialCalls, parallelToolCalls, incomplete: true, incompleteDetails: { reason: 'upstream_interrupted', code: detail.code }, outputError: detail });
       return true;
     }
     if (!started) await start(partial);
@@ -206,17 +259,17 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
         // unterminated stream as a failure deletes this text and silently asks the
         // model for the same answer again, so the partial is terminated as a
         // finished turn while still being marked incomplete.
-        await write(res, 'data: ' + JSON.stringify({ ...chatBase(),
+        await sendWire('data: ' + JSON.stringify({ ...chatBase(),
           ...(meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
           choices: [{ index: 0, delta: {}, finish_reason: calls.length ? 'tool_calls' : 'stop' }],
           incomplete: true, incomplete_details: { reason: 'upstream_interrupted', code: detail.code },
           ...(includeUsage ? { usage: estimateUsage() } : {}) }) + '\n\n');
-        if (includeUsage) await write(res, 'data: ' + JSON.stringify({ ...chatBase(), choices: [], usage: estimateUsage() }) + '\n\n');
-        await write(res, 'data: [DONE]\n\n');
+        if (includeUsage) await sendWire('data: ' + JSON.stringify({ ...chatBase(), choices: [], usage: estimateUsage() }) + '\n\n');
+        await sendWire('data: [DONE]\n\n');
       } else
         // Nothing usable was shown, so the explicit failure shape stays: an empty or
         // fragment-only turn may still be retried without splicing output.
-        await write(res, 'data: ' + JSON.stringify({ error: detail, incomplete: true }) + '\n\n');
+        await sendWire('data: ' + JSON.stringify({ error: detail, incomplete: true }) + '\n\n');
     } else if (usable) {
       // Deliberate delivery-completion compatibility, matching Chat's stop branch.
       // Codex retries response.incomplete even after receiving usable text. Finish

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { parse, lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 import { frameGrpcMessage } from '../native-wire/robin-current.mjs';
@@ -114,4 +115,179 @@ test('cancellation stops subscription lookup and shutdown prevents late snapshot
   await ready; f.app.accounts.close(); controller.abort();
   await assert.rejects(pending, { code: 'SUBSCRIPTION_CANCELLED' }); release();
   assert.equal(f.store.data.accounts[0].subscription, undefined); assert.equal(f.app.accounts.subscriptionPending.size, 0);
+});
+
+test('coalesced single-flight ref-counts caller aborts and single-caller cancel never overwrites valid subscription with error', async t => {
+  let subEntered, subRelease, subUpstreamSignal;
+  const subReady = new Promise(r => { subEntered = r; }), subGate = new Promise(r => { subRelease = r; });
+  let quotaEntered, quotaRelease, quotaUpstreamSignal;
+  const quotaReady = new Promise(r => { quotaEntered = r; }), quotaGate = new Promise(r => { quotaRelease = r; });
+  let termsEntered, termsRelease, termsUpstreamSignal;
+  const termsReady = new Promise(r => { termsEntered = r; }), termsGate = new Promise(r => { termsRelease = r; });
+
+  const f = await fixture({
+    subscriptionFetch: async (_token, { signal }) => {
+      subUpstreamSignal = signal;
+      subEntered();
+      await subGate;
+      return { payload: snapshot(2), observedAt };
+    },
+    quotaFetch: async (_token, { signal }) => {
+      quotaUpstreamSignal = signal;
+      quotaEntered();
+      await quotaGate;
+      return { payload: Buffer.alloc(0), observedAt };
+    },
+    termsAccept: async (_token, { signal }) => {
+      termsUpstreamSignal = signal;
+      termsEntered();
+      await termsGate;
+      return { status: 'accepted', version: 1, legacyVersion: null, acceptedAt: observedAt };
+    },
+  });
+  t.after(f.close);
+  f.store.data.accounts[0].googleSubject = 'sub-acc-0';
+
+  // 1. Coalesced subscription refresh: caller 1 aborts, caller 2 succeeds, upstream is NOT aborted.
+  const subC1 = new AbortController(), subC2 = new AbortController();
+  const pSub1 = f.app.accounts.refreshSubscription('acc-0', { signal: subC1.signal });
+  const pSub2 = f.app.accounts.refreshSubscription('acc-0', { signal: subC2.signal });
+  await subReady;
+  subC1.abort();
+  await assert.rejects(pSub1, { code: 'SUBSCRIPTION_CANCELLED', status: 499 });
+  assert.equal(subUpstreamSignal.aborted, false, 'shared upstream signal must remain active for remaining waiter');
+  subRelease();
+  const subRes = await pSub2;
+  assert.equal(subRes.status, 'ok');
+  assert.equal(subRes.tier, 'pro');
+
+  // 2. Coalesced quota refresh: caller 1 aborts, caller 2 succeeds.
+  const qC1 = new AbortController(), qC2 = new AbortController();
+  const pQ1 = f.app.accounts.refreshQuota('acc-0', { signal: qC1.signal });
+  const pQ2 = f.app.accounts.refreshQuota('acc-0', { signal: qC2.signal });
+  await quotaReady;
+  qC1.abort();
+  await assert.rejects(pQ1, { code: 'QUOTA_CANCELLED', status: 499 });
+  assert.equal(quotaUpstreamSignal.aborted, false);
+  quotaRelease();
+  await pQ2;
+
+  // 3. Coalesced terms acceptance: caller 1 aborts, caller 2 succeeds.
+  const tC1 = new AbortController(), tC2 = new AbortController();
+  const pT1 = f.app.accounts.acceptTerms('acc-0', { confirmed: true, signal: tC1.signal });
+  const pT2 = f.app.accounts.acceptTerms('acc-0', { confirmed: true, signal: tC2.signal });
+  await termsReady;
+  tC1.abort();
+  await assert.rejects(pT1, { code: 'TOS_CANCELLED', status: 499 });
+  assert.equal(termsUpstreamSignal.aborted, false);
+  termsRelease();
+  const tRes = await pT2;
+  assert.equal(tRes.status, 'accepted');
+
+  // 4. Single-caller subscription cancellation (tab close) never overwrites prior 'pro' snapshot with status:'error'.
+  f.app.accounts.subscriptionAttempts.clear();
+  let singleEntered, singleSignal;
+  const singleReady = new Promise(r => { singleEntered = r; });
+  f.app.accounts.subscriptionFetch = async (_token, { signal }) => {
+    singleSignal = signal;
+    singleEntered();
+    await new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { code: 'SUBSCRIPTION_CANCELLED', status: 499 })), { once: true });
+    });
+  };
+  const singleCtrl = new AbortController();
+  const singlePending = f.app.accounts.refreshSubscription('acc-0', { signal: singleCtrl.signal });
+  await singleReady;
+  singleCtrl.abort();
+  await assert.rejects(singlePending, { code: 'SUBSCRIPTION_CANCELLED', status: 499 });
+  assert.equal(singleSignal.aborted, true);
+  const preserved = f.app.accounts.list()[0].subscription;
+  assert.equal(preserved.status, 'ok');
+  assert.equal(preserved.tier, 'pro');
+  assert.equal(preserved.errorCode, null);
+});
+
+test('aborted request after readJson is dropped before inference and app.close() drains work before store.unlock()', async t => {
+  const f = await fixture({ allowAutomaticRecovery: true });
+  t.after(() => fs.rmSync(f.store.directory, { recursive: true, force: true }));
+  f.store.lock();
+
+  // 1. Disconnect right as readJson finishes must skip execute() / openTurn.
+  f.app.server.once('request', (req, res) => {
+    if (req.url === '/v1/chat/completions') {
+      req.once('end', () => { res.destroy(); });
+    }
+  });
+  await new Promise(resolve => {
+    const req = http.request(f.base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + f.key.key, 'Content-Type': 'application/json' },
+    }, res => { res.on('data', () => {}); res.on('close', resolve); res.on('end', resolve); });
+    req.on('error', resolve);
+    req.end(JSON.stringify({ model: 'gemini-argon', messages: [{ role: 'user', content: 'early-abort' }] }));
+  });
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(f.seen.length, 0);
+
+  // 2. Start detached RequestResumption turn + background token refresh, then app.close() -> store.unlock().
+  let turnEntered, turnSettledAfterCleanup = false;
+  const turnReady = new Promise(r => { turnEntered = r; });
+  const origRunTurn = f.app.provider.runTurn.bind(f.app.provider);
+  f.app.provider.runTurn = async (...args) => {
+    try {
+      return await origRunTurn(...args);
+    } finally {
+      await new Promise(r => setTimeout(r, 35));
+      turnSettledAfterCleanup = true;
+    }
+  };
+  f.app.provider.openTurn = (_token, options) => ({
+    events: (async function* () {
+      turnEntered();
+      await new Promise((_, reject) => {
+        options.signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { code: 'NATIVE_TRANSPORT_ABORTED' }));
+        }, { once: true });
+      });
+    })(),
+    cancel() {},
+  });
+  const clientCtrl = new AbortController();
+  const detachedReq = fetch(f.base + '/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + f.key.key,
+      'Content-Type': 'application/json',
+      'X-Session-ID': 'shutdown-drain-session',
+    },
+    body: JSON.stringify({ model: 'gemini-argon', messages: [{ role: 'user', content: 'drain check' }] }),
+    signal: clientCtrl.signal,
+  }).catch(() => null);
+  await turnReady;
+  clientCtrl.abort();
+  await detachedReq;
+
+  let refreshEntered;
+  const refreshReady = new Promise(r => { refreshEntered = r; });
+  f.app.accounts.invalidate('acc-1');
+  f.app.accounts.refresh = async () => {
+    refreshEntered();
+    await new Promise(r => setTimeout(r, 80));
+    return { accessToken: 'late-access', refreshToken: 'late-rotated-refresh', expiresInSeconds: 3600 };
+  };
+  const bgRefresh = f.app.accounts.getValidAccessToken('acc-1').catch(e => e);
+  await refreshReady;
+
+  const beforeDisk = fs.readFileSync(f.store.file, 'utf8');
+  await f.app.close();
+  assert.equal(turnSettledAfterCleanup, true, 'app.close() must wait for in-flight execute() cleanup before returning');
+  f.store.unlock();
+  await bgRefresh;
+  await new Promise(r => setTimeout(r, 50));
+
+  assert.equal(f.store.closed, true);
+  assert.throws(() => f.store.save(), { code: 'STATE_CLOSED', status: 503 });
+  const afterDisk = fs.readFileSync(f.store.file, 'utf8');
+  assert.equal(afterDisk.includes('late-rotated-refresh'), false, 'no late refresh token write may occur after close/unlock');
+  assert.equal(afterDisk, beforeDisk);
 });

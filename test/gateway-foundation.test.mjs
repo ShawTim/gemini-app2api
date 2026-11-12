@@ -388,3 +388,134 @@ test("sticky TTL/capacity eviction and in-flight capacity never attach old routi
   await busy;
   assert.equal(p.sessions.size, 1);
 });
+
+test("valid admin logins do not self-lockout, reset prior failed counts, and session() skips stale duplicate cookies", (t) => {
+  const s = storeFor(t);
+  let now = 5000;
+  const auth = new Security(s, { now: () => now });
+  for (let i = 0; i < 12; i++) {
+    const res = auth.login("fixture-password-not-real", "legit-admin");
+    assert.ok(res.token);
+  }
+  assert.equal(auth.attempts.has("legit-admin"), false);
+
+  for (let i = 0; i < 7; i++) {
+    assert.throws(() => auth.login("wrong-password", "mixed-ip"), { code: "INVALID_ADMIN_LOGIN" });
+  }
+  assert.equal(auth.attempts.get("mixed-ip")?.count, 7);
+  const valid = auth.login("fixture-password-not-real", "mixed-ip");
+  assert.equal(auth.attempts.has("mixed-ip"), false);
+  for (let i = 0; i < 7; i++) {
+    assert.throws(() => auth.login("wrong-password", "mixed-ip"), { code: "INVALID_ADMIN_LOGIN" });
+  }
+  assert.throws(() => auth.login("wrong-password", "mixed-ip"), { code: "INVALID_ADMIN_LOGIN" });
+  assert.throws(() => auth.login("fixture-password-not-real", "mixed-ip"), { code: "LOGIN_RATE_LIMITED" });
+
+  const validCookie = auth.cookie(valid.token).split(";")[0];
+  const resolved = auth.session({
+    headers: {
+      cookie: `gateway_admin=stale_tossed_token; theme=dark; ${validCookie}; gateway_admin=another_stale`,
+    },
+  });
+  assert.ok(resolved);
+  assert.equal(resolved.token, valid.token);
+  assert.equal(resolved.csrf, valid.csrf);
+});
+
+test("StateStore fences save() after unlock() with STATE_CLOSED until re-locked", (t) => {
+  const s = storeFor(t);
+  s.lock();
+  s.updateSettings({ maxConcurrent: 6 });
+  s.unlock();
+  assert.throws(() => s.save(), (e) => e.code === "STATE_CLOSED" && e.status === 503);
+  assert.throws(() => s.createKey("after-unlock"), (e) => e.code === "STATE_CLOSED" && e.status === 503);
+  s.lock();
+  const key = s.createKey("after-relock");
+  assert.ok(key.id);
+  s.unlock();
+});
+
+test("AccountPool skips session map persistence when sessionId is absent, maintains true LRU, and rechecks live inFlight on failover", async () => {
+  let now = 1000;
+  const p = new AccountPool(fakeAccounts(), {
+    now: () => now++,
+    settings: () => ({ maxSessions: 2, sessionTtlMs: 60000 }),
+  });
+  await p.run({ owner: "one", sessionId: "s1" }, async (id) => id);
+  const s1InternalId = p.listSessions()[0].id;
+  await p.run({ owner: "one", sessionId: "s2" }, async (id) => id);
+  const s2InternalId = p.listSessions().find((s) => s.id !== s1InternalId).id;
+  assert.equal(p.sessions.size, 2);
+
+  for (let i = 0; i < 6; i++) {
+    const stateless = await p.run({ owner: "one" }, async (id) => id);
+    assert.match(stateless.sessionId, /^[0-9a-f-]{36}$/i);
+  }
+  assert.equal(p.sessions.size, 2);
+
+  // Touch s1 so s1 becomes MRU and s2 becomes LRU.
+  await p.run({ owner: "one", sessionId: "s1" }, async (id) => id);
+  await p.run({ owner: "one", sessionId: "s3" }, async (id) => id);
+  assert.equal(p.sessions.size, 2);
+  await p.run({ owner: "one", sessionId: "s1" }, async (id) => id);
+  const listed = p.listSessions();
+  const retainedS1 = listed.find((s) => s.id === s1InternalId);
+  const evictedS2 = listed.find((s) => s.id === s2InternalId);
+  assert.ok(retainedS1);
+  assert.equal(retainedS1.turns, 3, "MRU session s1 must survive capacity eviction");
+  assert.equal(evictedS2, undefined, "LRU session s2 must be evicted first");
+
+  // Live inFlight < 2 check across failover attempts:
+  const livePool = new AccountPool(fakeAccounts());
+  livePool.stats("b").inFlight = 2;
+  const seenAccounts = [];
+  const recovered = await livePool.run({ owner: "caller", sessionId: "live-failover" }, async (id, ctx) => {
+    seenAccounts.push({ id, failover: ctx.failover });
+    if (id === "a") {
+      // Account b finishes its busy turns while attempt 0 is running on account a.
+      livePool.stats("b").inFlight = 0;
+      throw Object.assign(new Error("quota"), { status: 429, code: "NATIVE_QUOTA_EXHAUSTED" });
+    }
+    return "recovered-on-" + id;
+  });
+  assert.equal(recovered.result, "recovered-on-b");
+  assert.equal(recovered.accountId, "b");
+  assert.deepEqual(seenAccounts, [
+    { id: "a", failover: false },
+    { id: "b", failover: true },
+  ]);
+});
+
+test("Accounts.cancelFlow and Accounts.close drain backgroundTasks immediately when login.done never settles", async (t) => {
+  const s = storeFor(t);
+  s.importProfile(syntheticProfile);
+  let closedCalls = 0;
+  const accounts = new Accounts(s, {
+    login: async () => ({
+      authorizationUrl: "https://accounts.google.com/o/oauth2/auth?synthetic",
+      done: new Promise(() => {}),
+      close() {
+        closedCalls++;
+      },
+    }),
+  });
+
+  const first = await accounts.beginLogin("first-never-settles");
+  assert.equal(accounts.backgroundTasks.size, 1);
+  accounts.cancelFlow(first.flowId);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(accounts.flow(first.flowId).status, "cancelled");
+  assert.equal(accounts.backgroundTasks.size, 0);
+  assert.equal(closedCalls, 1);
+
+  const second = await accounts.beginLogin("second-never-settles");
+  assert.equal(accounts.backgroundTasks.size, 1);
+  const drained = await Promise.race([
+    accounts.close().then(() => "drained"),
+    new Promise((resolve) => setTimeout(() => resolve("hung"), 500)),
+  ]);
+  assert.equal(drained, "drained");
+  assert.equal(accounts.flow(second.flowId).status, "cancelled");
+  assert.equal(accounts.backgroundTasks.size, 0);
+  assert.equal(closedCalls, 2);
+});

@@ -487,7 +487,7 @@ test("injected transient and auth HTTP failures preserve safe classification, fu
 test("account updates and deletion during generation do not cancel accepted work or resurrect configuration", async t => {
   const f = await fixture({ accountCount: 1, allowFailover: false, turns: ["Accepted work completed"] });
   const release = holdTurns(f, t);
-  const pending = f.api("/v1/chat/completions", { method: "POST", body: chat });
+  const pending = f.api("/v1/chat/completions", { method: "POST", body: chat, headers: { "X-Session-ID": "deleted-account-session" } });
   await until(() => f.seen.length === 1);
   const patch = await f.admin("accounts/acc-0", { method: "PATCH", body: { label: "Updated while generating" } });
   assert.equal(patch.status, 200); await patch.text();

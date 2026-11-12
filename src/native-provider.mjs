@@ -83,7 +83,8 @@ function safeFailure(error) {
   if (error?.code === 'OAUTH_REFRESH_FAILED') return protocolError('OAUTH_REFRESH_FAILED', 502);
   if (error?.code === 'REQUEST_CANCELLED') return protocolError('NATIVE_TURN_ABORTED', 499);
   if (error?.code === 'NATIVE_TRANSPORT_ABORTED' || error?.name === 'AbortError') return protocolError('NATIVE_TURN_ABORTED', 499);
-  if (error?.code === 'NATIVE_TRANSPORT_TIMEOUT') return protocolError('NATIVE_TURN_TIMEOUT', 504);
+  if (error?.code === 'NATIVE_TRANSPORT_TIMEOUT' || error?.code === 'NATIVE_TURN_TIMEOUT') return protocolError('NATIVE_TURN_TIMEOUT', 504);
+  if (error?.code === 'RESPONSE_TOO_LARGE') return protocolError('RESPONSE_TOO_LARGE', 502);
   return protocolError(TRANSPORT_ERRORS.has(error?.code) ? error.code : 'NATIVE_TURN_FAILED', 502);
 }
 
@@ -190,7 +191,11 @@ export class NativeDirectProvider {
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
       ...((body.reasoning_effort ?? body.reasoning?.effort) === undefined ? {} : { requestedReasoningEffort: body.reasoning_effort ?? body.reasoning?.effort }) };
-    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0;
+    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, sinkFailed = false;
+    const deliver = async event => {
+      try { await onDelta(event); }
+      catch (error) { sinkFailed = true; throw error; }
+    };
     // The sink owns the commit boundary: provider-published text may still be held.
     // Missing/invalid feedback is conservative for streaming callers.
     const committedOutput = () => {
@@ -211,13 +216,19 @@ export class NativeDirectProvider {
           phase: 'output', nonMonotonicSite: 'provider_publish', sameResponseIdentity: snapshotId !== null,
           snapshotPriorBytes: Buffer.byteLength(publishedContent), snapshotNextBytes: Buffer.byteLength(text),
           snapshotCommonPrefixBytes: commonPrefixBytes(publishedContent, text), ...committed });
-        await onDelta({ reset: true, sameResponseIdentity: true, response: identity });
+        await deliver({ reset: true, sameResponseIdentity: true, response: identity });
         publishedContent = ''; publishedCalls = 0;
       }
-      if (text.length > publishedContent.length) { const content = text.slice(publishedContent.length); publishedContent = text; await onDelta({ content, response: { ...identity, thinkingLevel: observedThinking } }); }
+      if (text.length > publishedContent.length) {
+        const content = text.slice(publishedContent.length);
+        await deliver({ content, response: { ...identity, thinkingLevel: observedThinking } });
+        publishedContent = text;
+      }
       while (publishedCalls < liveCalls.length) {
         if (body.parallel_tool_calls === false && publishedCalls >= 1) fail('PARALLEL_TOOL_CALLS_DISABLED');
-        const call = liveCalls[publishedCalls++]; await onDelta({ call, response: { ...identity, thinkingLevel: observedThinking } });
+        const call = liveCalls[publishedCalls];
+        await deliver({ call, response: { ...identity, thinkingLevel: observedThinking } });
+        publishedCalls++;
       }
     };
     try {
@@ -246,7 +257,7 @@ export class NativeDirectProvider {
         const item = await bounded(iterator.next());
         if (item.done) break;
         const event = item.value;
-        if (incremental && event.type === 'headers') { await onDelta({ start: true, response: identity }); continue; }
+        if (incremental && event.type === 'headers') { await deliver({ start: true, response: identity }); continue; }
         if (event.type === 'frame') {
           frames++;
           received += event.bytes?.length ?? RESPONSE_LIMITS.wireBytes + 1;
@@ -282,12 +293,12 @@ export class NativeDirectProvider {
             if (quotaCode) fail(quotaCode, 429);
             fail('MODEL_DOWNGRADE_REJECTED');
           }
+          if (outputShape.nativeRefusalPresent) fail('NATIVE_RESPONSE_REFUSED', 422);
           if (info.text !== null) {
             const id = info.responseId || null;
             if (this.allowTextSnapshotReplacement && !id) fail('INVALID_NATIVE_RESPONSE');
             if (snapshotId !== null && id !== snapshotId) fail('INVALID_NATIVE_RESPONSE');
             const extendsPrior = info.text.startsWith(rawText);
-            const delta = extendsPrior ? info.text.slice(rawText.length) : info.text;
             if (!extendsPrior) {
               const committed = committedOutput();
               // Validate identity BEFORE asking the sink to discard any buffered data.
@@ -300,17 +311,21 @@ export class NativeDirectProvider {
                   phase: 'decode', nonMonotonicSite: 'snapshot_stream', sameResponseIdentity: true,
                   snapshotPriorBytes: Buffer.byteLength(rawText), snapshotNextBytes: Buffer.byteLength(info.text),
                   snapshotCommonPrefixBytes: commonPrefixBytes(rawText, info.text), ...committed });
-                await onDelta({ reset: true, sameResponseIdentity: true, response: identity });
-                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0;
+                if (liveSyncedLength > 0) await deliver({ reset: true, sameResponseIdentity: true, response: identity });
+                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0;
               }
             }
             if (id) snapshotId = id;
             if (!extendsPrior) revisionCount++;
             if (info.text !== rawText) modelComplete = info.completed;
             rawText = info.text;
-            if (incremental) await publish(liveSplitter.push(delta));
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
+          }
+          if (incremental && observedMode === modeCategory && liveSyncedLength < rawText.length) {
+            const delta = rawText.slice(liveSyncedLength);
+            liveSyncedLength = rawText.length;
+            await publish(liveSplitter.push(delta));
           }
           if (info.quotaObservation) {
             quotaFrames++;
@@ -342,7 +357,15 @@ export class NativeDirectProvider {
         fail('EMPTY_NATIVE_RESPONSE');
       }
       let items;
-      if (incremental) { await publish(liveSplitter.flush()); items = liveItems; }
+      if (incremental) {
+        if (liveSyncedLength < rawText.length) {
+          const delta = rawText.slice(liveSyncedLength);
+          liveSyncedLength = rawText.length;
+          await publish(liveSplitter.push(delta));
+        }
+        await publish(liveSplitter.flush());
+        items = liveItems;
+      }
       else { const splitter = createToolCallSplitter({ policy }); items = [...splitter.push(rawText), ...splitter.flush()]; }
       const calls = items.filter(item => item.type === 'call').map(item => item.call);
       const content = items.filter(item => item.type === 'content').map(item => item.text).join('');
@@ -369,8 +392,13 @@ export class NativeDirectProvider {
       note('provider_success');
       return result;
     } catch (error) {
-      if (incremental) { try { await publish(liveSplitter.flush()); } catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ } }
+      const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && observedMode === modeCategory;
+      if (incremental && modeVerified && !sinkFailed) {
+        try { await publish(liveSplitter.flush()); }
+        catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }
+      }
       const safe = safeFailure(error);
+      if (!modeVerified) safe.unverifiedOutput = true;
       note('provider_failure', { code: safe.code });
       let transport = {};
       try { transport = turn?.getSafeStatus?.() ?? {}; } catch {}
@@ -394,7 +422,7 @@ export class NativeDirectProvider {
         ...(outputFailureReason ? { outputFailureReason, outputFailureSource: 'exact_text_signature', outputToolCalls: 0 } : {}),
         ...(emptyResponseReason ? { emptyResponseReason } : {}),
       });
-      if (incremental && (publishedContent.length || publishedCalls)) safe.partialResult = { ...identity, content: publishedContent, calls: liveCalls.slice(0, publishedCalls),
+      if (incremental && modeVerified && (publishedContent.length || publishedCalls)) safe.partialResult = { ...identity, content: publishedContent, calls: liveCalls.slice(0, publishedCalls),
         thinkingLevel: observedThinking, resolvedModeCategory: observedMode, nativeEvidence: safe.nativeEvidence };
       throw safe;
     }

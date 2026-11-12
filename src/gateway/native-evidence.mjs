@@ -24,7 +24,7 @@ export function sanitizeUpstreamMessage(value) {
       "[credential redacted]",
     )
     .replace(
-      /\b(?:sk-|gw_|gk_|gapi_)[A-Za-z0-9_-]{16,}|\b[0-9]{7,}\b|\b[A-Za-z0-9_-]{64,}\b/g,
+      /\b(?:sk-|gsk_|gw_|gk_|gapi_)[A-Za-z0-9_-]{16,}|\b[0-9]{7,}\b|\b[A-Za-z0-9_-]{64,}\b/g,
       "[identifier redacted]",
     )
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");

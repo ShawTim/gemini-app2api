@@ -118,6 +118,8 @@ export class StateStore {
     }
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     checkFile(this.directory, true);
+    this.locked = false;
+    this.closed = false;
     if (fs.existsSync(this.file)) {
       checkFile(this.file);
       const size = fs.statSync(this.file).size;
@@ -146,26 +148,38 @@ export class StateStore {
       };
       this.save();
     }
-    this.locked = false;
   }
   lock() {
     const file = path.join(this.directory, "runtime.lock");
+    let fd;
     try {
-      this.lockFd = fs.openSync(file, "wx", 0o600);
-      fs.writeFileSync(this.lockFd, String(process.pid));
+      fd = fs.openSync(file, "wx", 0o600);
+      fs.writeFileSync(fd, String(process.pid));
+      this.lockFd = fd;
       this.locked = true;
+      this.closed = false;
     } catch {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch {}
+        try { fs.unlinkSync(file); } catch {}
+      }
       throw fault("STATE_IN_USE", 503);
     }
   }
   unlock() {
+    this.closed = true;
     if (this.locked) {
-      fs.closeSync(this.lockFd);
-      fs.unlinkSync(path.join(this.directory, "runtime.lock"));
-      this.locked = false;
+      try {
+        fs.closeSync(this.lockFd);
+      } finally {
+        this.lockFd = undefined;
+        this.locked = false;
+        fs.unlinkSync(path.join(this.directory, "runtime.lock"));
+      }
     }
   }
   save() {
+    if (this.closed) throw fault("STATE_CLOSED", 503);
     checkFile(this.directory, true);
     if (fs.existsSync(this.file)) checkFile(this.file);
     const temp = path.join(

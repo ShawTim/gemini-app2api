@@ -131,7 +131,8 @@ export function createGateway({
     // first idle moment instead of disturbing accepted requests.
     settingsInvalidationPending = false,
     origin = publicOrigin;
-  const controllers = new Set();
+  const controllers = new Set(),
+    inFlightTasks = new Set();
   const auditEvent = (action, target = null) => {
     audit.unshift({ id: crypto.randomUUID(), at: Date.now(), action, target });
     audit.length = Math.min(audit.length, 200);
@@ -232,6 +233,7 @@ export function createGateway({
     body,
     { owner, route, playground = false, accountTestId = null } = {},
   ) {
+    if (req.aborted || res.destroyed) return;
     const canonical =
       route === "responses"
         ? protocol.normalizeResponsesRequest(body).body
@@ -248,16 +250,23 @@ export function createGateway({
     if (Number.isSafeInteger(promptLimit) && promptLimit > 0 &&
       Number.isInteger(body.__promptBytes) && body.__promptBytes > promptLimit)
       throw fault("PROMPT_SIZE_LIMIT", 413);
+    if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
     const outputStreaming = !playground && body.stream === true;
+    const controller = new AbortController(),
+      timer = setTimeout(() => {
+        controller.abort(fault('REQUEST_DEADLINE', 504));
+        if (res.headersSent && !res.destroyed && !res.writableEnded) res.destroy?.();
+      }, settings.timeoutMs + 1000);
+    timer.unref();
+    controllers.add(controller);
     const delivery = createResponseDelivery(res, { route, stream: outputStreaming, model: canonical.model,
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
-      promptChars: body.__promptChars, deferEmptyStart: !playground && !accountTestId && !canonical.native_search });
-    if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
-    const controller = new AbortController(),
-      timer = setTimeout(() => controller.abort(fault('REQUEST_DEADLINE', 504)), settings.timeoutMs + 1000);
-    timer.unref();
-    controllers.add(controller);
+      promptChars: body.__promptChars, deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
+      signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000) });
+    let resolveInFlight;
+    const inFlightPromise = new Promise((r) => { resolveInFlight = r; });
+    inFlightTasks.add(inFlightPromise);
     active++;
     totalRequests++;
     const id = "req_" + crypto.randomUUID(),
@@ -284,6 +293,7 @@ export function createGateway({
     };
     req.once("aborted", disconnect);
     res.once("close", disconnect);
+    if (req.aborted || res.destroyed) disconnect();
     try {
       const publicRequest = !accountTestId && !playground;
       identity = publicRequest ? resolveSessionIdentity(req.headers, canonical) : { sessionId: undefined, source: "admin" };
@@ -311,8 +321,8 @@ export function createGateway({
         catch (error) {
           // Only content the caller actually received commits this turn. A held
           // tiny prefix is still replaceable by one retry.
-          error.responseStarted = delivery.publishedBytes > 0 || delivery.callCount > 0;
-          if (!error.responseStarted && delivery.retryableShortfall) error.shortOutput = true;
+          error.responseStarted = delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
+          if (!error.responseStarted && !error.unverifiedOutput && delivery.retryableShortfall) error.shortOutput = true;
           const evidence = safeNativeEvidence(error.nativeEvidence);
           const failure = { accountId: acc, status: Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502,
             code: errorPayload(error).error.code, ...(evidence ? { nativeEvidence: evidence } : {}) };
@@ -382,7 +392,15 @@ export function createGateway({
         res.setHeader('X-Should-Retry', 'false');
         throw terminal;
       }
-      if (await delivery.interrupt(error)) { status = 200; outputIncomplete = true; return; }
+      let interrupted = false;
+      try {
+        interrupted = await delivery.interrupt(error);
+      } catch (interruptError) {
+        error = interruptError;
+        status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502;
+        errorCode = errorPayload(error).error.code;
+      }
+      if (interrupted) { status = 200; outputIncomplete = true; return; }
       if (res.headersSent) status = res.statusCode;
       throw error;
     } finally {
@@ -423,6 +441,8 @@ export function createGateway({
         ...(nativeEvidence ? { nativeEvidence } : {}),
       });
       requests.length = Math.min(200, requests.length);
+      inFlightTasks.delete(inFlightPromise);
+      resolveInFlight();
     }
   }
   const server = http.createServer(async (req, res) => {
@@ -507,6 +527,7 @@ export function createGateway({
         if (req.method === "POST" && p === "/admin/api/login") {
           security.checkOrigin(req, origin);
           const body = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
           only(body, ["password"]);
           const login = security.login(body.password, req.socket.remoteAddress);
           res.setHeader("Set-Cookie", security.cookie(login.token));
@@ -544,7 +565,9 @@ export function createGateway({
         if (req.method === "GET" && p === "/admin/api/accounts")
           return json(res, { accounts: pool.snapshotAccounts() });
         if (req.method === 'POST' && p === '/admin/api/accounts/quota-refresh') {
-          const input = await readJson(req, 4096); only(input, ['trigger']);
+          const input = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          only(input, ['trigger']);
           const result = quotaRefreshJobs.start(input);
           if (!result.reused) auditEvent('quota.batch.started', result.job.id);
           return json(res, result, 202);
@@ -553,6 +576,7 @@ export function createGateway({
         if (quotaJob && req.method === 'GET') return json(res, { job: quotaRefreshJobs.get(quotaJob[1]) });
         if (req.method === "POST" && p === "/admin/api/accounts/login") {
           const b = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
           only(b, ["label", "acceptTerms"]);
           const result = await accounts.beginLogin(b.label, { acceptTerms: b.acceptTerms === undefined ? false : b.acceptTerms });
           auditEvent("account.login.started");
@@ -570,11 +594,14 @@ export function createGateway({
         }
         const acceptTerms = p.match(/^\/admin\/api\/accounts\/([a-zA-Z0-9_-]+)\/terms\/accept$/);
         if (acceptTerms && req.method === 'POST') {
-          const input = await readJson(req, 4096); only(input, ['confirmed']);
+          const input = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          only(input, ['confirmed']);
           if (input.confirmed !== true) throw fault('CONFIRMATION_REQUIRED');
           const controller = new AbortController();
           const cancel = () => { if (!res.writableEnded) controller.abort(); };
           req.once('aborted', cancel); res.once('close', cancel); controllers.add(controller);
+          if (req.aborted || res.destroyed) cancel();
           try {
             const terms = await accounts.acceptTerms(acceptTerms[1], { confirmed: true, signal: controller.signal });
             auditEvent('account.terms.accepted', acceptTerms[1]);
@@ -587,22 +614,36 @@ export function createGateway({
           /^\/admin\/api\/accounts\/([a-zA-Z0-9_-]+)\/identity$/,
         );
         if (identity && req.method === "POST") {
-          only(await readJson(req, 4096), []);
-          return json(res, await accounts.updateIdentity(identity[1]));
+          const body = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          only(body, []);
+          const controller = new AbortController();
+          const cancel = () => { if (!res.writableEnded) controller.abort(); };
+          req.once("aborted", cancel); res.once("close", cancel); controllers.add(controller);
+          if (req.aborted || res.destroyed) cancel();
+          try {
+            return json(res, await accounts.updateIdentity(identity[1], { signal: controller.signal }));
+          } finally {
+            req.off("aborted", cancel); res.off("close", cancel); controllers.delete(controller);
+          }
         }
         const accountTest = p.match(/^\/admin\/api\/accounts\/([a-zA-Z0-9_-]+)\/test$/);
         if (accountTest && req.method === "POST") {
           const input = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
           only(input, ["model"]);
           if (!protocol.NATIVE_MODELS.includes(input.model)) throw fault("UNSUPPORTED_MODEL");
           return await execute(req, res, { model: input.model, messages: [{ role: "user", content: "Reply with OK." }], thinking_level: 2 }, { owner: "admin-account-test", route: "chat", accountTestId: accountTest[1] });
         }
         const subscriptionRefresh = p.match(/^\/admin\/api\/accounts\/([a-zA-Z0-9_-]+)\/subscription$/);
         if (subscriptionRefresh && req.method === "POST") {
-          only(await readJson(req, 4096), []);
+          const body = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          only(body, []);
           const controller = new AbortController();
           const cancel = () => { if (!res.writableEnded) controller.abort(); };
           req.once("aborted", cancel); res.once("close", cancel); controllers.add(controller);
+          if (req.aborted || res.destroyed) cancel();
           try {
             const subscription = await accounts.refreshSubscription(subscriptionRefresh[1], { signal: controller.signal });
             auditEvent("subscription.refresh", subscriptionRefresh[1]);
@@ -613,14 +654,26 @@ export function createGateway({
         }
         const quotaRefresh = p.match(new RegExp("^/admin/api/accounts/([a-zA-Z0-9_-]+)/quota$"));
         if (quotaRefresh && req.method === "POST") {
-          only(await readJson(req, 4096), []);
-          const quota = await accounts.refreshQuota(quotaRefresh[1]);
-          auditEvent("quota.refresh", quotaRefresh[1]);
-          return json(res, { quota });
+          const body = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          only(body, []);
+          const controller = new AbortController();
+          const cancel = () => { if (!res.writableEnded) controller.abort(); };
+          req.once("aborted", cancel); res.once("close", cancel); controllers.add(controller);
+          if (req.aborted || res.destroyed) cancel();
+          try {
+            const quota = await accounts.refreshQuota(quotaRefresh[1], { signal: controller.signal });
+            auditEvent("quota.refresh", quotaRefresh[1]);
+            return json(res, { quota });
+          } finally {
+            req.off("aborted", cancel); res.off("close", cancel); controllers.delete(controller);
+          }
         }
         const acc = p.match(/^\/admin\/api\/accounts\/([a-zA-Z0-9_-]+)$/);
         if (acc && req.method === "PATCH") {
-          accounts.update(acc[1], await readJson(req, 4096));
+          const body = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          accounts.update(acc[1], body);
           if (active) settingsInvalidationPending = true;
           else provider.sessions?.clear();
           auditEvent("account.updated", acc[1]);
@@ -638,6 +691,7 @@ export function createGateway({
           return json(res, { keys: store.listKeys() });
         if (p === "/admin/api/keys" && req.method === "POST") {
           const b = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
           only(b, ["label"]);
           const key = store.createKey(b.label);
           auditEvent("key.created", key.id);
@@ -653,7 +707,9 @@ export function createGateway({
         if (p === "/admin/api/settings" && req.method === "GET")
           return json(res, effectiveSettings());
         if (p === "/admin/api/settings" && req.method === "PATCH") {
-          const value = store.updateSettings(await readJson(req, 4096));
+          const body = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          const value = store.updateSettings(body);
           // Accepted work keeps its settings snapshot; saving never aborts it.
           if (active) settingsInvalidationPending = true;
           else {
@@ -683,6 +739,7 @@ export function createGateway({
         }
         if (p === "/admin/api/playground" && req.method === "POST") {
           const b = await readJson(req, store.settings().maxBodyBytes);
+          if (req.aborted || res.destroyed) return;
           return await execute(req, res, b, {
             owner: "admin-playground",
             route: "chat",
@@ -711,6 +768,7 @@ export function createGateway({
           ["/v1/chat/completions", "/v1/responses"].includes(p)
         ) {
           const body = await readJson(req, store.settings().maxBodyBytes);
+          if (req.aborted || res.destroyed) return;
           const route = p.endsWith('responses') ? 'responses' : 'chat';
           if (allowAutomaticRecovery) {
             const canonical = route === 'responses' ? protocol.normalizeResponsesRequest(body).body : protocol.normalizeChatRequest(body);
@@ -777,16 +835,17 @@ export function createGateway({
     },
     async close() {
       closing = true;
+      for (const c of controllers) c.abort(fault('SERVER_SHUTDOWN', 499));
       resumption.close();
       await quotaRefreshJobs.close();
-      accounts.close();
-      for (const c of controllers) c.abort(fault('SERVER_SHUTDOWN', 499));
+      const accountsDrain = Promise.resolve(accounts.close());
       server.closeIdleConnections();
       await new Promise((resolve) => {
         server.close(resolve);
         const timer = setTimeout(() => server.closeAllConnections(), 1500);
         timer.unref();
       });
+      await Promise.allSettled([accountsDrain, ...inFlightTasks]);
     },
   };
 }

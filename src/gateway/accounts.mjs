@@ -18,6 +18,9 @@ import {
   verifiedState,
 } from "./provider-state.mjs";
 export class Accounts {
+  #termsEntries = new Map();
+  #quotaEntries = new Map();
+  #subscriptionEntries = new Map();
   constructor(
     store,
     {
@@ -62,6 +65,75 @@ export class Accounts {
     this.pending = new Map();
     this.flows = new Map();
     this.loginStarting = false;
+    this.closed = false;
+    this.shutdownController = new AbortController();
+    this.backgroundTasks = new Set();
+  }
+  #trackBackground(promise) {
+    const settled = Promise.resolve(promise).then(() => {}, () => {}).finally(() => {
+      this.backgroundTasks.delete(settled);
+    });
+    this.backgroundTasks.add(settled);
+    return promise;
+  }
+  #raceShutdown(promise, cancelError = () => fault("REQUEST_CANCELLED", 499), extraSignal = null) {
+    if (this.closed || this.shutdownController.signal.aborted || extraSignal?.aborted) {
+      return Promise.reject(cancelError());
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        cleanup();
+        reject(cancelError());
+      };
+      const cleanup = () => {
+        this.shutdownController.signal.removeEventListener("abort", onAbort);
+        extraSignal?.removeEventListener("abort", onAbort);
+      };
+      this.shutdownController.signal.addEventListener("abort", onAbort, { once: true });
+      extraSignal?.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(promise).then(
+        (value) => { cleanup(); resolve(value); },
+        (error) => { cleanup(); reject(error); },
+      );
+    });
+  }
+  #awaitSingleFlight(entry, signal, cancelCode) {
+    if (signal?.aborted) return Promise.reject(fault(cancelCode, 499));
+    entry.waiters++;
+    if (!signal) {
+      return entry.task.finally(() => { entry.waiters--; });
+    }
+    return new Promise((resolve, reject) => {
+      let detached = false;
+      const onCallerAbort = () => {
+        if (detached) return;
+        detached = true;
+        entry.waiters--;
+        if (entry.waiters <= 0) {
+          entry.controller.abort();
+          entry.task.then(resolve, reject);
+        } else {
+          reject(fault(cancelCode, 499));
+        }
+      };
+      signal.addEventListener("abort", onCallerAbort, { once: true });
+      entry.task.then(
+        (value) => {
+          if (detached) return;
+          detached = true;
+          signal.removeEventListener("abort", onCallerAbort);
+          entry.waiters--;
+          resolve(value);
+        },
+        (error) => {
+          if (detached) return;
+          detached = true;
+          signal.removeEventListener("abort", onCallerAbort);
+          entry.waiters--;
+          reject(error);
+        },
+      );
+    });
   }
   config() {
     const p = this.store.data.profile;
@@ -106,6 +178,7 @@ export class Accounts {
     return r;
   }
   recordUpstreamError(id, value) {
+    if (this.closed) return;
     const error = safeAccountError(value);
     if (!error) return;
     const account = this.record(id),
@@ -129,6 +202,7 @@ export class Accounts {
     }
   }
   recordProviderSuccess(id, model, result) {
+    if (this.closed) return false;
     const state = verifiedState(model, result);
     if (!state) return false;
     const account = this.record(id), previous = { providerStates: account.providerStates, quota: account.quota };
@@ -144,6 +218,7 @@ export class Accounts {
   }
   async beginLogin(label, { acceptTerms = false } = {}) {
     if (typeof acceptTerms !== 'boolean') throw fault('INVALID_TOS_CONSENT');
+    if (this.closed) throw fault("OAUTH_LISTENER_UNAVAILABLE", 503);
     if (
       label !== undefined &&
       (typeof label !== "string" || !label.trim() || label.length > 80)
@@ -172,12 +247,18 @@ export class Accounts {
     for (const [key, v] of this.flows)
       if (v.status !== "pending") this.flows.delete(key);
     this.flows.set(id, controller);
-    login.done
+    const flowTask = this.#raceShutdown(
+      login.done,
+      () => fault("OAUTH_LOGIN_FAILED", 502),
+      controller.termsController.signal,
+    )
       .then(async (tokens) => {
-        if (controller.status !== "pending") return;
+        if (this.closed || controller.status !== "pending") return;
         if (!tokens?.refreshToken) throw fault("REFRESH_TOKEN_REQUIRED", 502);
-        const identity = this.checkedIdentity(await this.identify(tokens));
-        if (controller.status !== "pending") return;
+        const identity = this.checkedIdentity(
+          await this.#raceShutdown(this.identify(tokens), () => fault("OAUTH_LOGIN_FAILED", 502)),
+        );
+        if (this.closed || controller.status !== "pending") return;
         const existing = this.store.data.accounts.find(
           (a) => a.googleSubject === identity.subject,
         );
@@ -222,7 +303,7 @@ export class Accounts {
             await this.acceptTerms(account.id, {
               confirmed: true, accessToken: tokens.accessToken, signal: controller.termsController.signal,
               beforeAccept: () => {
-                if (controller.status !== "pending" || controller.expiresAt <= Date.now()) throw fault("TOS_CANCELLED", 499);
+                if (this.closed || controller.status !== "pending" || controller.expiresAt <= Date.now()) throw fault("TOS_CANCELLED", 499);
               },
             });
           } catch (error) {
@@ -231,7 +312,7 @@ export class Accounts {
             throw error;
           }
         }
-        if (controller.status !== "pending") return;
+        if (this.closed || controller.status !== "pending") return;
         controller.termsStatus = safeTerms(account.terms).status;
         controller.status = "completed";
         this.onChange("account.login", account.id);
@@ -249,24 +330,26 @@ export class Accounts {
           ? error.code
           : "OAUTH_LOGIN_FAILED";
       });
+    this.#trackBackground(flowTask);
     return { flowId: id, authorizationUrl: login.authorizationUrl, expiresAt, acceptTerms };
   }
   async acceptTerms(id, { confirmed = false, signal, accessToken, beforeAccept = () => {} } = {}) {
     if (confirmed !== true) throw fault('CONFIRMATION_REQUIRED');
-    if (this.termsClosed || signal?.aborted) throw fault('TOS_CANCELLED', 499);
+    if (this.closed || this.termsClosed || signal?.aborted) throw fault('TOS_CANCELLED', 499);
     const account = this.record(id), subject = account.googleSubject;
+    const existingEntry = this.#termsEntries.get(id);
+    if (existingEntry) return this.#awaitSingleFlight(existingEntry, signal, 'TOS_CANCELLED');
     if (this.termsPending.has(id)) return this.termsPending.get(id);
     if (!account.refreshToken || account.status === 'auth_error') throw fault('ACCOUNT_LOGIN_REQUIRED', 401);
     const controller = new AbortController(); let timedOut = false, rejectAbort, attempted = false;
     const stopped = new Promise((_, reject) => { rejectAbort = reject; });
     const abortError = () => fault(timedOut ? 'TOS_TIMEOUT' : 'TOS_CANCELLED', timedOut ? 504 : 499);
-    const onAbort = () => rejectAbort(abortError()), forward = () => controller.abort();
+    const onAbort = () => rejectAbort(abortError());
     controller.signal.addEventListener('abort', onAbort, { once: true });
-    signal?.addEventListener('abort', forward, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.termsTimeoutMs); timer.unref();
     this.termsControllers.set(id, controller);
     const live = () => {
-      if (controller.signal.aborted || this.termsClosed || !this.store.data.accounts.includes(account) || account.googleSubject !== subject) throw abortError();
+      if (controller.signal.aborted || this.termsClosed || this.closed || !this.store.data.accounts.includes(account) || account.googleSubject !== subject) throw abortError();
     };
     const authorize = () => { live(); beforeAccept(); };
     const bounded = promise => Promise.race([promise, stopped]);
@@ -287,20 +370,26 @@ export class Accounts {
         const local = ['STATE_SAVE_FAILED', 'ACCOUNT_LOGIN_REQUIRED', 'NATIVE_PERMISSION_OR_AUTH', 'OAUTH_PROFILE_REQUIRED', 'OAUTH_REFRESH_FAILED'];
         const code = controller.signal.aborted ? (timedOut ? 'TOS_TIMEOUT' : 'TOS_CANCELLED') : local.includes(error?.code) ? error.code : termsFailureCode(error);
         const evidence = safeTermsEvidence(error.termsEvidence);
-        if (attempted && code !== 'STATE_SAVE_FAILED' && !this.termsClosed && (!controller.signal.aborted || timedOut) && this.store.data.accounts.includes(account) && account.googleSubject === subject) {
+        if (attempted && code !== 'STATE_SAVE_FAILED' && !this.termsClosed && !this.closed && (!controller.signal.aborted || timedOut) && this.store.data.accounts.includes(account) && account.googleSubject === subject) {
           const previous = account.terms;
           account.terms = { ...safeTerms(previous), status: 'error', errorCode: code, evidence };
           try { this.store.save(); } catch { account.terms = previous; throw fault('STATE_SAVE_FAILED', 500); }
         }
         const failure = fault(code, code === 'STATE_SAVE_FAILED' ? 500 : code === 'TOS_CANCELLED' ? 499 : code === 'TOS_TIMEOUT' ? 504 : [401, 403, 409, 429, 499, 504].includes(error?.status) ? error.status : 502);
         failure.termsEvidence = evidence; throw failure;
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener('abort', onAbort);
+        this.termsPending.delete(id);
+        this.termsControllers.delete(id);
+        this.#termsEntries.delete(id);
       }
     })();
+    const entry = { controller, waiters: 0, task };
+    this.#termsEntries.set(id, entry);
     this.termsPending.set(id, task);
-    try { return await task; } finally {
-      clearTimeout(timer); signal?.removeEventListener('abort', forward); controller.signal.removeEventListener('abort', onAbort);
-      this.termsPending.delete(id); this.termsControllers.delete(id);
-    }
+    this.#trackBackground(task);
+    return this.#awaitSingleFlight(entry, signal, 'TOS_CANCELLED');
   }
   checkedIdentity(identity) {
     return validateIdentity({
@@ -309,32 +398,45 @@ export class Accounts {
       email_verified: true,
     });
   }
-  async updateIdentity(id) {
-    const account = this.record(id);
-    const identity = this.checkedIdentity(
-      await this.identify({ accessToken: await this.getValidAccessToken(id) }),
-    );
-    if (this.record(id) !== account) throw fault("ACCOUNT_NOT_FOUND", 404);
-    if (
-      this.store.data.accounts.some(
-        (a) => a.id !== id && a.googleSubject === identity.subject,
+  async updateIdentity(id, { signal } = {}) {
+    if (this.closed || signal?.aborted) throw fault("REQUEST_CANCELLED", 499);
+    const task = (async () => {
+      const account = this.record(id);
+      const accessToken = await this.#raceShutdown(
+        this.getValidAccessToken(id),
+        () => fault("REQUEST_CANCELLED", 499),
+        signal,
+      );
+      const rawIdentity = await this.#raceShutdown(
+        this.identify({ accessToken }),
+        () => fault("REQUEST_CANCELLED", 499),
+        signal,
+      );
+      if (this.closed || signal?.aborted) throw fault("REQUEST_CANCELLED", 499);
+      const identity = this.checkedIdentity(rawIdentity);
+      if (this.record(id) !== account) throw fault("ACCOUNT_NOT_FOUND", 404);
+      if (
+        this.store.data.accounts.some(
+          (a) => a.id !== id && a.googleSubject === identity.subject,
+        )
       )
-    )
-      throw fault("DUPLICATE_GOOGLE_ACCOUNT", 409);
-    const previous = {
-      label: account.label,
-      googleSubject: account.googleSubject,
-    };
-    account.label = identity.email;
-    account.googleSubject = identity.subject;
-    try {
-      this.store.save();
-    } catch (error) {
-      Object.assign(account, previous);
-      throw error;
-    }
-    this.onChange("account.identity", id);
-    return { updated: true };
+        throw fault("DUPLICATE_GOOGLE_ACCOUNT", 409);
+      const previous = {
+        label: account.label,
+        googleSubject: account.googleSubject,
+      };
+      account.label = identity.email;
+      account.googleSubject = identity.subject;
+      try {
+        this.store.save();
+      } catch (error) {
+        Object.assign(account, previous);
+        throw error;
+      }
+      this.onChange("account.identity", id);
+      return { updated: true };
+    })();
+    return this.#trackBackground(task);
   }
   flow(id) {
     const f = this.flows.get(id);
@@ -395,7 +497,9 @@ export class Accounts {
     this.store.save();
   }
   async refreshQuota(id, { signal } = {}) {
-    if (this.quotaClosed || signal?.aborted) throw fault('QUOTA_CANCELLED', 499);
+    if (this.closed || this.quotaClosed || signal?.aborted) throw fault('QUOTA_CANCELLED', 499);
+    const existingEntry = this.#quotaEntries.get(id);
+    if (existingEntry) return this.#awaitSingleFlight(existingEntry, signal, 'QUOTA_CANCELLED');
     const existing = this.quotaPending.get(id);
     if (existing) return existing;
     const account = this.record(id), now = this.now(), last = this.quotaAttempts.get(id);
@@ -405,17 +509,17 @@ export class Accounts {
     const controller = new AbortController(); let timedOut = false, rejectAbort;
     const cancelled = new Promise((_, reject) => { rejectAbort = reject; });
     const abortError = () => fault(timedOut ? 'QUOTA_TIMEOUT' : 'QUOTA_CANCELLED', timedOut ? 504 : 499);
-    const onAbort = () => rejectAbort(abortError()), forward = () => controller.abort();
-    controller.signal.addEventListener('abort', onAbort, { once: true }); signal?.addEventListener('abort', forward, { once: true });
+    const onAbort = () => rejectAbort(abortError());
+    controller.signal.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000); timer.unref();
     this.quotaControllers.set(id, controller);
     const bounded = promise => Promise.race([promise, cancelled]);
     const task = (async () => {
       try {
         const token = await bounded(this.getValidAccessToken(id));
-        if (controller.signal.aborted || this.quotaClosed) throw abortError();
+        if (controller.signal.aborted || this.quotaClosed || this.closed || !this.store.data.accounts.includes(account)) throw abortError();
         const response = await bounded(this.quotaFetch(token, { signal: controller.signal }));
-        if (controller.signal.aborted || this.quotaClosed) throw abortError();
+        if (controller.signal.aborted || this.quotaClosed || this.closed || !this.store.data.accounts.includes(account)) throw abortError();
         const decoded = decodeUsageInfo(response.payload), observedAt = typeof response.observedAt === 'string' ? response.observedAt : new Date(this.now()).toISOString();
         const observedMs = Date.parse(observedAt);
         if (!Number.isFinite(observedMs) || new Date(observedMs).toISOString() !== observedAt) throw fault('QUOTA_INVALID_RESPONSE', 502);
@@ -431,22 +535,30 @@ export class Accounts {
         return { ...safeQuota(next), ...(keptNewer ? { refreshSkippedReason: 'QUOTA_SNAPSHOT_NEWER' } : {}) };
       } catch (error) {
         const code = controller.signal.aborted ? (timedOut ? 'QUOTA_TIMEOUT' : 'QUOTA_CANCELLED') : quotaFailureCode(error);
-        if (!this.quotaClosed && code !== 'QUOTA_CANCELLED') {
+        if (!this.quotaClosed && !this.closed && code !== 'QUOTA_CANCELLED' && this.store.data.accounts.includes(account)) {
           const prior = safeQuota(account.quota);
           account.quota = safeQuota({ ...prior, status: 'error', lastAttemptAt: attemptedAt, errorCode: code });
           try { this.store.save(); } catch { account.quota = prior; }
         }
         throw fault(code, code === 'QUOTA_CANCELLED' ? 499 : code === 'QUOTA_TIMEOUT' || error?.status === 504 ? 504 : error?.status === 429 ? 429 : 502);
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener('abort', onAbort);
+        this.quotaPending.delete(id);
+        this.quotaControllers.delete(id);
+        this.#quotaEntries.delete(id);
       }
     })();
+    const entry = { controller, waiters: 0, task };
+    this.#quotaEntries.set(id, entry);
     this.quotaPending.set(id, task);
-    try { return await task; } finally {
-      clearTimeout(timer); signal?.removeEventListener('abort', forward); controller.signal.removeEventListener('abort', onAbort);
-      this.quotaPending.delete(id); this.quotaControllers.delete(id);
-    }
+    this.#trackBackground(task);
+    return this.#awaitSingleFlight(entry, signal, 'QUOTA_CANCELLED');
   }
   async refreshSubscription(id, { signal } = {}) {
-    if (this.subscriptionClosed || signal?.aborted) throw fault("SUBSCRIPTION_CANCELLED", 499);
+    if (this.closed || this.subscriptionClosed || signal?.aborted) throw fault("SUBSCRIPTION_CANCELLED", 499);
+    const existingEntry = this.#subscriptionEntries.get(id);
+    if (existingEntry) return this.#awaitSingleFlight(existingEntry, signal, "SUBSCRIPTION_CANCELLED");
     const existing = this.subscriptionPending.get(id);
     if (existing) return existing;
     const account = this.record(id), now = this.now(), last = this.subscriptionAttempts.get(id);
@@ -460,18 +572,16 @@ export class Accounts {
     const cancelled = new Promise((_, reject) => { rejectAbort = reject; });
     const abortError = () => fault(timedOut ? "SUBSCRIPTION_TIMEOUT" : "SUBSCRIPTION_CANCELLED", timedOut ? 504 : 499);
     const onAbort = () => rejectAbort(abortError());
-    const forward = () => controller.abort();
     controller.signal.addEventListener("abort", onAbort, { once: true });
-    signal?.addEventListener("abort", forward, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000); timer.unref();
     this.subscriptionControllers.set(id, controller);
     const bounded = promise => Promise.race([promise, cancelled]);
     const task = (async () => {
       try {
         const token = await bounded(this.getValidAccessToken(id));
-        if (controller.signal.aborted || this.subscriptionClosed) throw abortError();
+        if (controller.signal.aborted || this.subscriptionClosed || this.closed || !this.store.data.accounts.includes(account)) throw abortError();
         const response = await bounded(this.subscriptionFetch(token, { signal: controller.signal }));
-        if (controller.signal.aborted || this.subscriptionClosed) throw abortError();
+        if (controller.signal.aborted || this.subscriptionClosed || this.closed || !this.store.data.accounts.includes(account)) throw abortError();
         const decoded = decodeSubscription(response.payload);
         const observedAt = typeof response.observedAt === "string" ? response.observedAt : new Date(this.now()).toISOString();
         const next = safeSubscription({ ...decoded, source: "official", provider: "google-robin", updatedAt: observedAt, lastAttemptAt: attemptedAt });
@@ -479,21 +589,33 @@ export class Accounts {
         try { this.store.save(); } catch (error) { account.subscription = prior; throw error; }
         return next;
       } catch (error) {
-        const code = subscriptionFailureCode(error);
-        if (!this.subscriptionClosed) {
+        const code = controller.signal.aborted
+          ? (timedOut ? "SUBSCRIPTION_TIMEOUT" : "SUBSCRIPTION_CANCELLED")
+          : subscriptionFailureCode(error);
+        if (!this.subscriptionClosed && !this.closed && code !== "SUBSCRIPTION_CANCELLED" && this.store.data.accounts.includes(account)) {
           account.subscription = safeSubscription({ ...snapshot, status: "error", lastAttemptAt: attemptedAt, errorCode: code });
           try { this.store.save(); } catch { account.subscription = prior; }
         }
-        throw fault(code, [401, 403, 429, 499, 504].includes(error?.status) ? error.status : 502);
+        const status = code === "SUBSCRIPTION_CANCELLED" ? 499
+          : code === "SUBSCRIPTION_TIMEOUT" || error?.status === 504 ? 504
+          : [401, 403, 429, 499, 504].includes(error?.status) ? error.status : 502;
+        throw fault(code, status);
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", onAbort);
+        this.subscriptionPending.delete(id);
+        this.subscriptionControllers.delete(id);
+        this.#subscriptionEntries.delete(id);
       }
     })();
+    const entry = { controller, waiters: 0, task };
+    this.#subscriptionEntries.set(id, entry);
     this.subscriptionPending.set(id, task);
-    try { return await task; } finally {
-      clearTimeout(timer); signal?.removeEventListener("abort", forward); controller.signal.removeEventListener("abort", onAbort);
-      this.subscriptionPending.delete(id); this.subscriptionControllers.delete(id);
-    }
+    this.#trackBackground(task);
+    return this.#awaitSingleFlight(entry, signal, "SUBSCRIPTION_CANCELLED");
   }
   async getValidAccessToken(id, { accountTest = false } = {}) {
+    if (this.closed) throw fault("OAUTH_REFRESH_FAILED", 502);
     const a = this.record(id);
     if (!a.enabled && !accountTest) throw fault("ACCOUNT_DISABLED", 503);
     if (a.status === "auth_error") throw fault("NATIVE_PERMISSION_OR_AUTH", 401);
@@ -502,10 +624,13 @@ export class Accounts {
     if (this.pending.has(id)) return this.pending.get(id);
     if (!a.refreshToken) throw fault("ACCOUNT_LOGIN_REQUIRED", 401);
     const config = this.config(), refreshToken = a.refreshToken;
-    const ownsCurrentGrant = () => this.store.data.accounts.includes(a) && a.refreshToken === refreshToken;
+    const ownsCurrentGrant = () => !this.closed && this.store.data.accounts.includes(a) && a.refreshToken === refreshToken;
     const task = (async () => {
       try {
-        const tokens = await this.refresh(config, refreshToken);
+        const tokens = await this.#raceShutdown(
+          this.refresh(config, refreshToken, { signal: this.shutdownController.signal }),
+          () => fault("OAUTH_REFRESH_FAILED", 502),
+        );
         if (typeof tokens?.accessToken !== "string" || !tokens.accessToken) throw fault("INVALID_REFRESH_RESPONSE", 502);
         if (ownsCurrentGrant()) {
           if (tokens.refreshToken) { a.refreshToken = tokens.refreshToken; this.store.save(); }
@@ -518,20 +643,24 @@ export class Accounts {
           throw fault("NATIVE_PERMISSION_OR_AUTH", 401);
         }
         throw fault("OAUTH_REFRESH_FAILED", 502);
+      } finally {
+        if (this.pending.get(id) === task) this.pending.delete(id);
       }
     })();
     this.pending.set(id, task);
-    try { return await task; }
-    finally { if (this.pending.get(id) === task) this.pending.delete(id); }
+    this.#trackBackground(task);
+    return task;
   }
   invalidate(id, { authError = false } = {}) {
     this.access.delete(id);
-    if (authError) {
+    if (authError && !this.closed) {
       this.record(id).status = "auth_error";
       this.store.save();
     }
   }
   close() {
+    this.closed = true;
+    this.shutdownController.abort();
     this.termsClosed = true;
     for (const controller of this.termsControllers.values()) controller.abort();
     this.quotaClosed = true;
@@ -545,5 +674,6 @@ export class Accounts {
         f.close();
       }
     this.access.clear();
+    return Promise.allSettled([...this.backgroundTasks]);
   }
 }
