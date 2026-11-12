@@ -25,6 +25,12 @@
 
 ## 為什麼需要 Gemini App2API？
 
+<p align="center">
+  <img src="docs/assets/mgga.jpg" alt="MGGA — GigaChad 底層模型 vs 消費級受限外殼" width="400" />
+  <br />
+  <sub><strong>🧢 MGGA — Make Gemini Great Again：</strong>頂級 GigaChad 底層模型，不該被困在消費級聊天外殼裡。</sub>
+</p>
+
 為什麼在官方 Gemini App 內處理大型程式開發時總是綁手綁腳、容易遺失上下文？**瓶頸往往不在底層模型，而在於官方 App 面向一般消費者所設計的封閉外殼（Harness）。**
 
 - **將模型解放到真正的工程工具鏈：** 透過標準 `/v1/chat/completions` 與 `/v1/responses` 介面，直接連接 **Cursor、Cline、Roo Code、OpenAI Codex CLI、PI-Desktop、Cherry Studio 或 Open WebUI**，由你的本地客戶端完整掌管對話歷史與專案工具執行。
@@ -42,15 +48,6 @@
 | **工具呼叫** | 嚴格 JSON Schema 驗證提示詞協定 ＋ Responses `namespace` | 缺乏結構驗證或僅靠鬆散正規表示式 | 受限於消費級聊天介面既有功能 |
 | **多帳戶調度** | 帳戶池路由、軟性 Session 親和度、批量官方用量與訂閱查詢 | 需手動替換 Cookie | 僅限當前桌面登入之單一帳號 |
 | **執行環境依賴** | 純 Node.js `>= 22`，**`0` 個第三方生產環境 npm 套件** | 需安裝 Playwright / Puppeteer 或龐大依賴 | 綁定特定作業系統與特定 App 版本 |
-
-<details>
-<summary>🧢 <strong>專案口號 —— MGGA（Make Gemini Great Again）</strong></summary>
-<br />
-<p align="center">
-  <img src="docs/assets/mgga.jpg" alt="MGGA — Make Gemini Great Again" width="320" />
-</p>
-<p align="center"><em>頂級基礎模型，值得配上一流的本地開發者工具鏈。</em></p>
-</details>
 
 ---
 

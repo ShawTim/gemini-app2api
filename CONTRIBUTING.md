@@ -20,4 +20,6 @@ Read [test execution boundaries](docs/TEST_EXECUTION_SAFETY.md) and [current-con
 - API or configuration changes should update `docs/API_SUPPORT.md`, `docs/OPERATIONS.md`, SDK fixtures, and both `README.md` / `README.zh.md` together.
 - Never commit state directories, OAuth client profiles, account files, `.env`, raw requests/replies, or credentials. UI screenshots must use synthetic `?demo=1` state only.
 
-When opening a pull request, describe the behavior change, supported and unsupported cases, and exact verification commands run.
+## Feedback and bug reports
+
+External pull requests are currently closed while protocol and security boundaries are maintained directly. If you encounter a contract discrepancy or bug, please open a GitHub issue using the bug report template with redacted output and minimal reproduction steps.

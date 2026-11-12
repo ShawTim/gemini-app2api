@@ -25,6 +25,12 @@ Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents,
 
 ## Why Gemini App2API?
 
+<p align="center">
+  <img src="docs/assets/mgga.jpg" alt="MGGA — GigaChad Gemini Model vs Derpy Consumer App Harness" width="400" />
+  <br />
+  <sub><strong>🧢 MGGA — Make Gemini Great Again:</strong> A frontier GigaChad model trapped inside a consumer chat harness.</sub>
+</p>
+
 Ever noticed how Gemini can feel constrained inside the consumer Gemini App—losing thread context or struggling to drive multi-step local engineering workflows? **The bottleneck is rarely the base model; it is the consumer chat harness wrapped around it.**
 
 - **Free the model into real engineering harnesses:** Connect **Cursor, Cline, Roo Code, OpenAI Codex CLI, PI-Desktop, Cherry Studio, or Open WebUI** via standard `/v1/chat/completions` and `/v1/responses` endpoints while keeping full conversation history and local tool execution under your client's control.
@@ -42,15 +48,6 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 | **Tool calling** | Schema-validated prompt protocol + Responses `namespace` support | Unvalidated text regex or unsupported | Limited to built-in consumer UI capabilities |
 | **Multi-account** | Pooled routing, soft session affinity, batch usage & tier telemetry | Manual cookie swapping | Single active desktop user |
 | **Runtime footprint** | Pure Node.js `>= 22`, **0 production npm dependencies** | Playwright / Puppeteer / heavy Python stacks | OS-specific app bundle & binary version lock |
-
-<details>
-<summary>🧢 <strong>Project Motto — MGGA (Make Gemini Great Again)</strong></summary>
-<br />
-<p align="center">
-  <img src="docs/assets/mgga.jpg" alt="MGGA — Make Gemini Great Again" width="320" />
-</p>
-<p align="center"><em>Great frontier models deserve great local developer tools.</em></p>
-</details>
 
 ---
 
