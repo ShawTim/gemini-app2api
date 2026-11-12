@@ -148,17 +148,17 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 1. **API Provider** 選擇 `OpenAI Compatible`。
 2. **Base URL：** `http://127.0.0.1:18989/v1`
 3. **API Key：** 貼上後台建立的 client key。
-4. **Model ID：** `gemini-argon`（完整支援增量串流、多輪本地工具呼叫與靜態圖片輸入）。
+4. **Model ID：** 建議高頻率多輪 Agent 迴圈優先選用配額友善的 `gemini-hydrogen`，或選用 `gemini-argon`（請先參閱[配額消耗比較](#quota-consumption)）；兩者皆完整支援增量串流、多輪本地工具呼叫與靜態圖片輸入。
 
 </details>
 
 <details>
 <summary><strong>OpenAI Codex CLI（<code>~/.codex/config.toml</code>）</strong></summary>
 
-Codex CLI 原生支援 `/v1/responses` 協定（包含 `namespace` 工具分組與 `reasoning.effort` 對應）：
+Codex CLI 原生支援 `/v1/responses` 協定（包含 `namespace` 工具分組與 `reasoning.effort` 對應）。高頻率多輪 Agent 迴圈建議優先選用配額友善的 `gemini-hydrogen`，與旗艦推理模式 `gemini-argon` 搭配使用（詳見[配額消耗比較](#quota-consumption)）：
 
 ```toml
-model = "gemini-argon"
+model = "gemini-hydrogen" # 或改設 "gemini-argon" 用於旗艦 Pro 推理
 model_provider = "gemini_app2api"
 model_reasoning_summary = "none"
 web_search = "disabled"
@@ -191,6 +191,25 @@ wire_api = "responses"
 | **`gemini-flash-lite`** | 高吞吐、輕量級快速回應任務 | `6` | 未公布 |
 
 > 模型別名對應 Gemini App 原生執行模式，並非 Google Cloud Vertex / AI Studio 的固定版本代號；實際可用性取決於各登入帳戶的上游方案權限。`context_window: 128000` 為提供給客戶端作本地上下文管理的建議值，並非閘道強制截斷上限或上游保證容量。
+
+<a id="quota-consumption"></a>
+### 配額消耗提醒：gemini-argon vs gemini-hydrogen
+
+> [!WARNING]
+> **在相同的程式開發任務下，`gemini-argon` 消耗的帳戶配額約為 `gemini-hydrogen` 的 `60x`。** 以單一 Gemini AI Pro 帳戶為例，在 `gemini-argon` 上僅執行 `~4-5` 輪重度編碼任務（約 15 KB 輸出）即可能耗盡整個 5 小時滾動視窗（觸發 `429 NATIVE_QUOTA_EXHAUSTED`）；相較之下，`gemini-hydrogen` 在同一個 5 小時視窗內可容納約 `~290` 輪重度編碼任務（或約 `~1,800` 步 Agent `tool_call` 工具呼叫），且回應速度快約 `~2x-4x`。建議將 **`gemini-hydrogen`** 作為日常多輪程式開發與工具呼叫的主力模型，並將 **`gemini-argon`** 留給架構規劃、疑難排錯，或已配置多帳戶池自動切換（`GATEWAY_QUOTA_FAILOVER=1`）的環境。
+
+以下為使用相同真實工程任務（非空白測試）透過 `GetUsageInfo` 實測之配額消耗對照（Gemini AI Pro 帳戶，付費與試用方案實測比例為 `1:1`）：
+
+| 工程任務情境 | `gemini-hydrogen` | `gemini-argon` | Argon 配額消耗倍數 |
+|---|---|---|---:|
+| **重度 ~15 KB 程式碼審查＋重寫**（`thinking=2`） | 每週 `~0.017%`（5h `< 1%`，`~60s`） | 每週 `~1.05%`（5h `~21%`，`~115s`） | `~61x` |
+| **多工具編碼 Agent 單步 `tool_call`**（`thinking=2`） | 每週 `~0.003%`（5h `< 1%`，`~4.6s`） | 每週 `~0.074%`（5h `~1.5%`，`~9.0s`） | `~27x` |
+| **標準 ~10 KB SQL 與遷移方案規劃**（`thinking=0`） | 每週 `~0.0046%`（5h `< 1%`，`~13s`） | 每週 `~0.44%`（5h `~8.5%`，`~49s`） | `~75x-95x` |
+| **單一帳戶 5 小時視窗可用容量**（每週總池約為 5 小時視窗的 `20x`） | `~290` 輪重度任務 / `~1,800` 步工具呼叫 | `~4-5` 輪重度任務 | — |
+
+以上數據為透過唯讀 `GetUsageInfo` 介面觀測所得之實測經驗值（並非 Google 官方 SLA 保證數據），上游配額權重與視窗計算方式可能隨時調整。
+
+### 支援功能範圍
 
 | 功能項目 | 支援範圍 |
 |---|---|

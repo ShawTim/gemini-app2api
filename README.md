@@ -148,17 +148,17 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 1. Choose **API Provider:** `OpenAI Compatible`.
 2. **Base URL:** `http://127.0.0.1:18989/v1`
 3. **API Key:** Your gateway client key.
-4. **Model ID:** `gemini-argon` (supports streaming, caller tool loops, and static image attachments).
+4. **Model ID:** `gemini-hydrogen` (recommended quota-friendly option for high-frequency multi-step agent loops) or `gemini-argon` ([quota comparison](#quota-consumption)); both support streaming, caller tool loops, and static image attachments.
 
 </details>
 
 <details>
 <summary><strong>OpenAI Codex CLI (<code>~/.codex/config.toml</code>)</strong></summary>
 
-Codex CLI speaks the `/v1/responses` protocol natively (including namespace tools and reasoning effort mapping):
+Codex CLI speaks the `/v1/responses` protocol natively (including namespace tools and reasoning effort mapping). `gemini-hydrogen` is recommended as the quota-friendly option for high-frequency multi-step agent loops alongside `gemini-argon` ([quota comparison](#quota-consumption)):
 
 ```toml
-model = "gemini-argon"
+model = "gemini-hydrogen" # or "gemini-argon" for flagship Pro reasoning
 model_provider = "gemini_app2api"
 model_reasoning_summary = "none"
 web_search = "disabled"
@@ -191,6 +191,25 @@ wire_api = "responses"
 | **`gemini-flash-lite`** | High-throughput lightweight tasks | `6` | Not advertised |
 
 > Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. `context_window: 128000` is an advisory hint for client-side context management—not an enforced token cap or upstream guarantee.
+
+<a id="quota-consumption"></a>
+### Quota Consumption: gemini-argon vs gemini-hydrogen
+
+> [!WARNING]
+> **`gemini-argon` consumes roughly `60x` more account quota than `gemini-hydrogen` on identical coding workloads.** On a single Gemini AI Pro account, `~4-5` heavy (~15 KB output) coding turns on `gemini-argon` can exhaust an entire 5-hour rolling window (`429 NATIVE_QUOTA_EXHAUSTED`), whereas `gemini-hydrogen` fits `~290` heavy coding turns (or `~1,800` agent `tool_call` steps) in the same 5-hour window while responding `~2x-4x` faster. Use **`gemini-hydrogen`** as your primary multi-step coding and tool-call workhorse, and reserve **`gemini-argon`** for architecture planning, hard debugging, or multi-account pooled setups (`GATEWAY_QUOTA_FAILOVER=1`).
+
+Empirical `GetUsageInfo` measurements on identical non-dummy engineering turns (Gemini AI Pro accounts, Paid & Trial tiers observed at `1:1`):
+
+| Engineering Workload | `gemini-hydrogen` | `gemini-argon` | Argon Quota Multiple |
+|---|---|---|---:|
+| **Heavy ~15 KB code review + rewrite** (`thinking=2`) | `~0.017%` weekly (`< 1%` 5h, `~60s`) | `~1.05%` weekly (`~21%` 5h, `~115s`) | `~61x` |
+| **Multi-tool coding agent `tool_call` step** (`thinking=2`) | `~0.003%` weekly (`< 1%` 5h, `~4.6s`) | `~0.074%` weekly (`~1.5%` 5h, `~9.0s`) | `~27x` |
+| **Standard ~10 KB SQL & migration plan** (`thinking=0`) | `~0.0046%` weekly (`< 1%` 5h, `~13s`) | `~0.44%` weekly (`~8.5%` 5h, `~49s`) | `~75x-95x` |
+| **Single-account 5-hour window capacity** *(weekly pool ≈ `20x` the 5-hour window)* | `~290` heavy turns / `~1,800` tool steps | `~4-5` heavy turns | — |
+
+These figures are empirical observations via read-only `GetUsageInfo` telemetry (not official Google SLA figures), and upstream quota weights may change at any time.
+
+### Supported Capabilities
 
 | Capability | Supported Scope |
 |---|---|
