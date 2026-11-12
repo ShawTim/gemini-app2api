@@ -17,8 +17,8 @@
   --border: #222b3d;
   --border-strong: #32405a;
   --input: #475673;
-  --primary: #3b82f6;
-  --primary-hover: #2563eb;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
   --primary-text: #ffffff;
   --violet: #60a5fa;
   --violet-bg: rgb(59 130 246 / 14%);
@@ -123,14 +123,14 @@ button:disabled, .button[aria-disabled=true] {
 
 button.primary, .button.primary {
   background-color: var(--primary);
-  background-image: linear-gradient(180deg, color-mix(in srgb, #ffffff 14%, var(--primary)) 0%, var(--primary) 100%);
+  background-image: linear-gradient(180deg, var(--primary) 0%, var(--primary-hover) 100%);
   color: var(--primary-text);
   border-color: color-mix(in srgb, var(--primary) 78%, #000000);
   box-shadow: 0 2px 10px color-mix(in srgb, var(--primary) 34%, transparent), 0 1px 0 inset rgb(255 255 255 / 22%);
 }
 button.primary:hover, .button.primary:hover {
   background-color: var(--primary-hover);
-  filter: brightness(1.06);
+  background-image: linear-gradient(180deg, var(--primary-hover) 0%, color-mix(in srgb, #000000 12%, var(--primary-hover)) 100%);
 }
 button.primary:disabled, .button.primary[aria-disabled=true] {
   background-color: var(--inset);
@@ -573,8 +573,8 @@ button.terms-help {
   white-space: normal;
   text-align: left;
 }
-.terms-tooltip:hover [role=tooltip],
-.terms-tooltip:focus-within [role=tooltip] {
+.terms-tooltip:not([data-dismissed=true]):hover [role=tooltip],
+.terms-tooltip:not([data-dismissed=true]):focus-within [role=tooltip] {
   display: block;
 }
 
@@ -695,6 +695,16 @@ button.terms-help {
 }
 
 [data-page=accounts] .account-list { display: grid; gap: 12px; }
+[data-page=accounts] .account-category-bar {
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--panel-shadow);
+}
+[data-page=accounts] .account-category-bar .badge { white-space: normal; }
 [data-page=accounts] .account-count {
   padding: 0 2px;
   font-size: 12px;

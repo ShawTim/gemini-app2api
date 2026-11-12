@@ -10,15 +10,29 @@ const css = await readFile(new URL('styles.css', root), 'utf8');
 
 // Test the actual browser functions without a server, credentials, accounts or network.
 function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected network'); }) {
+  class StubNode {
+    constructor() { this.dataset = {}; this.style = {}; this.open = false; this.hidden = false; }
+    addEventListener() {}
+    setAttribute() {}
+    removeAttribute() {}
+    append() {}
+    replaceChildren() {}
+    focus() {}
+    blur() {}
+    close() {}
+    contains() { return false; }
+    getClientRects() { return []; }
+  }
   const sandbox = {
     URL, URLSearchParams, Intl, Date, Number, Object, Array, JSON, String, Boolean,
     setTimeout, clearTimeout, setInterval, clearInterval, AbortController, DOMException,
+    Node: StubNode, CSS: { escape: value => String(value) },
     location: { search: demo ? '?demo=1' : '', hash: '', href: `http://fixture.invalid/admin/${demo ? '?demo=1' : ''}`, origin: 'http://fixture.invalid', protocol: 'http:' },
-    document: { addEventListener() {}, getElementById: () => ({ addEventListener() {} }) },
-    window: { addEventListener() {} }, localStorage: { getItem: () => null }, fetch: fetchImpl,
+    document: { hidden: false, activeElement: null, documentElement: { dataset: {} }, addEventListener() {}, getElementById: () => new StubNode(), querySelector: () => null, querySelectorAll: () => [], createElement: () => new StubNode(), createElementNS: () => new StubNode(), createTextNode: text => String(text) },
+    window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity };', context, { timeout: 2000 });
   return sandbox.subject;
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -236,4 +250,121 @@ test('terms consent defaults off, stays transient and demo acceptance is network
   assert.doesNotMatch(source, /savePref\([^\n]*[Tt]erms/);
   assert.match(source, /acceptTerms: S\.loginAcceptTerms === true/);
   assert.match(source, /data: \{ confirmed: true \}/);
+});
+
+test('HTTP 401 expires admin session only on ADMIN_LOGIN_REQUIRED and retains state on upstream account 401s', async () => {
+  let nextPayload = null;
+  const f = fixture(false, async () => ({
+    ok: false,
+    status: 401,
+    json: async () => {
+      if (nextPayload instanceof Error) throw nextPayload;
+      return nextPayload;
+    },
+  }));
+  f.S.authenticated = true;
+  f.S.csrf = 'fixture-csrf';
+  f.S.draft = { timeoutMs: 91000 };
+  f.S.prompt = 'Unsaved operator prompt';
+
+  for (const code of ['NATIVE_PERMISSION_OR_AUTH', 'ACCOUNT_LOGIN_REQUIRED', 'SUBSCRIPTION_AUTH_REJECTED', 'TOS_AUTH_REJECTED']) {
+    nextPayload = { error: { code, message: 'Upstream Google 401' } };
+    await assert.rejects(f.api('/accounts/acc-0/test', { method: 'POST', data: { model: 'gemini-argon' } }), error => error.code === code && error.status === 401);
+    assert.equal(f.S.authenticated, true, `${code} must not expire admin session`);
+    assert.equal(f.S.csrf, 'fixture-csrf');
+    assert.deepEqual(plain(f.S.draft), { timeoutMs: 91000 });
+    assert.equal(f.S.prompt, 'Unsaved operator prompt');
+  }
+
+  nextPayload = SyntaxError('non-JSON upstream 401');
+  await assert.rejects(f.api('/accounts/acc-0/quota', { method: 'POST', data: {} }), error => error.code === 'UNAUTHORIZED' && error.status === 401);
+  assert.equal(f.S.authenticated, true, 'unparsed 401 without ADMIN_LOGIN_REQUIRED must not expire session');
+
+  nextPayload = { error: { code: 'ADMIN_LOGIN_REQUIRED', message: 'Admin session expired' } };
+  await assert.rejects(f.api('/overview'), error => error.code === 'ADMIN_LOGIN_REQUIRED' && error.status === 401);
+  assert.equal(f.S.authenticated, false);
+  assert.equal(f.S.csrf, '');
+  assert.equal(f.S.draft, null);
+  assert.equal(f.S.prompt, '');
+  clearInterval(f.S.timer);
+});
+
+test('cooldown attention category and Sign-in needed filter stay consistent with account status', () => {
+  const f = fixture();
+  const future = new Date(Date.now() + 60000).toISOString();
+  const past = new Date(Date.now() - 60000).toISOString();
+  const accounts = [
+    { id: 'acc-ready', label: 'Ready', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: past },
+    { id: 'acc-status-cooldown', label: 'Status cooldown', enabled: true, status: 'cooldown', authenticationStatus: 'signed_in' },
+    { id: 'acc-until-cooldown', label: 'Until cooldown', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: future },
+    { id: 'acc-auth-error', label: 'Auth error', enabled: true, status: 'auth_error', authenticationStatus: 'auth_error' },
+    { id: 'acc-login-req', label: 'Login required', enabled: true, status: 'login_required', authenticationStatus: 'login_required' },
+    { id: 'acc-disabled-auth', label: 'Disabled auth', enabled: false, status: 'disabled', authenticationStatus: 'auth_error', cooldownUntil: future },
+  ];
+
+  assert.equal(f.accountCoolingDown(accounts[0]), false);
+  assert.equal(f.accountCoolingDown(accounts[1]), true);
+  assert.equal(f.accountCoolingDown(accounts[2]), true);
+  assert.equal(f.accountCoolingDown(accounts[5]), false);
+
+  assert.ok(f.accountAttentionReasons(accounts[1]).some(r => r.key === 'cooldown' && r.category === 'pause'));
+  assert.ok(f.accountAttentionReasons(accounts[2]).some(r => r.key === 'cooldown' && r.category === 'pause'));
+  assert.equal(f.accountAttentionReasons(accounts[0]).some(r => r.category === 'pause'), false);
+
+  f.S.accounts = accounts;
+  f.S.accountCategory = 'pause';
+  assert.deepEqual(f.filteredAccounts().map(a => a.id), ['acc-status-cooldown', 'acc-until-cooldown']);
+
+  f.S.accountCategory = '';
+  f.S.accountStatus = 'login_required';
+  assert.deepEqual(f.filteredAccounts().map(a => a.id), ['acc-auth-error', 'acc-login-req']);
+});
+
+test('I18N covers cooldown, signed_in and all gateway failover reasons in en and zh-HK', () => {
+  const f = fixture();
+  const requiredKeys = [
+    'ready', 'signed_in', 'cooldown', 'auth_error', 'login_required', 'disabled', 'unknown',
+    'quota', 'transient', 'auth', 'precondition', 'other', 'account_unavailable', 'requested_model_changed',
+    'empty_response', 'short_output', 'transport', 'provider_soft_error', 'tool_protocol', 'incomplete_response',
+    'rate_limit', 'network_error',
+  ];
+  for (const key of requiredKeys) {
+    assert.equal(typeof f.I18N.en[key], 'string', `missing I18N.en.${key}`);
+    assert.ok(f.I18N.en[key].length > 0 && f.I18N.en[key] !== key, `untranslated I18N.en.${key}`);
+    assert.equal(typeof f.I18N['zh-HK'][key], 'string', `missing I18N['zh-HK'].${key}`);
+    assert.ok(f.I18N['zh-HK'][key].length > 0 && f.I18N['zh-HK'][key] !== key, `untranslated I18N['zh-HK'].${key}`);
+  }
+  f.S.lang = 'en';
+  assert.equal(f.t('cooldown'), 'Cooldown');
+  assert.equal(f.reasonLabel('precondition'), 'Upstream precondition rejected');
+  f.S.lang = 'zh-HK';
+  assert.equal(f.t('cooldown'), '冷卻中');
+  assert.equal(f.reasonLabel('precondition'), '上游前置條件被拒');
+});
+
+test('primary button tokens meet WCAG AA 4.5:1 contrast with white text in dark and light themes', () => {
+  const luminance = hex => {
+    const n = Number.parseInt(hex.slice(1), 16);
+    const channels = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(v => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  };
+  const contrast = (fg, bg) => {
+    const a = luminance(fg), b = luminance(bg);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  };
+  const darkBlock = css.slice(css.indexOf(':root {'), css.indexOf(':root[data-theme=light]'));
+  const lightBlock = css.slice(css.indexOf(':root[data-theme=light]'), css.indexOf('* { box-sizing: border-box; }'));
+  for (const [theme, block] of [['dark', darkBlock], ['light', lightBlock]]) {
+    const primary = /--primary:\s*(#[0-9a-fA-F]{6})/.exec(block)?.[1];
+    const hover = /--primary-hover:\s*(#[0-9a-fA-F]{6})/.exec(block)?.[1];
+    const text = /--primary-text:\s*(#[0-9a-fA-F]{6})/.exec(block)?.[1];
+    assert.ok(primary && hover && text, `missing primary tokens in ${theme}`);
+    assert.ok(contrast(text, primary) >= 4.5, `${theme} --primary (${primary}) contrast < 4.5`);
+    assert.ok(contrast(text, hover) >= 4.5, `${theme} --primary-hover (${hover}) contrast < 4.5`);
+  }
+  const primaryRule = css.slice(css.indexOf('button.primary, .button.primary {'), css.indexOf('button.primary:hover'));
+  assert.doesNotMatch(primaryRule, /color-mix\([^)]*#fff/i, 'primary button gradient must not lighten --primary below WCAG AA');
 });

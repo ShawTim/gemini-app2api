@@ -26,7 +26,7 @@ const words = {
   overview: ['Overview', '總覽'], accounts: ['Accounts', '帳戶'],
   sessions: ['Sessions & failovers', '工作階段與故障轉移'], requests: ['Requests & errors', '請求與錯誤'],
   models: ['Client setup', '客戶端設定'], playground: ['Test request', '測試請求'], keys: ['API keys', 'API 金鑰'], settings: ['Settings', '設定'],
-  ready: ['Signed in', '已登入'], auth_error: ['Authentication error', '驗證失敗'],
+  ready: ['Signed in', '已登入'], signed_in: ['Signed in', '已登入'], cooldown: ['Cooldown', '冷卻中'], auth_error: ['Authentication error', '驗證失敗'],
   login_required: ['Login required', '需要登入'], disabled: ['Disabled', '已停用'], unknown: ['Unknown', '未知'],
   cancel: ['Cancel', '取消'], close: ['Close', '關閉'], confirm: ['Confirm', '確認'], loading: ['Loading…', '讀取中…'],
   refresh: ['Refresh', '重新整理'], retry: ['Try again', '重試'], account: ['Account', '帳戶'],
@@ -39,7 +39,29 @@ const words = {
   copyFailed: ['Clipboard unavailable. Select the text and copy manually.', '無法使用剪貼簿，請選取文字手動複製。'],
   saved: ['Changes saved.', '已儲存變更。'], logout: ['Sign out', '登出'], demo: ['Demo', '示範'],
 };
-const t = key => words[key]?.[S.lang === 'zh-HK' ? 1 : 0] || key;
+const failoverReasons = {
+  quota: ['Quota exhausted', '配額耗盡'],
+  rate_limit: ['Rate limit', '速率限制'],
+  transient: ['Temporary upstream failure', '暫時上游故障'],
+  network_error: ['Temporary network failure', '暫時網絡故障'],
+  auth: ['Authentication rejected', '驗證被拒'],
+  auth_error: ['Authentication rejected', '驗證被拒'],
+  precondition: ['Upstream precondition rejected', '上游前置條件被拒'],
+  other: ['Upstream failure', '上游錯誤'],
+  account_unavailable: ['Account unavailable', '帳戶未能使用'],
+  requested_model_changed: ['Requested model changed', '請求模型已變更'],
+  empty_response: ['Empty response recovered', '空白回應後重試'],
+  short_output: ['Replaced a too-short fragment', '取代過短輸出後重試'],
+  transport: ['Transport interruption recovered', '傳輸中斷後重試'],
+  provider_soft_error: ['Provider soft-error recovered', '供應商軟錯誤後重試'],
+  tool_protocol: ['Tool format recovered', '工具格式錯誤後重試'],
+  incomplete_response: ['Incomplete response recovered', '不完整回應後重試'],
+};
+const I18N = {
+  en: Object.fromEntries([...Object.entries(words), ...Object.entries(failoverReasons)].map(([k, [en]]) => [k, en])),
+  'zh-HK': Object.fromEntries([...Object.entries(words), ...Object.entries(failoverReasons)].map(([k, [, zh]]) => [k, zh])),
+};
+const t = key => (I18N[S.lang] || I18N.en)[key] || key;
 const paths = {
   overview: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
   accounts: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.87M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
@@ -96,7 +118,18 @@ const definition = pairs => el('dl', { class: 'definition' }, pairs.map(([key, v
 const accountName = id => (S.accounts || S.overview?.accounts || []).find(a => a.id === id)?.label || id || '—';
 const accountRoutingEligible = a => a.routingEligible === true || (a.routingEligible === undefined && a.enabled && a.status === 'ready');
 const accountDisplayName = a => a.label || a.id || L('Unnamed account', '未命名帳戶');
-const accountStatus = a => !a.enabled ? badge(t('disabled')) : badge(t(a.status || 'unknown'), ({ ready: 'teal', cooldown: 'amber', login_required: 'amber', auth_error: 'rose' })[a.status] || '', true);
+function accountCoolingDown(a) {
+  if (!a || a.enabled === false) return false;
+  if (a.status === 'cooldown') return true;
+  const until = typeof a.cooldownUntil === 'number' ? a.cooldownUntil : a.cooldownUntil ? Date.parse(a.cooldownUntil) : NaN;
+  return Number.isFinite(until) && until > Date.now();
+}
+const accountNeedsSignIn = a => Boolean(a?.enabled) && (['login_required', 'auth_error'].includes(a.authenticationStatus) || ['login_required', 'auth_error'].includes(a.status));
+const accountStatus = a => {
+  if (!a.enabled) return badge(t('disabled'));
+  const status = a.status === 'ready' && accountCoolingDown(a) ? 'cooldown' : (a.status || 'unknown');
+  return badge(t(status), ({ ready: 'teal', cooldown: 'amber', login_required: 'amber', auth_error: 'rose' })[status] || '', true);
+};
 const isNormalRequest = r => ['/v1/chat/completions', '/v1/responses'].includes(r?.path);
 function modelEvidence(accounts = []) {
   const result = { verified: 0, rejected: 0, unverified: 0, latestVerifiedAt: null };
@@ -120,12 +153,6 @@ function localRoutingState() {
   const ready = typeof S.overview?.ready === 'boolean' ? S.overview.ready : null, availability = S.overview?.availability;
   return { ready, label: ready === null ? L('Local routing not supplied', '未提供本機路由狀態') : ready ? L('Local routing available', '本機路由可接受請求') : L('Local routing unavailable', '本機路由暫不可接受請求'), detail: availability ? L(`${num(availability.eligibleAccounts)} eligible · ${availability.defaultModel || 'default model'}`, `${num(availability.eligibleAccounts)} 個符合資格 · ${availability.defaultModel || '預設模型'}`) : L('Recorded local state; not a live Google check', '已記錄的本機狀態，並非即時 Google 檢查') };
 }
-function managementState() {
-  if (S.loading && !S.lastLoaded) return { tone: 'violet', label: L('Loading admin snapshot', '正在讀取管理快照') };
-  if (S.error) return { tone: 'amber', label: L('Update failed', '更新失敗') };
-  if (S.lastLoaded) return { tone: '', label: L('Last loaded', '上次讀取') };
-  return { tone: '', label: L('No admin snapshot', '尚未讀取管理快照') };
-}
 function routeHash(route, params = {}) { const query = new URLSearchParams(); for (const [key, value] of Object.entries(params)) if (typeof value === 'string' && value) query.set(key, value.slice(0, 180)); return `#${route}${query.size ? `?${query}` : ''}`; }
 function readRouteHash() { const [name, query = ''] = location.hash.slice(1).split('?'); return { route: Object.hasOwn(descriptions, name) ? name : 'accounts', params: new URLSearchParams(query) }; }
 function toast(message) { const target = $('toast'); target.textContent = message; target.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => { target.hidden = true; }, 5000); }
@@ -145,7 +172,9 @@ function safeError(error) {
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'REQUEST_FAILED';
   const messages = {
     OAUTH_PROFILE_REQUIRED: L('An OAuth client profile must be configured on the server before adding an account.', '新增帳戶前，必須在伺服器設定 OAuth 用戶端設定檔。'),
+    ADMIN_LOGIN_REQUIRED: L('Your session has expired. Sign in again.', '登入階段已過期，請重新登入。'),
     UNAUTHORIZED: L('Your session has expired. Sign in again.', '登入階段已過期，請重新登入。'),
+    INVALID_ADMIN_LOGIN: L('The password was not accepted. Please try again.', '密碼不正確，請重試。'),
     INVALID_PASSWORD: L('The password was not accepted. Please try again.', '密碼不正確，請重試。'),
     NETWORK_ERROR: L('Cannot reach the admin API. Check the gateway connection and retry.', '無法連接管理 API，請檢查閘道連線並重試。'),
     INVALID_RESPONSE: L('The server returned an unexpected response. No success was assumed.', '伺服器回傳非預期的回應，未有當作成功。'),
@@ -168,8 +197,9 @@ async function api(path, { method = 'GET', data, signal, onResponse } = {}) {
   let result = null;
   try { if (response.status !== 204) result = await response.json(); } catch { if (response.ok) throw { code: 'INVALID_RESPONSE', status: response.status }; }
   if (!response.ok) {
-    const error = { code: result?.error?.code || (response.status === 401 ? (path === '/login' ? 'INVALID_PASSWORD' : 'UNAUTHORIZED') : 'REQUEST_FAILED'), status: response.status };
-    if (response.status === 401 && path !== '/login') expireSession();
+    const payloadCode = result?.error?.code;
+    const error = { code: payloadCode || (response.status === 401 ? (path === '/login' ? 'INVALID_PASSWORD' : 'UNAUTHORIZED') : 'REQUEST_FAILED'), status: response.status };
+    if (response.status === 401 && path !== '/login' && payloadCode === 'ADMIN_LOGIN_REQUIRED') expireSession();
     throw error;
   }
   return result || {};
@@ -178,6 +208,7 @@ function expireSession() {
   modelTests.clear();
   quotaRefreshErrors.clear(); subscriptionRefreshErrors.clear(); accountDisclosures.clear();
   S.epoch++; S.authenticated = false; S.csrf = ''; S.overview = null; S.accounts = null; S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.configCopied = false; S.lastInspectedRequestId = ''; S.folds = {}; S.deepLink = {}; S.accountNotice = '';
+  S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = '';
   S.loginAcceptTerms = false;
   S.lastLoaded = null; S.error = ''; S.settingsError = ''; S.settingsSaved = false; S.diagnosticsError = ''; S.testError = '';
   S.prompt = ''; S.output = ''; S.testResult = null; S.loginError = L('Your session has expired. Sign in again.', '登入階段已過期，請重新登入。');
@@ -255,7 +286,6 @@ function autoRefreshControl() {
 function desktopNavigation() {
   return el('nav', { class: 'daily-nav', 'aria-label': L('Main navigation', '主要導覽') }, ['accounts', 'keys', 'settings'].map(navLink));
 }
-function pageGroup(route) { return ['models', 'keys'].includes(route) ? L('CONNECT', '接入') : route === 'settings' ? L('SYSTEM', '系統') : L('OPERATE', '操作'); }
 function render() {
   const savedFocus = captureFocus(); applyPreferences();
   if (!S.authenticated) { renderLogin(); restoreFocus(savedFocus); return; }
@@ -379,7 +409,6 @@ async function logout() {
 function applyRouteFromHash() {
   const { route, params } = readRouteHash(), clean = key => (params.get(key) || '').slice(0, 180);
   S.route = route; S.deepLink = { account: clean('account'), model: clean('model'), session: clean('session'), diagnostics: clean('diagnostics'), capabilities: clean('capabilities') };
-  S.folds['mobile-more'] = false; $('mobile-more')?.removeAttribute('open');
   if (S.deepLink.account) { S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; accountDisclosures.add(`account-${S.deepLink.account}`); document.querySelector(`[data-account-details="${CSS.escape(S.deepLink.account)}"]`)?.setAttribute('open', ''); }
   if (S.deepLink.session) S.sessionQuery = S.deepLink.session;
   if (S.deepLink.capabilities === '1') { S.capabilitiesOpen = true; S.folds['capabilities-details'] = true; }
@@ -624,22 +653,22 @@ function accountAttentionReasons(a) {
   const reasons = [];
   if (a.status === 'auth_error' || a.authenticationStatus === 'auth_error') reasons.push({ key: 'auth', label: L('Authentication error', '驗證失敗'), tone: 'rose' });
   else if (a.status === 'login_required' || a.authenticationStatus === 'login_required') reasons.push({ key: 'auth', label: L('Sign-in required', '需要重新登入'), tone: 'amber' });
+  if (accountCoolingDown(a)) reasons.push({ key: 'cooldown', label: L('Routing cooldown', '路由冷卻中'), tone: 'amber' });
   if (a.quota?.status === 'error' || quotaRefreshErrors.has(a.id)) reasons.push({ key: 'quota', label: L('Quota refresh failed', '額度更新失敗'), tone: 'amber' });
   const rejected = Object.values(a.modelStates || {}).filter(s => ['rejected', 'blocked'].includes(s.state)).length;
   if (rejected) reasons.push({ key: 'models', label: L(`${rejected} previous upstream rejection${rejected === 1 ? '' : 's'}`, `${rejected} 個過往上游拒絕紀錄`), tone: 'rose' });
   return reasons.map(reason => ({ ...reason, category: reason.key === 'quota' ? 'freshness' : reason.key === 'cooldown' ? 'pause' : 'action' }));
 }
-function focusAccountReason(a, key) {
-  let target;
-  if (key === 'auth') {
-    const details = document.querySelector(`[data-account-details="${CSS.escape(a.id)}"]`);
-    if (details) { details.open = true; accountDisclosures.add(`account-${a.id}`); target = details.querySelector('summary'); }
-  } else target = $(key === 'quota' ? `quota-feedback-${a.id}` : key === 'models' ? `account-models-${a.id}` : `account-status-${a.id}`);
-  target?.focus({ preventScroll: true });
-  target?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+function accountCategoryLabel(category) {
+  return ({ action: L('Action needed', '需要行動'), pause: L('Routing paused', '路由暫停'), freshness: L('Data freshness', '資料新鮮度') })[category] || category;
 }
-function setAccountAttention(value, focusId) {
-  S.accountAttention = value; S.accountCategory = value ? 'action' : ''; updateContent(); $(focusId)?.focus({ preventScroll: true });
+function clearAccountCategory() {
+  S.accountCategory = ''; S.accountAttention = false;
+  $('accounts-results')?.replaceChildren(accountResults());
+  $('account-search')?.focus({ preventScroll: true });
+}
+function filteredAccounts(all = S.accounts || []) {
+  return all.filter(a => `${a.id} ${a.label || ''}`.toLowerCase().includes(S.accountQuery.toLowerCase()) && (!S.accountStatus || (S.accountStatus === 'disabled' ? !a.enabled : S.accountStatus === 'ready' ? a.enabled : S.accountStatus === 'login_required' ? accountNeedsSignIn(a) : a.enabled && a.status === S.accountStatus)) && (!S.accountCategory || accountAttentionReasons(a).some(r => r.category === S.accountCategory)));
 }
 // Label identity, never row position, group number or sourcePath, determines the slots.
 function quotaRowIdentity(row) {
@@ -668,20 +697,22 @@ function accountsPage() {
     el('div', { id: 'accounts-results' }, accountResults())];
 }
 function accountResults() {
-  const all = S.accounts || [];
-  const filtered = all.filter(a => `${a.id} ${a.label || ''}`.toLowerCase().includes(S.accountQuery.toLowerCase()) && (!S.accountStatus || (S.accountStatus === 'disabled' ? !a.enabled : S.accountStatus === 'ready' ? a.enabled : a.enabled && a.status === S.accountStatus)) && (!S.accountCategory || accountAttentionReasons(a).some(r => r.category === S.accountCategory)));
-  return el('div', { class: 'account-list' }, el('p', { class: 'account-count', role: 'status' }, L(`${filtered.length} of ${all.length} accounts`, `${all.length} 個帳戶中顯示 ${filtered.length} 個`)),
-    !filtered.length ? el('div', { class: 'panel' }, empty(all.length ? t('noMatch') : L('No accounts connected', '尚未連接帳戶'), all.length ? L('Try another search or clear filters.', '請嘗試其他搜尋或清除篩選。') : L('Choose Google sign-in to add your first account.', '選擇 Google 登入以新增第一個帳戶。')), all.length > 0 && btn(L('Clear filters', '清除篩選'), () => { S.accountQuery = ''; S.accountStatus = ''; S.accountCategory = ''; updateContent(); }, { class: 'account-clear' })) : filtered.map((a, i) => {
+  const all = S.accounts || [], filtered = filteredAccounts(all);
+  const categoryChip = S.accountCategory && el('div', { class: 'filter-chips account-category-bar', id: 'account-category-filter', 'data-account-category': S.accountCategory, role: 'region', 'aria-label': L('Active category filter', '生效分類篩選') },
+    badge(`${L('Category', '分類')}: ${accountCategoryLabel(S.accountCategory)}`, ({ action: 'rose', pause: 'amber', freshness: 'violet' })[S.accountCategory] || '', true),
+    btn(`${L('Clear category filter', '清除分類篩選')} ×`, clearAccountCategory, { id: 'clear-account-category', class: 'compact', 'data-action': 'clear-account-category' }));
+  return el('div', { class: 'account-list' }, categoryChip, el('p', { class: 'account-count', role: 'status' }, L(`${filtered.length} of ${all.length} accounts`, `${all.length} 個帳戶中顯示 ${filtered.length} 個`)),
+    !filtered.length ? el('div', { class: 'panel' }, empty(all.length ? t('noMatch') : L('No accounts connected', '尚未連接帳戶'), all.length ? L('Try another search or clear filters.', '請嘗試其他搜尋或清除篩選。') : L('Choose Google sign-in to add your first account.', '選擇 Google 登入以新增第一個帳戶。')), all.length > 0 && btn(L('Clear filters', '清除篩選'), () => { S.accountQuery = ''; S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false; updateContent(); }, { class: 'account-clear' })) : filtered.map((a, i) => {
       const model = S.testModel, result = modelTests.get(`${a.id}:${model}`), blocked = a.routingAllowed === false || a.authenticationStatus !== 'signed_in';
       const plan = a.subscription?.source === 'official' && a.subscription?.tier && a.subscription.tier !== 'unknown' ? subscriptionTierLabel(a.subscription.tier) : '';
       return el('article', { class: 'account-card panel daily-account', id: `account-card-${a.id}`, tabindex: '-1', 'data-account-card': a.id, style: `--account-stagger:${Math.min(i, 5) * 24}ms`, 'aria-label': accountDisplayName(a) },
-        el('div', { class: 'daily-account-main' }, el('div', { class: 'daily-identity' }, el('h2', {}, accountDisplayName(a)), plan && el('small', { class: 'muted' }, plan), a.enabled && ['login_required', 'auth_error'].includes(a.authenticationStatus) && el('small', {}, L('Sign-in needed', '需要重新登入')), a.routingAllowed === false && el('small', { 'data-routing-excluded': '' }, L('Not used for requests', '不會用於請求'))),
+        el('div', { class: 'daily-account-main' }, el('div', { class: 'daily-identity' }, el('h2', {}, accountDisplayName(a)), plan && el('small', { class: 'muted' }, plan), accountNeedsSignIn(a) && el('small', {}, L('Sign-in needed', '需要重新登入')), a.routingAllowed === false && el('small', { 'data-routing-excluded': '' }, L('Not used for requests', '不會用於請求'))),
           btn(t(a.enabled ? 'disable' : 'enable'), () => toggleAccount(a), { class: 'enabled-switch', role: 'switch', 'aria-checked': String(a.enabled), 'data-action': 'toggle-account', 'data-id': a.id, 'aria-label': `${t(a.enabled ? 'disable' : 'enable')} ${accountDisplayName(a)}` }),
           dailyQuota(a), el('div', { class: 'daily-test' }, btn(result?.status === 'busy' ? L('Testing…', '測試中…') : 'Test', () => testAccountModel(a, model), { class: 'compact', 'data-action': 'test-model', 'data-id': a.id, 'data-model': model, disabled: blocked || !model || result?.status === 'busy', title: blocked ? L('Sign in to test. Routing exclusions still apply.', '請登入以測試，路由排除仍然適用。') : L('Sends one model request; may use quota.', '發送一次模型請求，可能消耗配額。') }), el('small', { role: 'status', 'data-model-test-result': '', title: result?.error || '' }, result?.status === 'ok' ? 'OK' : result?.status === 'fail' ? L('Failed', '失敗') : L('Uses quota', '消耗配額')))),
         accountTermsView(a),
         accountDisclosure('account', a.id, L('More / details', '更多／詳細資料'), el('div', { class: 'daily-details stack' },
           el('div', { class: 'actions' }, btn(t('rename'), () => renameAccount(a), { class: 'compact', 'data-action': 'rename-account', 'data-id': a.id }), btn(t('remove'), () => removeAccount(a), { class: 'compact danger', 'data-action': 'remove-account', 'data-id': a.id })),
-          definition([[L('Account ID', '帳戶識別碼'), mono(a.id)], [L('Authentication', '登入驗證'), a.authenticationStatus || t('unknown')], [t('status'), accountStatus(a)], [L('Requests / failures / in flight', '請求／失敗／執行中'), `${a.requests ?? '—'} / ${a.failures ?? '—'} / ${a.inFlight ?? '—'}`], [L('Last used', '上次使用'), date(a.lastUsedAt)]]),
+          definition([[L('Account ID', '帳戶識別碼'), mono(a.id)], [L('Authentication', '登入驗證'), t(a.authenticationStatus || 'unknown')], [t('status'), accountStatus(a)], [L('Requests / failures / in flight', '請求／失敗／執行中'), `${a.requests ?? '—'} / ${a.failures ?? '—'} / ${a.inFlight ?? '—'}`], [L('Last used', '上次使用'), date(a.lastUsedAt)]]),
           (a.quota?.usageRows || []).some(r => r.sourcePath) && fold(`quota-paths-${a.id}`, L('Raw row identities', '原始資料列識別'), definition((a.quota.usageRows || []).map(r => [r.label || t('unknown'), mono(r.sourcePath || L('Not supplied', '未提供'))]))),
           accountSubscriptionView(a), accountQuotaView(a), el('section', { class: 'account-models', id: `account-models-${a.id}`, tabindex: '-1' }, el('h3', {}, L('Model access details', '模型存取詳情')), accountModelStates(a)),
           a.terms?.status === 'error' && termsEvidenceView(a.terms.evidence), a.lastError && el('div', { 'data-account-upstream-error': a.id }, upstreamErrorView(a.lastError.nativeEvidence, a.lastError.status)))));
@@ -691,13 +722,13 @@ function accountResults() {
 function sessionsPage() {
   return [el('div', { class: 'panel' }, el('div', { class: 'filterbar' }, el('label', { class: 'search' }, L('Find session, account or reason', '尋找工作階段、帳戶或原因'), el('input', { id: 'session-search', type: 'search', value: S.sessionQuery, placeholder: L('Filter routing activity…', '篩選路由活動…'), onInput: event => { S.sessionQuery = event.target.value; $('session-results').replaceChildren(sessionResults()); } })))), el('div', { id: 'session-results', class: 'stack', tabindex: '-1' }, sessionResults())];
 }
-function reasonLabel(reason) { const known = { rate_limit: L('Rate limit', '速率限制'), network_error: L('Temporary network failure', '暫時網絡故障'), auth_error: L('Authentication rejected', '驗證被拒'), account_unavailable: L('Account unavailable', '帳戶未能使用'), short_output: L('Replaced a too-short fragment', '取代過短輸出後重試') }; return known[reason] || reason || '—'; }
+function reasonLabel(reason) { return reason ? (I18N[S.lang] || I18N.en)[reason] || reason : '—'; }
 function sessionResults() {
   const query = S.sessionQuery.toLowerCase();
   const sessions = (S.overview.sessions || []).filter(s => `${s.id} ${s.accountId} ${accountName(s.accountId)}`.toLowerCase().includes(query));
   const failovers = (S.overview.failovers || []).filter(f => `${f.sessionId} ${f.from} ${f.to} ${f.reason} ${reasonLabel(f.reason)} ${accountName(f.from)} ${accountName(f.to)}`.toLowerCase().includes(query));
   return el('div', { class: 'stack' }, panel(L('Session routing preferences', '工作階段路由偏好'), L('Account preferences and activity, not session admission locks or conversation content.', '帳戶偏好及活動紀錄，唔係 session 拒收鎖，亦不包含對話內容。'), table([L('Session ID', '工作階段識別碼'), t('account'), L('Turns', '輪數'), L('In flight', '執行中'), L('Last used', '上次使用')], sessions.map(s => [mono(s.id), accountName(s.accountId), mono(num(s.turns)), badge(num(s.inFlightCount ?? Number(s.inFlight)), s.inFlight ? 'violet' : ''), date(s.lastUsedAt)]), t('sessions')), badge(num(sessions.length))),
-    panel(L('Failover history', '故障轉移紀錄'), L('Recorded account changes, not a claim that interrupted output was replayed.', '已記錄的帳戶變更，不代表已重播中斷的輸出。'), table([t('time'), L('Session', '工作階段'), L('From → to', '來源 → 目標'), L('Reason', '原因')], failovers.map(f => [date(f.at), mono(f.sessionId), el('span', {}, accountName(f.from), el('span', { class: 'muted' }, ' → '), accountName(f.to)), el('div', {}, reasonLabel(f.reason), el('span', { class: 'subline mono' }, f.reason))]), L('Failover history', '故障轉移紀錄')), badge(num(failovers.length), failovers.length ? 'amber' : '')));
+    panel(L('Failover history', '故障轉移紀錄'), L('Recorded account changes, not a claim that interrupted output was replayed.', '已記錄的帳戶變更，不代表已重播中斷的輸出。'), table([t('time'), L('Session', '工作階段'), L('From → to', '來源 → 目標'), L('Reason', '原因')], failovers.map(f => [date(f.at), mono(f.sessionId), el('span', {}, accountName(f.from), el('span', { class: 'muted' }, ' → '), accountName(f.to)), el('div', {}, reasonLabel(f.reason), f.reason && reasonLabel(f.reason) !== f.reason && el('span', { class: 'subline mono' }, f.reason))]), L('Failover history', '故障轉移紀錄')), badge(num(failovers.length), failovers.length ? 'amber' : '')));
 }
 function requestMetadata(r) {
   const result = {}; // Explicit allowlist: never include messages, URLs, payloads or arbitrary error text.
@@ -913,7 +944,7 @@ function signInControls() {
   const pending = Boolean(OAuth.attempt);
   return el('div', { class: 'sign-in-controls' },
     el('label', { class: 'terms-consent' }, el('input', { id: 'login-accept-terms', type: 'checkbox', role: 'switch', checked: S.loginAcceptTerms, disabled: pending, 'aria-describedby': 'login-terms-tooltip', onChange: event => { S.loginAcceptTerms = event.target.checked; } }), L('Accept Gemini ToS', '接受 Gemini 條款')),
-    el('span', { class: 'terms-tooltip' }, btn('?', null, { class: 'terms-help', 'aria-label': L('About Gemini terms consent', '關於 Gemini 條款同意'), 'aria-describedby': 'login-terms-tooltip' }), el('span', { id: 'login-terms-tooltip', role: 'tooltip' }, L('Gemini requires accepted terms before use. Off: sign in only; this gateway will not accept for you. You can accept in the official Gemini App instead.', '未接受 Gemini 條款就無法使用。關閉：只登入，閘道不會代你接受。你亦可自行開啟官方 Gemini App 接受。'))),
+    el('span', { class: 'terms-tooltip', onMouseleave: event => delete event.currentTarget.dataset.dismissed }, btn('?', event => { delete event.currentTarget.parentElement.dataset.dismissed; event.currentTarget.focus({ preventScroll: true }); }, { class: 'terms-help', 'aria-label': L('About Gemini terms consent', '關於 Gemini 條款同意'), 'aria-describedby': 'login-terms-tooltip', onFocus: event => delete event.currentTarget.parentElement.dataset.dismissed, onKeydown: event => { if (event.key === 'Escape') { event.stopPropagation(); event.currentTarget.parentElement.dataset.dismissed = 'true'; event.currentTarget.blur(); } } }), el('span', { id: 'login-terms-tooltip', role: 'tooltip' }, L('Gemini requires accepted terms before use. Off: sign in only; this gateway will not accept for you. You can accept in the official Gemini App instead.', '未接受 Gemini 條款就無法使用。關閉：只登入，閘道不會代你接受。你亦可自行開啟官方 Gemini App 接受。'))),
     btn([icon('plus'), L('Google sign-in', 'Google 登入')], addAccount, { id: 'add-account', disabled: pending }));
 }
 function accountTermsView(a) {

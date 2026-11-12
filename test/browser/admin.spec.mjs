@@ -419,7 +419,7 @@ test("OAuth status authentication expiry closes only the owned popup and returns
   syntheticOAuth(); await login(page); await route(page, 'accounts');
   const popup = await oneClickOAuth(page);
   await page.route('**/admin/api/accounts/login/*', route => route.request().method() === 'GET'
-    ? route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({error:{code:'UNAUTHORIZED',message:'Synthetic expiry'}}) })
+    ? route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({error:{code:'ADMIN_LOGIN_REQUIRED',message:'Synthetic expiry'}}) })
     : route.continue());
   await expect(page.locator('#login-form')).toBeVisible();
   await expect(page.locator('#login-error')).toContainText('expired');
@@ -427,6 +427,39 @@ test("OAuth status authentication expiry closes only the owned popup and returns
   await expect(page.locator('#oauth-waiting')).toHaveCount(0);
   expect(f.store.data.accounts).toHaveLength(2);
   expect(f.seen.length).toBe(0);
+});
+
+test("upstream Google 401 errors on account actions never expire admin session or wipe drafts", async ({ page }) => {
+  await login(page);
+  await route(page, 'settings');
+  await page.locator('#setting-timeoutMs').fill('91000');
+  await route(page, 'playground');
+  await page.locator('#playground-prompt').fill('Retained synthetic operator prompt');
+  await route(page, 'accounts');
+  await expect(page.locator('#settings-draft-indicator')).toBeVisible();
+
+  await page.route('**/admin/api/accounts/acc-0/subscription', r => r.fulfill({
+    status: 401, contentType: 'application/json',
+    body: JSON.stringify({ error: { code: 'SUBSCRIPTION_AUTH_REJECTED', message: 'Upstream Google 401' } }),
+  }));
+  await page.route('**/admin/api/accounts/acc-0/test', r => r.fulfill({
+    status: 401, contentType: 'application/json',
+    body: JSON.stringify({ error: { code: 'NATIVE_PERMISSION_OR_AUTH', message: 'Upstream Google 401' } }),
+  }));
+
+  await page.locator('[data-account-details="acc-0"] > summary').click();
+  await page.locator('[data-subscription="acc-0"] [data-action="refresh-subscription"]').click();
+  await expect(page.locator('[data-subscription="acc-0"] [data-subscription-feedback]')).toContainText('SUBSCRIPTION_AUTH_REJECTED');
+  await expect(page.locator('#login-form')).toHaveCount(0);
+
+  await page.locator('[data-account-card="acc-0"] .daily-test [data-action="test-model"]').click();
+  await expect(page.locator('[data-account-card="acc-0"] .daily-test [data-model-test-result]')).toHaveText('Failed');
+  await expect(page.locator('#login-form')).toHaveCount(0);
+  await expect(page.locator('#settings-draft-indicator')).toBeVisible();
+
+  await route(page, 'playground');
+  await expect(page.locator('#playground-prompt')).toHaveValue('Retained synthetic operator prompt');
+  expect(f.seen).toHaveLength(0);
 });
 
 test("Google error original and HTTP/gRPC statuses are shown as text in accounts and request inspection", async ({page}) => {
@@ -649,4 +682,92 @@ for (const width of [390, 1440]) test(`technical quota and model evidence stay a
   await expect(a.locator('[data-model-checked-at]')).toContainText('上次成功驗證');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(quotaRequests).toBe(0); expect(f.seen).toHaveLength(0);
+});
+
+test("overview attention tiles, category chip, Sign-in needed filter, i18n and primary contrast", async ({ page }) => {
+  const now = new Date().toISOString();
+  const future = new Date(Date.now() + 300000).toISOString();
+  const base = { enabled: true, authenticationStatus: 'signed_in', status: 'ready', requests: 4, failures: 0, inFlight: 0, modelStates: {} };
+  const accounts = [
+    { ...base, id: 'acc-0', label: 'Cooling account', status: 'cooldown', cooldownUntil: future },
+    { ...base, id: 'acc-1', label: 'Auth error account', status: 'auth_error', authenticationStatus: 'auth_error' },
+    { ...base, id: 'acc-2', label: 'Login required account', status: 'login_required', authenticationStatus: 'login_required' },
+    { ...base, id: 'acc-3', label: 'Disabled account', enabled: false, status: 'disabled', authenticationStatus: 'signed_in' },
+  ];
+  const failovers = [
+    { at: now, sessionId: 'sess-1', from: 'acc-0', to: 'acc-1', reason: 'quota' },
+    { at: now, sessionId: 'sess-2', from: 'acc-1', to: 'acc-2', reason: 'precondition' },
+    { at: now, sessionId: 'sess-3', from: 'acc-2', to: 'acc-0', reason: 'tool_protocol' },
+  ];
+  await page.route('**/admin/api/overview', async r => {
+    const response = await r.fetch();
+    const data = await response.json();
+    await r.fulfill({ json: { ...data, accounts, failovers } });
+  });
+  await page.route('**/admin/api/accounts', r => r.fulfill({ json: { accounts } }));
+
+  await login(page);
+  await route(page, 'overview');
+  await page.locator('#overview-details > summary').click();
+  await expect(page.locator('[data-overview-category="pause"] strong')).toHaveText('1');
+  await expect(page.locator('[data-overview-category="action"] strong')).toHaveText('2');
+
+  await page.locator('[data-overview-category="pause"]').click();
+  await expect(page.locator('[data-page="accounts"]')).toBeVisible();
+  await expect(page.locator('#account-category-filter')).toBeVisible();
+  await expect(page.locator('#account-category-filter')).toContainText('Routing paused');
+  await expect(page.locator('[data-account-card]')).toHaveCount(1);
+  await expect(page.locator('[data-account-card="acc-0"]')).toBeVisible();
+
+  await page.locator('#clear-account-category').click();
+  await expect(page.locator('#account-category-filter')).toHaveCount(0);
+  await expect(page.locator('[data-account-card]')).toHaveCount(4);
+
+  await page.locator('#account-status').selectOption('login_required');
+  await expect(page.locator('[data-account-card]')).toHaveCount(2);
+  await expect(page.locator('[data-account-card="acc-1"]')).toBeVisible();
+  await expect(page.locator('[data-account-card="acc-2"]')).toBeVisible();
+  await page.locator('#account-status').selectOption('');
+
+  await page.locator('[data-account-details="acc-0"] > summary').click();
+  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('Cooldown');
+  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('Signed in');
+
+  const helpBtn = page.locator('.terms-help');
+  await helpBtn.focus();
+  await expect(page.locator('#login-terms-tooltip')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#login-terms-tooltip')).not.toBeVisible();
+
+  for (const toggleTheme of [false, true]) {
+    if (toggleTheme) await page.locator('#theme-toggle').click();
+    const ratio = await page.locator('#refresh-all').evaluate(node => {
+      const style = getComputedStyle(node);
+      const parse = rgb => rgb.match(/\d+/g).slice(0, 3).map(v => {
+        const s = Number(v) / 255;
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      });
+      const lum = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const fg = lum(parse(style.color)), bg = lum(parse(style.backgroundColor));
+      return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+    });
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
+  }
+
+  await route(page, 'sessions');
+  await expect(page.locator('#session-results')).toContainText('Quota exhausted');
+  await expect(page.locator('#session-results')).toContainText('Upstream precondition rejected');
+  await expect(page.locator('#session-results')).toContainText('Tool format recovered');
+
+  await page.locator('#language-toggle').click();
+  await expect(page.locator('#session-results')).toContainText('配額耗盡');
+  await expect(page.locator('#session-results')).toContainText('上游前置條件被拒');
+  await expect(page.locator('#session-results')).toContainText('工具格式錯誤後重試');
+
+  await route(page, 'accounts');
+  await page.locator('[data-account-details="acc-0"] > summary').click();
+  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('冷卻中');
+  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('已登入');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(f.seen).toHaveLength(0);
 });
