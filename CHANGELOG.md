@@ -2,9 +2,63 @@
 
 Release notes for Gemini App2API.
 
-## Unreleased
+## 1.1.0 — 2026-11-13
 
-- Replaced `gemini-flash` (`400 UNSUPPORTED_MODEL`) with `gemini-hydrogen` (Gemini 4 Hydrogen on `FAST` mode `1`), enforcing upstream Hydrogen model attribution in `ClientGenerateResponse` field `30` and failing closed (`502 MODEL_DOWNGRADE_REJECTED`) when legacy Flash or unattributed responses are served.
+### Breaking changes
+
+- Replaced `gemini-flash` (`400 UNSUPPORTED_MODEL`) with `gemini-hydrogen` (Gemini 4
+  Hydrogen on `FAST` mode `1`), enforcing upstream Hydrogen model attribution in
+  `ClientGenerateResponse` field `30` and failing closed (`502 MODEL_DOWNGRADE_REJECTED`)
+  when legacy Flash or unattributed responses are served.
+- Preserved historical `'gemini-flash'` scope acceptance in `state.json` read sanitizers
+  (`safeQuota` and `safeAccountError`) so existing `1.0.0` state directories upgrade
+  cleanly without dropping stored account metadata.
+
+### Gateway and streaming hardening
+
+- Held incremental SSE deltas until upstream mode, attribution and refusal checks clear
+  before calling `publish()`, preventing unverified, refused or downgraded output from
+  leaking to streaming callers or triggering short-output retries.
+- Enforced bounded SSE write backpressure (`drain` handling with write timeouts) and
+  stalled-socket `res.destroy()` cleanup on request deadlines so slow or hung consumers
+  cannot retain buffers or stall request lifecycles indefinitely.
+- Committed `publishedContent` and `publishedCalls` strictly after `onDelta` resolves,
+  skipping trailing splitter flushes on sink failures so partial-output state matches
+  what the sink actually accepted.
+- Restricted admin login rate-limit increments to failed password checks, tolerated
+  stale duplicate `gateway_admin=` cookies ahead of a valid session cookie, and redacted
+  `gsk_` client API keys in upstream diagnostic evidence.
+- Drained active request controllers, quota refresh jobs, background OAuth/account
+  tasks and single-flight waiters during graceful shutdown before closing and unlocking
+  `StateStore` (`runtime.lock`), rejecting late writes cleanly with `STATE_CLOSED`.
+- Updated `AccountPool` session affinity to true LRU eviction by refreshing map recency
+  on hit, and stopped allocating sticky session entries for stateless requests without
+  `X-Session-ID`.
+
+### Operations console
+
+- Scoped `401` admin session-expiry clears strictly to `ADMIN_LOGIN_REQUIRED` responses
+  so upstream or account-level `401` errors do not sign operators out of the console.
+- Wired active cooldown counts into the overview summary, added an explicit issue-filter
+  banner and clear action on the accounts view, included `auth_error` accounts under the
+  sign-in filter, completed `zh-HK` failover reason translations, and raised dark-theme
+  primary button contrast above WCAG AA (`4.5:1`).
+
+### Packaging, security and documentation
+
+- Enforced `git ls-files` tracked-subset verification across `release-files.mjs`,
+  `check-release.mjs` and `export-release.mjs` so untracked workspace files can never
+  enter release manifests or source exports.
+- Hardened `Dockerfile` to loopback-safe defaults (`GATEWAY_HOST=127.0.0.1`,
+  `GATEWAY_CALLBACK_HOST=127.0.0.1`, `GATEWAY_ALLOW_REMOTE` unset, `COPY --chmod=a+rX`,
+  and `PORT`-aware `HEALTHCHECK`), scoping container `0.0.0.0` / `GATEWAY_ALLOW_REMOTE=1`
+  binding explicitly to `compose.yaml`.
+- Removed unused fixture helpers from `scripts/offline-client-fixture.mjs` and added
+  explicit `incomplete` / `finish_reason` status checks in `examples/client.mjs` and
+  `examples/client.py`.
+- Added empirical `gemini-argon` vs `gemini-hydrogen` (`~60x`) quota consumption
+  warnings and workload tables in `README.md` and `README.zh.md`, and clarified the
+  issue-only bug report policy in `CONTRIBUTING.md`.
 
 ## 1.0.0 — 2026-11-12
 
