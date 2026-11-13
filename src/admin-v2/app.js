@@ -11,7 +11,7 @@ const savePref = (key, value) => { try { localStorage.setItem(key, value); } cat
 const S = {
   lang: /^(zh|zh-HK)$/.test(pref('gemini_lang') || '') ? 'zh-HK' : 'en',
   theme: pref('gemini_theme') === 'light' ? 'light' : 'dark',
-  authenticated: false, authRequired: true, checkingSession: !DEMO, csrf: '', epoch: 0, overview: null, accounts: null, keys: null,
+  authenticated: false, authRequired: true, checkingSession: !DEMO, csrf: '', epoch: 0, routeEpoch: 0, overview: null, accounts: null, keys: null,
   demoScenario: 'sample', demoFault: false,
   settings: null, draft: null, diagnostics: null, lastLoaded: null, error: '', loading: false,
   route: 'accounts', auto: pref('gemini_quota_auto') !== 'false', timer: null, nextAuto: 0, bulkJob: null, bulkBusy: false, bulkError: '', bulkPoll: null, accountQuery: '', accountStatus: '', accountAttention: false, sessionQuery: '',
@@ -215,7 +215,7 @@ async function api(path, { method = 'GET', data, signal, onResponse } = {}) {
 function expireSession() {
   modelTests.clear(); revealedKeys.clear();
   quotaRefreshErrors.clear(); subscriptionRefreshErrors.clear(); accountDisclosures.clear();
-  S.epoch++; S.authenticated = false; S.csrf = ''; S.overview = null; S.accounts = null; S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.configCopied = false; S.lastInspectedRequestId = ''; S.folds = {}; S.deepLink = {}; S.accountNotice = '';
+  S.epoch++; S.routeEpoch++; S.authenticated = false; S.csrf = ''; S.overview = null; S.accounts = null; S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.configCopied = false; S.lastInspectedRequestId = ''; S.folds = {}; S.deepLink = {}; S.accountNotice = '';
   S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; S.accountQuickFilter = ''; S.selectedAccountId = ''; closeAccountDrawer(false);
   S.loginAcceptTerms = false;
   S.lastLoaded = null; S.error = ''; S.settingsError = ''; S.settingsSaved = false; S.diagnosticsError = ''; S.testError = '';
@@ -284,17 +284,37 @@ function captureFocus() {
   const node = document.activeElement;
   const drawer = $('account-drawer'), inDrawer = Boolean(drawer?.contains(node));
   if (!$('app')?.contains(node) && !inDrawer) return null;
+  const inAccountsResults = !inDrawer && Boolean($('accounts-results')?.contains(node));
+  const accountId = node.dataset?.id || node.dataset?.accountCard || node.closest?.('[data-account-card]')?.dataset?.accountCard || '';
   const selector = node.id ? `#${CSS.escape(node.id)}` : node.dataset?.action && node.dataset?.id ? `[data-action="${CSS.escape(node.dataset.action)}"][data-id="${CSS.escape(node.dataset.id)}"]${node.dataset.model ? `[data-model="${CSS.escape(node.dataset.model)}"]` : ''}` : node.dataset?.snippet ? `[data-snippet="${CSS.escape(node.dataset.snippet)}"]` : node.dataset?.requestId ? `[data-request-id="${CSS.escape(node.dataset.requestId)}"]` : node.dataset?.route ? `[data-route="${CSS.escape(node.dataset.route)}"]` : null;
-  return selector ? { selector, inDrawer, start: node.selectionStart, end: node.selectionEnd } : null;
+  return (selector || inAccountsResults) ? { selector, inDrawer, inAccountsResults, accountId, action: node.dataset?.action || '', start: node.selectionStart, end: node.selectionEnd } : null;
 }
 function restoreFocus(saved) {
-  if (!saved || $('action-dialog').open) return;
+  if (!saved || !saved.selector || $('action-dialog').open) return;
   const drawer = $('account-drawer');
   const candidates = [...document.querySelectorAll(saved.selector)].filter(node => saved.inDrawer ? Boolean(drawer?.contains(node)) : !drawer?.contains(node));
   const target = candidates.find(node => node.getClientRects().length);
   if (!target || target.disabled) return;
   target.focus({ preventScroll: true });
   if (typeof saved.start === 'number' && typeof target.setSelectionRange === 'function') try { target.setSelectionRange(saved.start, saved.end); } catch { /* Number inputs do not support text selection. */ }
+}
+function restoreDisplacedAccountFocus(saved) {
+  if (!saved?.inAccountsResults || saved.inDrawer || S.route !== 'accounts' || S.selectedAccountId || $('action-dialog')?.open) return;
+  if (document.activeElement && document.activeElement !== document.body && document.activeElement.isConnected) return;
+  if (saved.accountId && document.querySelector(`[data-account-card="${CSS.escape(saved.accountId)}"]`)) return;
+  const visible = node => Boolean(node && !node.disabled && node.getClientRects().length);
+  const candidates = [
+    saved.action && document.querySelector(`#accounts-results [data-action="${CSS.escape(saved.action)}"]:not([disabled])`),
+    document.querySelector('#accounts-results [data-action="open-drawer"]:not([disabled])'),
+    S.accountCategory && $('clear-account-category'),
+    S.accountStatus && $('account-status'),
+    S.accountQuery && $('account-search'),
+    document.querySelector('#account-quick-filters .filter-pill[aria-pressed="true"]'),
+    $('account-search'),
+    $('page-title'),
+    $('main'),
+  ];
+  candidates.find(visible)?.focus({ preventScroll: true });
 }
 function fold(id, title, content, initiallyOpen = false, attrs = {}) {
   const existing = $(id), open = existing ? existing.open : S.folds[id] ?? initiallyOpen;
@@ -326,6 +346,7 @@ function render() {
   $('app').replaceChildren(el('div', { class: 'shell' }, el('div', { class: 'workspace' }, topbar, demoBanner, main)));
   renderAccountDrawer();
   restoreFocus(savedFocus);
+  restoreDisplacedAccountFocus(savedFocus);
 }
 function select(id, options, value, action) {
   const node = el('select', { id, onChange: event => action(event.target.value) }, options.map(([v, label]) => el('option', { value: v }, label)));
@@ -337,7 +358,7 @@ function renderPage() {
   const animate = S.enterRoute; S.enterRoute = false;
   return el('div', { class: `stack${animate ? ' content-enter' : ''}` }, pages[S.route]());
 }
-function updateContent() { const saved = captureFocus(); const container = $('page-content'); if (container) container.replaceChildren(renderPage()); renderAccountDrawer(); restoreFocus(saved); }
+function updateContent() { const saved = captureFocus(); const container = $('page-content'); if (container) container.replaceChildren(renderPage()); renderAccountDrawer(); restoreFocus(saved); restoreDisplacedAccountFocus(saved); }
 function scheduleRefresh() { clearInterval(S.timer); S.timer = S.authenticated ? setInterval(maybeAutoRefresh, 15000) : null; }
 function canAutoRefresh() {
   return S.auto && S.authenticated && S.accounts !== null && !document.hidden && !S.bulkBusy && !S.loading && !S.actionBusy && !S.settingsBusy && !settingsDirty() && !$('action-dialog').open && !S.testBusy && ![...modelTests.values()].some(r => r.status === 'busy') && !quotaPending.size && !subscriptionPending.size && !document.activeElement?.matches('textarea,input:not([type="checkbox"]):not([type="radio"]),select:not(#account-status):not(#account-test-model)');
@@ -406,6 +427,7 @@ function applyBulkJob(job) {
     }
     if (saved && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) {
       restoreFocus(saved);
+      restoreDisplacedAccountFocus(saved);
     }
     if (S.selectedAccountId && (!document.activeElement || document.activeElement === document.body || !$('account-drawer')?.contains(document.activeElement))) {
       $('account-drawer')?.focus({ preventScroll: true });
@@ -477,6 +499,7 @@ async function logout() {
   }, t('logout'));
 }
 function applyRouteFromHash() {
+  S.routeEpoch++;
   const { route, params } = readRouteHash(), clean = key => (params.get(key) || '').slice(0, 180);
   if (route !== 'keys') revealedKeys.clear();
   if (route !== 'accounts') closeAccountDrawer(false);
@@ -1050,7 +1073,7 @@ function accountResults() {
     badge(`${L('Category', '分類')}: ${accountCategoryLabel(S.accountCategory)}`, ({ action: 'rose', pause: 'amber', freshness: 'violet' })[S.accountCategory] || '', true),
     btn(`${L('Clear category filter', '清除分類篩選')} ×`, clearAccountCategory, { id: 'clear-account-category', class: 'compact', 'data-action': 'clear-account-category' }));
   return el('div', { class: 'account-list' }, categoryChip, el('p', { class: 'account-count', role: 'status' }, L(`${filtered.length} of ${all.length} accounts`, `${all.length} 個帳戶中顯示 ${filtered.length} 個`)),
-    !filtered.length ? el('div', { class: 'panel' }, empty(all.length ? t('noMatch') : L('No accounts connected', '尚未連接帳戶'), all.length ? L('Try another search or clear filters.', '請嘗試其他搜尋或清除篩選。') : L('Choose Google sign-in to add your first account.', '選擇 Google 登入以新增第一個帳戶。')), all.length > 0 && btn(L('Clear filters', '清除篩選'), () => { S.accountQuery = ''; S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false; S.accountQuickFilter = ''; updateContent(); }, { class: 'account-clear' })) : filtered.map((a, i) => {
+    !filtered.length ? el('div', { class: 'panel' }, empty(all.length ? t('noMatch') : L('No accounts connected', '尚未連接帳戶'), all.length ? L('Try another search or clear filters.', '請嘗試其他搜尋或清除篩選。') : L('Choose Google sign-in to add your first account.', '選擇 Google 登入以新增第一個帳戶。')), all.length > 0 && btn(L('Clear filters', '清除篩選'), () => { S.accountQuery = ''; S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false; S.accountQuickFilter = ''; updateContent(); }, { id: 'clear-account-filters', class: 'account-clear' })) : filtered.map((a, i) => {
       const model = S.testModel, result = modelTests.get(`${a.id}:${model}`), blocked = a.routingAllowed === false || a.authenticationStatus !== 'signed_in';
       const plan = a.subscription?.source === 'official' && a.subscription?.tier && a.subscription.tier !== 'unknown' ? subscriptionTierLabel(a.subscription.tier) : '';
       return el('article', { class: `account-card panel daily-account${S.selectedAccountId === a.id ? ' is-selected' : ''}`, id: `account-card-${a.id}`, tabindex: '-1', 'data-account-card': a.id, style: `--account-stagger:${Math.min(i, 5) * 24}ms`, 'aria-label': accountDisplayName(a) },
@@ -1211,8 +1234,8 @@ async function fetchKeySecret(k) {
 }
 async function copyApiKey(k) {
   if (!S.authenticated) return;
-  const epoch = S.epoch, startRoute = S.route;
-  const stale = () => epoch !== S.epoch || !S.authenticated || S.route !== startRoute;
+  const epoch = S.epoch, routeEpoch = S.routeEpoch, startRoute = S.route;
+  const stale = () => epoch !== S.epoch || routeEpoch !== S.routeEpoch || !S.authenticated || S.route !== startRoute || (Array.isArray(S.keys) && !S.keys.some(item => item.id === k.id && !item.revokedAt));
   try {
     if (!revealedKeys.has(k.id) && typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
       let fetched = '';
@@ -1248,12 +1271,14 @@ async function copyApiKey(k) {
 }
 async function toggleRevealKey(k) {
   if (revealedKeys.has(k.id)) { revealedKeys.delete(k.id); updateContent(); return; }
-  const epoch = S.epoch;
+  if (!S.authenticated) return;
+  const epoch = S.epoch, routeEpoch = S.routeEpoch, startRoute = S.route;
+  const stale = () => epoch !== S.epoch || routeEpoch !== S.routeEpoch || !S.authenticated || S.route !== startRoute || startRoute !== 'keys' || (Array.isArray(S.keys) && !S.keys.some(item => item.id === k.id && !item.revokedAt));
   try {
     const secret = await fetchKeySecret(k);
-    if (epoch !== S.epoch || !S.authenticated || S.route !== 'keys') return;
+    if (stale()) return;
     revealedKeys.set(k.id, secret); updateContent();
-  } catch (error) { if (epoch === S.epoch && S.authenticated) toast(safeError(error)); }
+  } catch (error) { if (!stale()) toast(safeError(error)); }
 }
 function keysPage() {
   const keys = S.keys === null ? null : S.keys.filter(k => !k.revokedAt);
@@ -1377,7 +1402,7 @@ function accountTermsView(a) {
   return el('div', { class: 'account-terms', 'data-account-terms': a.id },
     el('span', { class: 'account-terms-status', title: explanation }, L('Gemini terms', 'Gemini 條款'), badge(accepted ? L('Acceptance recorded', '已記錄接受') : status === 'error' ? L('Acceptance failed', '接受失敗') : L('Not confirmed', '未確認'), accepted ? 'teal' : status === 'error' ? 'rose' : '', false, { 'data-terms-status': status || 'unknown' })),
     !accepted && btn(L('Accept terms', '接受條款'), () => acceptAccountTerms(a), { class: 'compact', 'data-action': 'accept-terms', 'data-id': a.id, disabled: a.authenticationStatus !== 'signed_in', title: a.authenticationStatus !== 'signed_in' ? L('Sign in first.', '請先登入。') : explanation }),
-    !accepted && el('a', { class: 'terms-app-link', href: 'https://gemini.google.com/', target: '_blank', rel: 'noopener noreferrer', referrerpolicy: 'no-referrer', title: explanation }, L('Use official Gemini App ↗', '到官方 Gemini App 接受 ↗')),
+    !accepted && el('a', { class: 'terms-app-link', 'data-action': 'open-terms-app', 'data-id': a.id, href: 'https://gemini.google.com/', target: '_blank', rel: 'noopener noreferrer', referrerpolicy: 'no-referrer', title: explanation }, L('Use official Gemini App ↗', '到官方 Gemini App 接受 ↗')),
     status === 'error' && el('small', { class: 'terms-error', role: 'status' }, L('Not recorded as accepted. Retry explicitly, or accept in the official App.', '未記錄為已接受。請重試，或到官方 App 接受。')));
 }
 function acceptAccountTerms(a) {

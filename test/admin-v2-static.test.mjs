@@ -9,7 +9,7 @@ const html = await readFile(new URL('index.html', root), 'utf8');
 const css = await readFile(new URL('styles.css', root), 'utf8');
 
 // Test the actual browser functions without a server, credentials, accounts or network.
-function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected network'); }, { clipboard } = {}) {
+function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected network'); }, { clipboard, ClipboardItem } = {}) {
   const createdTexts = [];
   class StubNode {
     constructor(id = '') { this.id = id; this.dataset = {}; this.style = {}; this.open = false; this.hidden = false; this.inert = false; this.children = []; }
@@ -28,6 +28,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
   const nodesById = new Map();
   const sandbox = {
     URL, URLSearchParams, Intl, Date, Number, Object, Array, JSON, String, Boolean, Blob,
+    ...(ClipboardItem ? { ClipboardItem } : {}),
     setTimeout, clearTimeout, setInterval, clearInterval, AbortController, DOMException,
     Node: StubNode, CSS: { escape: value => String(value) },
     navigator: clipboard ? { clipboard } : {},
@@ -36,8 +37,8 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, copyApiKey, expireSession };', context, { timeout: 2000 });
-  return { ...sandbox.subject, nodesById, createdTexts };
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, copyApiKey, toggleRevealKey, expireSession };', context, { timeout: 2000 });
+  return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -388,55 +389,87 @@ test('primary button tokens meet WCAG AA 4.5:1 contrast with white text in dark 
   const darkBlock = css.slice(css.indexOf(':root {'), css.indexOf(':root[data-theme=light]'));
   const lightBlock = css.slice(css.indexOf(':root[data-theme=light]'), css.indexOf('* { box-sizing: border-box; }'));
   for (const [theme, block] of [['dark', darkBlock], ['light', lightBlock]]) {
-    const primary = /--primary:\s*(#[0-9a-fA-F]{6})/.exec(block)?.[1];
-    const hover = /--primary-hover:\s*(#[0-9a-fA-F]{6})/.exec(block)?.[1];
-    const text = /--primary-text:\s*(#[0-9a-fA-F]{6})/.exec(block)?.[1];
-    assert.ok(primary && hover && text, `missing primary tokens in ${theme}`);
-    assert.ok(contrast(text, primary) >= 4.5, `${theme} --primary (${primary}) contrast < 4.5`);
-    assert.ok(contrast(text, hover) >= 4.5, `${theme} --primary-hover (${hover}) contrast < 4.5`);
+    const vars = Object.fromEntries([...block.matchAll(/--([a-z-]+):\s*(#[0-9a-fA-F]{6})/g)].map(m => [m[1], m[2]]));
+    assert.ok(vars.primary && vars['primary-hover'] && vars['primary-text'], `missing primary tokens in ${theme}`);
+    assert.ok(contrast(vars['primary-text'], vars.primary) >= 4.5, `${theme} --primary (${vars.primary}) contrast < 4.5`);
+    assert.ok(contrast(vars['primary-text'], vars['primary-hover']) >= 4.5, `${theme} --primary-hover (${vars['primary-hover']}) contrast < 4.5`);
+    for (const fg of ['text', 'muted', 'subtle', 'violet', 'teal', 'cyan', 'amber', 'rose']) {
+      assert.ok(vars[fg], `missing --${fg} in ${theme}`);
+      for (const bg of ['canvas', 'surface', 'surface-elevated', 'inset', 'code-bg', 'hover']) {
+        assert.ok(vars[bg], `missing --${bg} in ${theme}`);
+        assert.ok(contrast(vars[fg], vars[bg]) >= 4.5, `${theme} --${fg} (${vars[fg]}) on --${bg} (${vars[bg]}) contrast < 4.5`);
+      }
+    }
   }
   const primaryRule = css.slice(css.indexOf('button.primary, .button.primary {'), css.indexOf('button.primary:hover'));
   assert.doesNotMatch(primaryRule, /color-mix\([^)]*#fff/i, 'primary button gradient must not lighten --primary below WCAG AA');
 });
 
-test('copyApiKey discards delayed reveal responses after session expiry or route change even on clipboard failure', async () => {
-  let resolveReveal;
+test('copyApiKey and toggleRevealKey discard delayed reveal responses after logout or away-and-back route navigation', async () => {
   const syntheticKey = 'gsk_' + 'delayed_secret_fixture_value';
-  const clipboardWrites = [];
-  const f = fixture(false, async (url) => {
-    assert.equal(url, '/admin/api/keys/key_1/reveal');
-    return new Promise(resolve => {
-      resolveReveal = () => resolve({ ok: true, status: 200, json: async () => ({ id: 'key_1', label: 'Client', key: syntheticKey }) });
-    });
-  }, {
-    clipboard: {
-      writeText: async value => {
-        clipboardWrites.push(value);
-        throw Error('Clipboard unavailable');
+  for (const mode of ['logout', 'route_roundtrip']) {
+    const resolvers = [];
+    const clipboardWrites = [];
+    const writeItemOutcomes = [];
+    class StubClipboardItem {
+      constructor(items) { this.items = items; }
+    }
+    const f = fixture(false, async (url) => {
+      assert.equal(url, '/admin/api/keys/key_1/reveal');
+      return new Promise(resolve => {
+        resolvers.push(() => resolve({ ok: true, status: 200, json: async () => ({ id: 'key_1', label: 'Client', key: syntheticKey }) }));
+      });
+    }, {
+      ClipboardItem: StubClipboardItem,
+      clipboard: {
+        write: async items => {
+          void Promise.resolve(items[0]?.items['text/plain']).then(
+            () => writeItemOutcomes.push('resolved'),
+            () => writeItemOutcomes.push('rejected'),
+          );
+          throw Error('Clipboard write blocked');
+        },
+        writeText: async value => {
+          clipboardWrites.push(value);
+          throw Error('Clipboard unavailable');
+        },
       },
-    },
-  });
-  f.S.authenticated = true;
-  f.S.authRequired = true;
-  f.S.csrf = 'fixture-csrf';
-  f.S.route = 'keys';
+    });
+    f.S.authenticated = true;
+    f.S.authRequired = true;
+    f.S.csrf = 'fixture-csrf';
+    f.location.hash = '#keys';
+    f.applyRouteFromHash();
 
-  const pendingCopy = f.copyApiKey({ id: 'key_1', label: 'Client' });
-  while (!resolveReveal) await new Promise(resolve => setTimeout(resolve, 1));
-  f.expireSession();
-  resolveReveal();
-  await pendingCopy;
+    const pendingCopy = f.copyApiKey({ id: 'key_1', label: 'Client' });
+    const pendingReveal = f.toggleRevealKey({ id: 'key_1', label: 'Client' });
+    while (resolvers.length < 2) await new Promise(resolve => setTimeout(resolve, 1));
 
-  assert.deepEqual(clipboardWrites, []);
-  assert.equal(f.nodesById.get('action-dialog')?.open ?? false, false);
-  const collectChildren = node => {
-    if (typeof node === 'string') return [node];
-    if (!node || !Array.isArray(node.children)) return [];
-    return node.children.flatMap(collectChildren);
-  };
-  assert.equal(f.createdTexts.includes(syntheticKey), false);
-  for (const node of f.nodesById.values()) {
-    assert.equal(collectChildren(node).some(s => s.includes(syntheticKey)), false);
+    if (mode === 'logout') {
+      f.expireSession();
+    } else {
+      f.location.hash = '#accounts';
+      f.applyRouteFromHash();
+      f.location.hash = '#keys';
+      f.applyRouteFromHash();
+    }
+
+    for (const resolveReveal of resolvers) resolveReveal();
+    await Promise.all([pendingCopy, pendingReveal]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    assert.deepEqual(clipboardWrites, [], mode);
+    assert.deepEqual(writeItemOutcomes, ['rejected'], mode);
+    assert.equal(f.nodesById.get('action-dialog')?.open ?? false, false, mode);
+    const collectChildren = node => {
+      if (typeof node === 'string') return [node];
+      if (!node || !Array.isArray(node.children)) return [];
+      return node.children.flatMap(collectChildren);
+    };
+    assert.equal(f.createdTexts.includes(syntheticKey), false, mode);
+    for (const node of f.nodesById.values()) {
+      assert.equal(collectChildren(node).some(s => s.includes(syntheticKey)), false, mode);
+    }
   }
 });
 

@@ -802,11 +802,15 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   const record = f.store.listKeys().find(k => k.label === 'Delayed copy client');
 
   await page.evaluate(() => {
+    window.__writeTextCalls = [];
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: {
         write: async () => { throw new Error('Clipboard write blocked'); },
-        writeText: async () => { throw new Error('Clipboard writeText blocked'); },
+        writeText: async value => {
+          window.__writeTextCalls.push(value);
+          throw new Error('Clipboard writeText blocked');
+        },
       },
     });
   });
@@ -832,6 +836,7 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   await expect(page.locator('#login-form')).toBeVisible();
   releaseReveal();
   await page.waitForTimeout(150);
+  expect(await page.evaluate(() => window.__writeTextCalls.length)).toBe(0);
   expect(await page.locator('#action-dialog').evaluate(n => n.open)).toBe(false);
   await expect(page.locator('.key-fallback-secret')).toHaveCount(0);
   expect(await page.evaluate(secret => document.body.textContent.includes(secret), key)).toBe(false);
@@ -840,6 +845,33 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   await page.locator('#admin-password').fill(PASSWORD);
   await page.locator('#login-submit').click();
   await expect(page.locator('[data-page="keys"]')).toBeVisible();
+
+  for (const action of ['copy-key', 'reveal-key']) {
+    let releaseRouteReveal, routeRevealSeenResolve;
+    const routeRevealGate = new Promise(resolve => { releaseRouteReveal = resolve; });
+    const routeRevealSeen = new Promise(resolve => { routeRevealSeenResolve = resolve; });
+    await page.route('**/admin/api/keys/*/reveal', async r => {
+      if (r.request().method() !== 'POST') return r.continue();
+      routeRevealSeenResolve();
+      await routeRevealGate;
+      await r.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: record.id, label: record.label, key }),
+      });
+    });
+    await page.locator(`[data-action="${action}"][data-id="${record.id}"]`).click();
+    await routeRevealSeen;
+    await route(page, 'accounts');
+    await route(page, 'keys');
+    releaseRouteReveal();
+    await page.waitForTimeout(150);
+    expect(await page.evaluate(() => window.__writeTextCalls.length)).toBe(0);
+    expect(await page.locator('#action-dialog').evaluate(n => n.open)).toBe(false);
+    await expect(page.locator('.key-fallback-secret')).toHaveCount(0);
+    expect(await page.evaluate(secret => document.body.textContent.includes(secret), key)).toBe(false);
+    await page.unroute('**/admin/api/keys/*/reveal');
+  }
   await route(page, 'accounts');
 
   const opener = page.locator('[data-action="open-drawer"][data-id="acc-0"]');
@@ -882,6 +914,9 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
     ],
   });
   let mode = 'one_fail';
+  let releaseClearAttn, clearAttnSeenResolve;
+  const clearAttnGate = new Promise(resolve => { releaseClearAttn = resolve; });
+  const clearAttnSeen = new Promise(resolve => { clearAttnSeenResolve = resolve; });
   let releasePoll, pollSeenResolve;
   const pollGate = new Promise(resolve => { releasePoll = resolve; });
   const pollSeen = new Promise(resolve => { pollSeenResolve = resolve; });
@@ -910,23 +945,23 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
         }),
       });
     }
-    if (mode === 'all_ok') {
+    if (mode === 'clear_attn') {
       return r.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           job: {
-            id: 'job-all-ok',
-            status: 'completed',
+            id: 'job-clear-attn',
+            status: 'running',
             total: 2,
-            completed: 2,
-            updated: 2,
+            completed: 0,
+            updated: 0,
             missing: 0,
             failed: 0,
             skipped: 0,
             results: [
-              { accountId: 'acc-0', status: 'updated', quota: makeQuota(42, 50) },
-              { accountId: 'acc-1', status: 'updated', quota: makeQuota(20, 40) },
+              { accountId: 'acc-0', status: 'queued' },
+              { accountId: 'acc-1', status: 'queued' },
             ],
           },
           reused: false,
@@ -952,6 +987,30 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
           ],
         },
         reused: false,
+      }),
+    });
+  });
+  await page.route('**/admin/api/accounts/quota-refresh/job-clear-attn', async r => {
+    clearAttnSeenResolve();
+    await clearAttnGate;
+    await r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job: {
+          id: 'job-clear-attn',
+          status: 'completed',
+          total: 2,
+          completed: 2,
+          updated: 2,
+          missing: 0,
+          failed: 0,
+          skipped: 0,
+          results: [
+            { accountId: 'acc-0', status: 'updated', quota: makeQuota(42, 50) },
+            { accountId: 'acc-1', status: 'updated', quota: makeQuota(20, 40) },
+          ],
+        },
       }),
     });
   });
@@ -985,10 +1044,16 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   await expect(page.locator('[data-account-card]')).toHaveCount(1);
   await expect(page.locator('[data-account-card="acc-1"]')).toBeVisible();
 
-  mode = 'all_ok';
+  mode = 'clear_attn';
   await page.locator('#refresh-all').click();
+  const attnInspect = page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]');
+  await attnInspect.focus();
+  await expect(attnInspect).toBeFocused();
+  await clearAttnSeen;
+  releaseClearAttn();
   await expect(page.locator('#quick-filter-attention')).toHaveText('Attention (0)');
   await expect(page.locator('[data-account-card]')).toHaveCount(0);
+  await expect(page.locator('#quick-filter-attention')).toBeFocused();
 
   mode = 'async_drawer';
   await page.locator('#quick-filter-all').click();
