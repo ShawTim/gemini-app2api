@@ -787,3 +787,224 @@ test("overview attention tiles, category chip, Sign-in needed filter, i18n and p
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(f.seen).toHaveLength(0);
 });
+
+test("delayed key copy never leaks across logout, bulk refresh syncs focused drawer and attention filter, and drawer restores opener focus", async ({
+  page,
+}) => {
+  await login(page);
+  await route(page, 'keys');
+  await page.locator('#create-key').click();
+  await page.locator('#dialog-label').fill('Delayed copy client');
+  await page.locator('#dialog-confirm').click();
+  await expect(page.locator('#created-key-secret')).toBeVisible();
+  const key = await page.locator('#created-key-secret').textContent();
+  await page.locator('#dialog-cancel').click();
+  const record = f.store.listKeys().find(k => k.label === 'Delayed copy client');
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        write: async () => { throw new Error('Clipboard write blocked'); },
+        writeText: async () => { throw new Error('Clipboard writeText blocked'); },
+      },
+    });
+  });
+
+  let releaseReveal, revealSeenResolve;
+  const revealGate = new Promise(resolve => { releaseReveal = resolve; });
+  const revealSeen = new Promise(resolve => { revealSeenResolve = resolve; });
+  await page.route('**/admin/api/keys/*/reveal', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    revealSeenResolve();
+    await revealGate;
+    await r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ id: record.id, label: record.label, key }),
+    });
+  });
+
+  await page.locator(`[data-action="copy-key"][data-id="${record.id}"]`).click();
+  await revealSeen;
+  await page.locator('#logout').click();
+  await page.locator('#dialog-confirm').click();
+  await expect(page.locator('#login-form')).toBeVisible();
+  releaseReveal();
+  await page.waitForTimeout(150);
+  expect(await page.locator('#action-dialog').evaluate(n => n.open)).toBe(false);
+  await expect(page.locator('.key-fallback-secret')).toHaveCount(0);
+  expect(await page.evaluate(secret => document.body.textContent.includes(secret), key)).toBe(false);
+  await page.unroute('**/admin/api/keys/*/reveal');
+
+  await page.locator('#admin-password').fill(PASSWORD);
+  await page.locator('#login-submit').click();
+  await expect(page.locator('[data-page="keys"]')).toBeVisible();
+  await route(page, 'accounts');
+
+  const opener = page.locator('[data-action="open-drawer"][data-id="acc-0"]');
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  expect(await page.locator('#app').evaluate(n => n.inert)).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.locator('#app').evaluate(n => n.inert)).toBe(false);
+  await expect(opener).toBeFocused();
+
+  await page.locator('#language-toggle').click();
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#account-drawer')).toContainText('請求 · ');
+  await expect(page.locator('#account-drawer')).toContainText('錯誤 · ');
+  await expect(page.locator('#account-drawer')).toContainText('執行中');
+  await expect(page.locator('#account-drawer')).not.toContainText('reqs');
+  await expect(page.locator('#account-drawer')).not.toContainText('in flight');
+  await expect(page.locator('[data-account-card="acc-0"] .m-chip').first()).toHaveAttribute('title', /未驗證/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(opener).toBeFocused();
+  await page.locator('#language-toggle').click();
+
+  await page.locator('#quick-filter-attention').click();
+  await expect(page.locator('#quick-filter-attention')).toHaveText('Attention (0)');
+  await expect(page.locator('[data-account-card]')).toHaveCount(0);
+
+  const makeQuota = (currentPct, weeklyPct = 50) => ({
+    source: 'official',
+    provider: 'google-robin',
+    status: 'ok',
+    updatedAt: '2026-11-14T04:00:00.000Z',
+    usageUpdatedAt: '2026-11-14T04:00:00.000Z',
+    usageRows: [
+      { label: 'Current usage', providerPercent: currentPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-14T09:00:00.000Z' },
+      { label: 'Weekly limit', providerPercent: weeklyPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-20T09:00:00.000Z' },
+    ],
+  });
+  let mode = 'one_fail';
+  let releasePoll, pollSeenResolve;
+  const pollGate = new Promise(resolve => { releasePoll = resolve; });
+  const pollSeen = new Promise(resolve => { pollSeenResolve = resolve; });
+  await page.route('**/admin/api/accounts/quota-refresh', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    if (mode === 'one_fail') {
+      return r.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          job: {
+            id: 'job-one-fail',
+            status: 'completed',
+            total: 2,
+            completed: 2,
+            updated: 1,
+            missing: 0,
+            failed: 1,
+            skipped: 0,
+            results: [
+              { accountId: 'acc-0', status: 'updated', quota: makeQuota(42, 50) },
+              { accountId: 'acc-1', status: 'failed', reason: 'QUOTA_TIMEOUT' },
+            ],
+          },
+          reused: false,
+        }),
+      });
+    }
+    if (mode === 'all_ok') {
+      return r.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          job: {
+            id: 'job-all-ok',
+            status: 'completed',
+            total: 2,
+            completed: 2,
+            updated: 2,
+            missing: 0,
+            failed: 0,
+            skipped: 0,
+            results: [
+              { accountId: 'acc-0', status: 'updated', quota: makeQuota(42, 50) },
+              { accountId: 'acc-1', status: 'updated', quota: makeQuota(20, 40) },
+            ],
+          },
+          reused: false,
+        }),
+      });
+    }
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job: {
+          id: 'job-drawer-sync',
+          status: 'running',
+          total: 2,
+          completed: 0,
+          updated: 0,
+          missing: 0,
+          failed: 0,
+          skipped: 0,
+          results: [
+            { accountId: 'acc-0', status: 'queued' },
+            { accountId: 'acc-1', status: 'queued' },
+          ],
+        },
+        reused: false,
+      }),
+    });
+  });
+  await page.route('**/admin/api/accounts/quota-refresh/job-drawer-sync', async r => {
+    pollSeenResolve();
+    await pollGate;
+    await r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job: {
+          id: 'job-drawer-sync',
+          status: 'completed',
+          total: 2,
+          completed: 2,
+          updated: 2,
+          missing: 0,
+          failed: 0,
+          skipped: 0,
+          results: [
+            { accountId: 'acc-0', status: 'updated', quota: makeQuota(64, 50) },
+            { accountId: 'acc-1', status: 'updated', quota: makeQuota(20, 40) },
+          ],
+        },
+      }),
+    });
+  });
+
+  await page.locator('#refresh-all').click();
+  await expect(page.locator('#quick-filter-attention')).toHaveText('Attention (1)');
+  await expect(page.locator('[data-account-card]')).toHaveCount(1);
+  await expect(page.locator('[data-account-card="acc-1"]')).toBeVisible();
+
+  mode = 'all_ok';
+  await page.locator('#refresh-all').click();
+  await expect(page.locator('#quick-filter-attention')).toHaveText('Attention (0)');
+  await expect(page.locator('[data-account-card]')).toHaveCount(0);
+
+  mode = 'async_drawer';
+  await page.locator('#quick-filter-all').click();
+  await expect(page.locator('[data-account-card]')).toHaveCount(2);
+  await page.locator('#refresh-all').click();
+  await opener.click();
+  const drawerRefresh = page.locator('#account-drawer [data-action="refresh-quota"][data-id="acc-0"]');
+  await drawerRefresh.focus();
+  await expect(drawerRefresh).toBeFocused();
+  await pollSeen;
+  releasePoll();
+
+  await expect(page.locator('#account-drawer .account-quota[data-quota="acc-0"]')).toContainText('64%');
+  await expect(page.locator('#account-drawer .account-quota[data-quota="acc-0"]')).toContainText('Usage updated');
+  await expect(page.locator('[data-account-card="acc-0"] [data-daily-quota="acc-0"] [data-slot="current"]')).toContainText('64% used');
+  await expect(page.locator('#pool-pulse')).toContainText('42%');
+  await expect(drawerRefresh).toBeFocused();
+  expect(f.seen).toHaveLength(0);
+});

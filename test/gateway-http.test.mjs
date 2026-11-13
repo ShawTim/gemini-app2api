@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import http from "node:http";
 import {
   fixture,
@@ -106,6 +107,13 @@ test("admin mutations require csrf and same origin, keys are one-time and revoca
   assert.equal(JSON.stringify(keys).includes("hash"), false);
   assert.equal(keys.keys[0].copyable, true);
   assert.match(keys.keys[0].preview, /^gsk_.+••••••/);
+  const getReveal = await f.admin(`keys/${created.id}/reveal`, { method: "GET" });
+  assert.ok([404, 405].includes(getReveal.status), `GET /reveal must not succeed: ${getReveal.status}`);
+  assert.equal((await getReveal.text()).includes(created.key), false);
+  const diagText = JSON.stringify(await f.admin("diagnostics").then((r) => r.json()));
+  const keyDigest = crypto.createHash("sha256").update(created.key).digest("hex");
+  assert.equal(diagText.includes(created.key), false);
+  assert.equal(diagText.includes(keyDigest), false);
   assert.equal(
     (
       await f.admin(`keys/${created.id}/reveal`, {

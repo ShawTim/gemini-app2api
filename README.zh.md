@@ -55,8 +55,8 @@
 
 - **精確定義的 OpenAI 相容介面（`Chat` 與 `Responses`）：** 支援 `GET /v1/models`、`POST /v1/chat/completions` 與 `POST /v1/responses`，涵蓋 JSON 與增量 SSE 串流、`reasoning_effort` / `reasoning.effort` 思考強度對應，以及靜態 PNG/JPEG/WebP 圖片輸入。
 - **客戶端自主工具權限（Caller-Owned Tools）：** 由客戶端宣告函數與 JSON Schema（含 Responses `type: "namespace"` 工具分組）、在本機執行獲准呼叫並回傳結果；閘道嚴格驗證工具名稱與參數結構，絕不代為執行 Shell 指令或存取你的專案目錄。
-- **零第三方 Runtime 依賴與嚴密安全邊界：** 零外部生產套件；強制檢查 `0700`/`0600` 私密目錄與檔案權限、採用 `scrypt` 管理密碼雜湊、以 SHA-256 驗證雜湊搭配 `0600` 本機私密金鑰保存（僅限通過驗證與 CSRF 保護後按需顯示）、嚴格 `Origin`/`Host`/`X-CSRF-Token` 後台寫入保護，以及預設關閉且具 SSRF 防護的公開圖片下載。
-- **中英雙語現代化維運後台（`English` / `繁體中文`）：** 支援桌面與手機響應式檢視及深淺色主題；內建帳戶池即時脈搏與延遲圖、側欄帳戶檢視器（Inspector Drawer）、一鍵批量唯讀更新 **目前用量（Current usage）** 與 **每週限額（Weekly limit）**、客戶端快速連接設定範本（`Codex CLI`、`Cline`、`cURL`）、可隨時複製或撤銷的 API 金鑰管理、明確記錄或確認接受 Gemini 服務條款，以及遮罩後的上游 HTTP/gRPC 診斷資訊。
+- **零第三方 Runtime 依賴與嚴密安全邊界：** 零外部生產套件；強制檢查 `0700`/`0600` 私密目錄與檔案權限、採用 `scrypt` 管理密碼雜湊、以 SHA-256 驗證雜湊搭配 `0600` 本機私密金鑰保存（僅於建立當下或通過驗證與 CSRF 保護後按需回傳）、嚴格 `Origin`/`Host`/`X-CSRF-Token` 後台寫入保護，以及預設關閉且具 SSRF 防護的公開圖片下載。
+- **中英雙語現代化維運後台（`English` / `繁體中文`）：** 支援桌面與手機響應式檢視及深淺色主題；內建帳戶池狀態脈搏與請求延遲快照圖、側欄帳戶檢視器（Inspector Drawer）、一鍵批量唯讀更新 **目前用量（Current usage）** 與 **每週限額（Weekly limit）**、客戶端快速連接設定範本（`Codex CLI`、`Cline`、`cURL`）、可隨時複製或撤銷的 API 金鑰管理、明確記錄或確認接受 Gemini 服務條款，以及遮罩後的上游 HTTP/gRPC 診斷資訊。
 
 | 淺色主題 —— 帳戶側欄檢視與狀態脈搏 | 手機版後台 —— 繁體中文介面 |
 |---|---|

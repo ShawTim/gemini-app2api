@@ -9,31 +9,35 @@ const html = await readFile(new URL('index.html', root), 'utf8');
 const css = await readFile(new URL('styles.css', root), 'utf8');
 
 // Test the actual browser functions without a server, credentials, accounts or network.
-function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected network'); }) {
+function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected network'); }, { clipboard } = {}) {
+  const createdTexts = [];
   class StubNode {
-    constructor() { this.dataset = {}; this.style = {}; this.open = false; this.hidden = false; }
+    constructor(id = '') { this.id = id; this.dataset = {}; this.style = {}; this.open = false; this.hidden = false; this.inert = false; this.children = []; }
     addEventListener() {}
     setAttribute() {}
     removeAttribute() {}
-    append() {}
-    replaceChildren() {}
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = [...nodes]; }
+    showModal() { this.open = true; }
     focus() {}
     blur() {}
-    close() {}
+    close() { this.open = false; }
     contains() { return false; }
     getClientRects() { return []; }
   }
+  const nodesById = new Map();
   const sandbox = {
-    URL, URLSearchParams, Intl, Date, Number, Object, Array, JSON, String, Boolean,
+    URL, URLSearchParams, Intl, Date, Number, Object, Array, JSON, String, Boolean, Blob,
     setTimeout, clearTimeout, setInterval, clearInterval, AbortController, DOMException,
     Node: StubNode, CSS: { escape: value => String(value) },
+    navigator: clipboard ? { clipboard } : {},
     location: { search: demo ? '?demo=1' : '', hash: '', href: `http://fixture.invalid/admin/${demo ? '?demo=1' : ''}`, origin: 'http://fixture.invalid', protocol: 'http:' },
-    document: { hidden: false, activeElement: null, documentElement: { dataset: {} }, addEventListener() {}, getElementById: () => new StubNode(), querySelector: () => null, querySelectorAll: () => [], createElement: () => new StubNode(), createElementNS: () => new StubNode(), createTextNode: text => String(text) },
+    document: { hidden: false, activeElement: null, documentElement: { dataset: {} }, addEventListener() {}, getElementById: id => { if (!nodesById.has(id)) nodesById.set(id, new StubNode(id)); return nodesById.get(id); }, querySelector: () => null, querySelectorAll: () => [], createElement: () => new StubNode(), createElementNS: () => new StubNode(), createTextNode: text => { const s = String(text); createdTexts.push(s); return s; } },
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity };', context, { timeout: 2000 });
-  return sandbox.subject;
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, copyApiKey, expireSession };', context, { timeout: 2000 });
+  return { ...sandbox.subject, nodesById, createdTexts };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -393,4 +397,59 @@ test('primary button tokens meet WCAG AA 4.5:1 contrast with white text in dark 
   }
   const primaryRule = css.slice(css.indexOf('button.primary, .button.primary {'), css.indexOf('button.primary:hover'));
   assert.doesNotMatch(primaryRule, /color-mix\([^)]*#fff/i, 'primary button gradient must not lighten --primary below WCAG AA');
+});
+
+test('copyApiKey discards delayed reveal responses after session expiry or route change even on clipboard failure', async () => {
+  let resolveReveal;
+  const syntheticKey = 'gsk_' + 'delayed_secret_fixture_value';
+  const clipboardWrites = [];
+  const f = fixture(false, async (url) => {
+    assert.equal(url, '/admin/api/keys/key_1/reveal');
+    return new Promise(resolve => {
+      resolveReveal = () => resolve({ ok: true, status: 200, json: async () => ({ id: 'key_1', label: 'Client', key: syntheticKey }) });
+    });
+  }, {
+    clipboard: {
+      writeText: async value => {
+        clipboardWrites.push(value);
+        throw Error('Clipboard unavailable');
+      },
+    },
+  });
+  f.S.authenticated = true;
+  f.S.authRequired = true;
+  f.S.csrf = 'fixture-csrf';
+  f.S.route = 'keys';
+
+  const pendingCopy = f.copyApiKey({ id: 'key_1', label: 'Client' });
+  while (!resolveReveal) await new Promise(resolve => setTimeout(resolve, 1));
+  f.expireSession();
+  resolveReveal();
+  await pendingCopy;
+
+  assert.deepEqual(clipboardWrites, []);
+  assert.equal(f.nodesById.get('action-dialog')?.open ?? false, false);
+  const collectChildren = node => {
+    if (typeof node === 'string') return [node];
+    if (!node || !Array.isArray(node.children)) return [];
+    return node.children.flatMap(collectChildren);
+  };
+  assert.equal(f.createdTexts.includes(syntheticKey), false);
+  for (const node of f.nodesById.values()) {
+    assert.equal(collectChildren(node).some(s => s.includes(syntheticKey)), false);
+  }
+});
+
+test('modelStateLabel localizes all model verification states in English and Traditional Chinese', () => {
+  const f = fixture();
+  f.S.lang = 'en';
+  assert.equal(f.modelStateLabel('unverified'), 'Not verified');
+  assert.equal(f.modelStateLabel('verified'), 'Last verified');
+  assert.equal(f.modelStateLabel('rejected'), 'Previous upstream rejection');
+  assert.equal(f.modelStateLabel('blocked'), 'Previous account rejection (historical)');
+  f.S.lang = 'zh-HK';
+  assert.equal(f.modelStateLabel('unverified'), '未驗證');
+  assert.equal(f.modelStateLabel('verified'), '曾成功驗證');
+  assert.equal(f.modelStateLabel('rejected'), '曾被上游拒絕');
+  assert.equal(f.modelStateLabel('blocked'), '過往帳戶拒絕紀錄');
 });

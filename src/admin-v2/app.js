@@ -359,25 +359,57 @@ function updateBulkUI() {
 function applyBulkJob(job) {
   if (!job || !Array.isArray(job.results) || !['running', 'completed', 'cancelled'].includes(job.status)) throw { code: 'INVALID_RESPONSE' };
   S.bulkJob = job;
+  let terminalCount = 0;
   for (const result of job.results) {
     if ((['updated', 'missing'].includes(result.status) || result.status === 'skipped' && result.reason === 'QUOTA_SNAPSHOT_NEWER') && result.quota) {
       for (const list of [S.accounts, S.overview?.accounts]) { const account = list?.find(a => a.id === result.accountId); if (account) account.quota = result.quota; }
       quotaRefreshErrors.delete(result.accountId);
-    } else if (result.status === 'failed') quotaRefreshErrors.set(result.accountId, L('Could not get newer data.', '未能取得較新資料。'));
-    if (['updated', 'missing', 'failed', 'skipped'].includes(result.status)) {
-      const account = S.accounts?.find(a => a.id === result.accountId), target = document.querySelector(`[data-daily-quota="${CSS.escape(result.accountId)}"]`);
-      if (account && target) target.replaceWith(dailyQuota(account));
-      for (const detailed of document.querySelectorAll(`.account-quota[data-quota="${CSS.escape(result.accountId)}"]`)) {
-        const scope = detailed.dataset?.quotaScope === 'drawer' ? 'drawer' : 'card';
-        if (account && !detailed.contains(document.activeElement)) detailed.replaceWith(accountQuotaView(account, scope));
+    } else if (result.status === 'failed') {
+      quotaRefreshErrors.set(result.accountId, L('Could not get newer data.', '未能取得較新資料。'));
+    }
+    if (['updated', 'missing', 'failed', 'skipped'].includes(result.status)) terminalCount++;
+  }
+  const saved = captureFocus();
+  if (S.route === 'overview' && terminalCount > 0) {
+    updateContent();
+  } else {
+    const resultsHost = $('accounts-results');
+    if (resultsHost && terminalCount > 0) {
+      const renderedIds = [...resultsHost.querySelectorAll('[data-account-card]')].map(n => n.dataset.accountCard);
+      const nextIds = filteredAccounts(S.accounts || []).map(a => a.id);
+      const sameCards = renderedIds.length === nextIds.length && renderedIds.every((id, idx) => id === nextIds[idx]);
+      if (!sameCards) {
+        resultsHost.replaceChildren(accountResults());
+      } else {
+        for (const result of job.results) {
+          if (!['updated', 'missing', 'failed', 'skipped'].includes(result.status)) continue;
+          const account = S.accounts?.find(a => a.id === result.accountId);
+          const target = document.querySelector(`[data-daily-quota="${CSS.escape(result.accountId)}"]`);
+          if (account && target) target.replaceWith(dailyQuota(account));
+        }
       }
     }
-  }
-  const pulse = $('pool-pulse');
-  if (pulse && job.results.some(r => ['updated', 'missing', 'failed', 'skipped'].includes(r.status))) {
-    const saved = pulse.contains(document.activeElement) ? captureFocus() : null;
-    pulse.replaceWith(poolPulseGrid());
-    if (saved) restoreFocus(saved);
+    for (const result of job.results) {
+      if (!['queued', 'running', 'updated', 'missing', 'failed', 'skipped'].includes(result.status)) continue;
+      const account = S.accounts?.find(a => a.id === result.accountId);
+      if (!account) continue;
+      for (const detailed of document.querySelectorAll(`.account-quota[data-quota="${CSS.escape(result.accountId)}"]`)) {
+        const scope = detailed.dataset?.quotaScope === 'drawer' ? 'drawer' : 'card';
+        detailed.replaceWith(accountQuotaView(account, scope));
+      }
+    }
+    if (terminalCount > 0) {
+      const filters = $('account-quick-filters');
+      if (filters) filters.replaceWith(quickFilterPills());
+      const pulse = $('pool-pulse');
+      if (pulse) pulse.replaceWith(poolPulseGrid());
+    }
+    if (saved && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) {
+      restoreFocus(saved);
+    }
+    if (S.selectedAccountId && (!document.activeElement || document.activeElement === document.body || !$('account-drawer')?.contains(document.activeElement))) {
+      $('account-drawer')?.focus({ preventScroll: true });
+    }
   }
   updateBulkUI();
 }
@@ -681,8 +713,10 @@ async function testAccountModel(a, model) {
   } catch (error) { if (epoch !== S.epoch || !S.authenticated) return; modelTests.set(key, { status: 'fail', at: Date.now(), error: /^[A-Z0-9_]{1,64}$/.test(error?.code || '') ? error.code : 'REQUEST_FAILED' }); }
   updateContent();
 }
+function modelStateLabel(state) {
+  return ({ unverified: L('Not verified', '未驗證'), verified: L('Last verified', '曾成功驗證'), rejected: L('Previous upstream rejection', '曾被上游拒絕'), blocked: L('Previous account rejection (historical)', '過往帳戶拒絕紀錄') })[state] || L('Not verified', '未驗證');
+}
 function accountModelStates(a) {
-  const labels = { unverified: L('Not verified', '未驗證'), verified: L('Last verified', '曾成功驗證'), rejected: L('Previous upstream rejection', '曾被上游拒絕'), blocked: L('Previous account rejection (historical)', '過往帳戶拒絕紀錄') };
   const entries = Object.entries(a.modelStates || {});
   const models = entries.length ? entries : (S.overview?.models || []).map(m => [m, { state: 'unverified' }]);
   return el('div', { class: 'compact-models', 'data-account-model-states': a.id }, models.map(([model, state]) => {
@@ -691,7 +725,7 @@ function accountModelStates(a) {
     return el('div', { class: 'compact-model-row', 'data-provider-model': model, 'data-provider-state': currentState },
       mono(model),
       el('div', { class: 'model-row-controls' },
-        badge(labels[currentState] || labels.unverified, currentState === 'verified' ? 'teal' : ['rejected', 'blocked'].includes(currentState) ? 'rose' : ''),
+        badge(modelStateLabel(currentState), currentState === 'verified' ? 'teal' : ['rejected', 'blocked'].includes(currentState) ? 'rose' : ''),
         el('span', { role: 'status', class: `model-test-result ${result?.status || ''}`, title: result?.error || (result?.at ? date(result.at) : ''), 'data-model-test-result': '' }, result?.status === 'busy' ? '…' : result?.status === 'ok' ? 'OK' : result?.status === 'fail' ? 'Fail' : '—'),
         btn('Test', () => testAccountModel(a, model), { class: 'compact', 'data-action': 'test-model', 'data-id': a.id, 'data-model': model, disabled: blocked || result?.status === 'busy', title: blocked ? L('Account unavailable or excluded by routing policy', '帳戶未登入或被路由政策排除') : L('Test this account and model', '測試此帳戶及模型') })),
       result?.status === 'fail' && el('small', { class: 'model-test-error' }, result.error),
@@ -758,7 +792,7 @@ function accountModelChips(a) {
     const st = states[m]?.state || 'unverified';
     const short = m === 'gemini-hydrogen' ? 'hydrogen' : m === 'gemini-argon' ? 'argon' : m === 'gemini-flash-lite' ? 'lite' : m;
     const cls = st === 'verified' ? 'ok' : ['rejected', 'blocked'].includes(st) ? 'rejected' : '';
-    return el('span', { class: `m-chip ${cls}`.trim(), title: `${m}: ${st}` }, el('i', { 'aria-hidden': true }), short);
+    return el('span', { class: `m-chip ${cls}`.trim(), title: `${m}: ${modelStateLabel(st)}` }, el('i', { 'aria-hidden': true }), short);
   }));
 }
 function poolCurrentWindowSummary(all = S.accounts || []) {
@@ -867,22 +901,45 @@ function bottomDeck() {
           btn([icon('copy'), L('Copy preset', '複製配置')], () => copy(presetSnippetText()), { class: 'compact' }),
           link('models', L('Full client setup →', '完整客戶端設定 →'), { class: 'button compact quiet' })))));
 }
+function setBackgroundInert(inert) {
+  for (const id of ['app', 'skip-link']) {
+    const node = $(id);
+    if (node) node.inert = Boolean(inert);
+  }
+}
 function openAccountDrawer(id) {
   if (!(S.accounts || []).some(a => a.id === id)) return;
-  S.drawerReturnFocus = document.activeElement;
+  if (!S.selectedAccountId) {
+    const captured = captureFocus();
+    S.drawerReturnFocus = captured && !captured.inDrawer
+      ? captured
+      : { selector: `[data-action="open-drawer"][data-id="${CSS.escape(id)}"]`, inDrawer: false };
+  }
   S.selectedAccountId = id;
   updateContent();
   $('account-drawer')?.focus({ preventScroll: true });
 }
 function closeAccountDrawer(restore = true) {
-  const hadDrawer = Boolean(S.selectedAccountId);
+  const closedId = S.selectedAccountId;
+  const saved = S.drawerReturnFocus;
   S.selectedAccountId = '';
+  S.drawerReturnFocus = null;
+  setBackgroundInert(false);
   const backdrop = $('drawer-backdrop'), drawer = $('account-drawer');
   if (backdrop) backdrop.hidden = true;
-  if (drawer) { drawer.hidden = true; drawer.replaceChildren(); }
-  if (hadDrawer) {
+  if (drawer) { drawer.hidden = true; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren(); }
+  if (closedId) {
     document.querySelectorAll('.daily-account.is-selected').forEach(n => n.classList.remove('is-selected'));
-    if (restore && S.drawerReturnFocus?.isConnected) S.drawerReturnFocus.focus({ preventScroll: true });
+    if (restore && S.authenticated && !$('action-dialog')?.open) {
+      restoreFocus(saved);
+      if (!document.activeElement || document.activeElement === document.body || drawer?.contains(document.activeElement)) {
+        const fallback = document.querySelector(`[data-action="open-drawer"][data-id="${CSS.escape(closedId)}"]`)
+          || $('account-search')
+          || $('page-title')
+          || $('main');
+        fallback?.focus({ preventScroll: true });
+      }
+    }
   }
 }
 document.addEventListener('keydown', event => {
@@ -919,7 +976,18 @@ function renderAccountDrawer() {
   const backdrop = $('drawer-backdrop'), drawer = $('account-drawer');
   if (!backdrop || !drawer) return;
   const a = S.authenticated && S.selectedAccountId ? (S.accounts || []).find(item => item.id === S.selectedAccountId) : null;
-  if (!a) { backdrop.hidden = true; drawer.hidden = true; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren(); return; }
+  if (!a) {
+    const vanished = Boolean(S.selectedAccountId);
+    S.selectedAccountId = '';
+    S.drawerReturnFocus = null;
+    setBackgroundInert(false);
+    backdrop.hidden = true; drawer.hidden = true; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren();
+    if (vanished && S.authenticated && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || drawer.contains(document.activeElement))) {
+      ($('account-search') || $('page-title') || $('main'))?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  setBackgroundInert(true);
   backdrop.hidden = false;
   backdrop.onclick = () => closeAccountDrawer(true);
   drawer.hidden = false;
@@ -931,7 +999,7 @@ function renderAccountDrawer() {
     el('div', { class: 'drawer-head' },
       el('div', {},
         el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, el('h2', { id: 'drawer-title', style: 'margin:0;font-size:15.5px' }, accountDisplayName(a)), plan && el('span', { class: 'plan-pill' }, plan), accountStatus(a)),
-        el('div', { class: 'mono muted', style: 'font-size:11px;margin-top:4px' }, `${a.id} · ${a.requests ?? '—'} reqs · ${a.failures ?? '—'} errors · ${a.inFlight ?? '—'} in flight`)),
+        el('div', { class: 'mono muted', style: 'font-size:11px;margin-top:4px' }, L(`${a.id} · ${a.requests ?? '—'} reqs · ${a.failures ?? '—'} errors · ${a.inFlight ?? '—'} in flight`, `${a.id} · ${a.requests ?? '—'} 請求 · ${a.failures ?? '—'} 錯誤 · ${a.inFlight ?? '—'} 執行中`))),
       btn(`✕ ${t('close')}`, () => closeAccountDrawer(true), { id: 'drawer-close', class: 'compact' })),
     el('div', { class: 'drawer-body' },
       accountQuotaView(a, 'drawer'),
@@ -946,29 +1014,31 @@ function renderAccountDrawer() {
       btn(t('rename'), () => renameAccount(a), { id: 'drawer-rename', class: 'compact' }),
       btn(L('Remove local secrets', '移除本機秘密'), () => removeAccount(a), { id: 'drawer-remove', class: 'compact danger' })));
 }
-function accountsPage() {
-  const models = S.overview?.models || [];
-  if (!models.includes(S.testModel)) S.testModel = models.includes('gemini-hydrogen') ? 'gemini-hydrogen' : (models[0] || '');
+function quickFilterPills() {
   const all = S.accounts || [];
   const readyCount = all.filter(accountRoutingEligible).length;
   const attnCount = all.filter(accountHasAttention).length;
   const setQuickFilter = mode => {
-    if (mode === 'all') { S.accountQuickFilter = ''; S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false; }
-    else if (mode === 'ready') { S.accountQuickFilter = 'ready'; S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false; }
-    else { S.accountQuickFilter = 'attention'; S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false; }
+    S.accountQuickFilter = mode === 'all' ? '' : mode;
+    S.accountStatus = ''; S.accountCategory = ''; S.accountAttention = false;
     updateContent();
   };
-  const activePill = S.accountQuickFilter || (!S.accountStatus && !S.accountCategory ? 'all' : '');
+  const activePill = S.accountQuickFilter || (!S.accountStatus && !S.accountCategory && !S.accountAttention ? 'all' : '');
+  return el('div', { class: 'filter-pills', id: 'account-quick-filters', role: 'group', 'aria-label': L('Quick account filters', '快速帳戶篩選') },
+    btn(`${L('All', '全部')} (${all.length})`, () => setQuickFilter('all'), { id: 'quick-filter-all', class: `filter-pill${activePill === 'all' ? ' active' : ''}`, 'aria-pressed': String(activePill === 'all') }),
+    btn(`${L('Ready', '就緒')} (${readyCount})`, () => setQuickFilter('ready'), { id: 'quick-filter-ready', class: `filter-pill${activePill === 'ready' ? ' active' : ''}`, 'aria-pressed': String(activePill === 'ready') }),
+    btn(`${L('Attention', '需關注')} (${attnCount})`, () => setQuickFilter('attention'), { id: 'quick-filter-attention', class: `filter-pill${activePill === 'attention' ? ' active' : ''}`, 'aria-pressed': String(activePill === 'attention') }));
+}
+function accountsPage() {
+  const models = S.overview?.models || [];
+  if (!models.includes(S.testModel)) S.testModel = models.includes('gemini-hydrogen') ? 'gemini-hydrogen' : (models[0] || '');
   return [S.accountNotice && notice(S.accountNotice, '', { id: 'account-onboarding-note' }), S.accountNotice && link('keys', L('Next: create a caller key →', '下一步：建立呼叫端金鑰 →'), { class: 'button' }),
     poolPulseGrid(),
     el('section', { class: 'accounts-command', 'aria-label': L('Account controls', '帳戶控制項') },
       el('div', { class: 'refresh-strip' }, el('p', { id: 'bulk-status', class: 'help', role: 'status', 'aria-live': 'polite', 'data-state': S.bulkError || S.bulkJob?.failed ? 'error' : S.bulkBusy ? 'running' : 'idle' }, bulkStatusText()), autoRefreshControl()),
       el('div', { class: 'daily-filters' },
         el('label', { class: 'search' }, L('Search accounts', '搜尋帳戶'), el('span', { class: 'search-input-wrap' }, icon('search'), el('input', { id: 'account-search', type: 'search', value: S.accountQuery, placeholder: L('Name or email', '名稱或電郵'), onInput: event => { S.accountQuery = event.target.value; $('accounts-results').replaceChildren(accountResults()); } }))),
-        el('div', { class: 'filter-pills', role: 'group', 'aria-label': L('Quick account filters', '快速帳戶篩選') },
-          btn(`${L('All', '全部')} (${all.length})`, () => setQuickFilter('all'), { class: `filter-pill${activePill === 'all' ? ' active' : ''}`, 'aria-pressed': String(activePill === 'all') }),
-          btn(`${L('Ready', '就緒')} (${readyCount})`, () => setQuickFilter('ready'), { class: `filter-pill${activePill === 'ready' ? ' active' : ''}`, 'aria-pressed': String(activePill === 'ready') }),
-          btn(`${L('Attention', '需關注')} (${attnCount})`, () => setQuickFilter('attention'), { class: `filter-pill${activePill === 'attention' ? ' active' : ''}`, 'aria-pressed': String(activePill === 'attention') })),
+        quickFilterPills(),
         el('label', {}, t('status'), select('account-status', [['', L('All accounts', '全部帳戶')], ['ready', L('Enabled', '已啟用')], ['disabled', t('disabled')], ['login_required', L('Sign-in needed', '需要登入')]], S.accountStatus, value => { S.accountQuickFilter = ''; S.accountStatus = value; updateContent(); })),
         el('label', {}, L('Model for Test', '測試模型'), select('account-test-model', models.map(m => [m, m]), S.testModel, value => { S.testModel = value; $('accounts-results').replaceChildren(accountResults()); })))),
     el('div', { id: 'accounts-results' }, accountResults()),
@@ -989,7 +1059,7 @@ function accountResults() {
             el('div', { class: 'identity-row' },
               el('span', { class: 'avatar', 'aria-hidden': true }, accountInitials(a)),
               el('div', { class: 'identity-copy' },
-                el('button', { type: 'button', class: 'identity-title-btn', onClick: () => openAccountDrawer(a.id) }, el('h2', {}, accountDisplayName(a))),
+                el('button', { type: 'button', class: 'identity-title-btn', 'data-action': 'open-drawer-title', 'data-id': a.id, onClick: () => openAccountDrawer(a.id) }, el('h2', {}, accountDisplayName(a))),
                 el('div', { class: 'daily-identity-meta' }, plan && el('span', { class: 'plan-pill' }, plan), accountNeedsSignIn(a) && el('small', { class: 'identity-flag amber' }, L('Sign-in needed', '需要重新登入')), a.routingAllowed === false && el('small', { class: 'identity-flag muted', 'data-routing-excluded': '' }, L('Not used for requests', '不會用於請求')), accountModelChips(a))))),
           btn(t(a.enabled ? 'disable' : 'enable'), () => toggleAccount(a), { class: 'enabled-switch', role: 'switch', 'aria-checked': String(a.enabled), 'data-action': 'toggle-account', 'data-id': a.id, 'aria-label': `${t(a.enabled ? 'disable' : 'enable')} ${accountDisplayName(a)}` }),
           dailyQuota(a),
@@ -1140,33 +1210,50 @@ async function fetchKeySecret(k) {
   return result.key;
 }
 async function copyApiKey(k) {
+  if (!S.authenticated) return;
+  const epoch = S.epoch, startRoute = S.route;
+  const stale = () => epoch !== S.epoch || !S.authenticated || S.route !== startRoute;
   try {
     if (!revealedKeys.has(k.id) && typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
       let fetched = '';
       try {
+        const itemPromise = fetchKeySecret(k).then(v => {
+          if (stale()) throw { code: 'UNAUTHORIZED' };
+          fetched = v;
+          return new Blob([v], { type: 'text/plain' });
+        });
+        itemPromise.catch(() => {});
         await navigator.clipboard.write([new ClipboardItem({
-          'text/plain': fetchKeySecret(k).then(v => { fetched = v; return new Blob([v], { type: 'text/plain' }); }),
+          'text/plain': itemPromise,
         })]);
-        toast(L('API key copied to clipboard.', '已複製 API 金鑰到剪貼簿。'));
+        if (!stale()) toast(L('API key copied to clipboard.', '已複製 API 金鑰到剪貼簿。'));
         return;
       } catch (err) {
+        if (stale()) return;
         if (err && typeof err.code === 'string' && !fetched) { toast(safeError(err)); return; }
       }
     }
+    if (stale()) return;
     const secret = await fetchKeySecret(k);
-    if (await copy(secret, L('API key copied to clipboard.', '已複製 API 金鑰到剪貼簿。'))) return;
+    if (stale()) return;
+    let copied = false;
+    try { await navigator.clipboard.writeText(secret); copied = true; } catch { copied = false; }
+    if (stale()) return;
+    if (copied) { toast(L('API key copied to clipboard.', '已複製 API 金鑰到剪貼簿。')); return; }
+    toast(t('copyFailed'));
     const node = el('pre', { tabindex: '0', class: 'key-fallback-secret' }, secret);
     openDialog(L('Copy API key', '複製 API 金鑰'), t('copyFailed'), el('div', { class: 'form-stack' }, el('strong', {}, k.label || '—'), node), null);
     D.cleanup = () => { node.textContent = ''; };
-  } catch (error) { toast(safeError(error)); }
+  } catch (error) { if (!stale()) toast(safeError(error)); }
 }
 async function toggleRevealKey(k) {
   if (revealedKeys.has(k.id)) { revealedKeys.delete(k.id); updateContent(); return; }
+  const epoch = S.epoch;
   try {
-    const epoch = S.epoch, secret = await fetchKeySecret(k);
-    if (epoch !== S.epoch || S.route !== 'keys') return;
+    const secret = await fetchKeySecret(k);
+    if (epoch !== S.epoch || !S.authenticated || S.route !== 'keys') return;
     revealedKeys.set(k.id, secret); updateContent();
-  } catch (error) { toast(safeError(error)); }
+  } catch (error) { if (epoch === S.epoch && S.authenticated) toast(safeError(error)); }
 }
 function keysPage() {
   const keys = S.keys === null ? null : S.keys.filter(k => !k.revokedAt);
@@ -1408,7 +1495,7 @@ async function addAccount(event) {
 }
 function createKey() {
   labelDialog(L('Create an API key', '建立 API 金鑰'), L('Name the client or tool that will use this key (for example: Cursor, Codex CLI, or Open WebUI).', '為使用此金鑰的客戶端或工具命名（例如：Cursor、Codex CLI 或 Open WebUI）。'), '', L('Create key', '建立金鑰'), async label => {
-    const epoch = S.epoch; const result = await api('/keys', { method: 'POST', data: { label } }); if (epoch !== S.epoch) return false;
+    const epoch = S.epoch; const result = await api('/keys', { method: 'POST', data: { label } }); if (epoch !== S.epoch || !S.authenticated) return false;
     if (!result.key || !result.id) throw { code: 'INVALID_RESPONSE' };
     const secret = String(result.key);
     const secretNode = el('pre', { id: 'created-key-secret', tabindex: '0', 'aria-label': L('API key secret', 'API 金鑰秘密') }, secret);
