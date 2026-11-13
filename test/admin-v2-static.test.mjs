@@ -32,7 +32,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity };', context, { timeout: 2000 });
   return sandbox.subject;
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -323,6 +323,27 @@ test('cooldown attention category and Sign-in needed filter stay consistent with
   f.S.accountCategory = '';
   f.S.accountStatus = 'login_required';
   assert.deepEqual(f.filteredAccounts().map(a => a.id), ['acc-auth-error', 'acc-login-req']);
+
+  const qRow = pct => ({ source: 'official', provider: 'google-robin', status: 'ok', usageRows: [{ label: 'Current usage', providerPercent: pct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-14T12:00:00.000Z' }] });
+  f.S.accounts = [
+    { id: 'ready-1', enabled: true, status: 'ready', authenticationStatus: 'signed_in', quota: qRow(16), modelStates: {} },
+    { id: 'ready-2', enabled: true, status: 'ready', authenticationStatus: 'signed_in', quota: qRow(25), modelStates: {} },
+    { id: 'paused', enabled: true, status: 'cooldown', authenticationStatus: 'signed_in', cooldownUntil: new Date(Date.now() + 60000).toISOString(), quota: qRow(34), modelStates: {} },
+    { id: 'freshness', enabled: true, status: 'ready', authenticationStatus: 'signed_in', quota: { source: 'official', status: 'error', usageRows: [] }, modelStates: {} },
+    { id: 'disabled-healthy', enabled: false, status: 'disabled', authenticationStatus: 'signed_in', quota: qRow(90), modelStates: {} },
+    { id: 'disabled-login', enabled: false, status: 'login_required', authenticationStatus: 'login_required', quota: qRow(99), modelStates: {} },
+  ];
+  f.S.accountStatus = '';
+  f.S.accountQuickFilter = 'ready';
+  assert.deepEqual(f.filteredAccounts().map(a => a.id), ['ready-1', 'ready-2', 'freshness']);
+  f.S.accountQuickFilter = 'attention';
+  assert.deepEqual(f.filteredAccounts().map(a => a.id), ['paused', 'freshness', 'disabled-login']);
+  assert.equal(f.accountHasAttention(f.S.accounts[4]), false);
+  const summary = f.poolCurrentWindowSummary();
+  assert.equal(summary.avgUsed, 25);
+  assert.deepEqual([...summary.usages], [16, 25, 34]);
+  f.S.accounts = [f.S.accounts[4]];
+  assert.equal(f.poolCurrentWindowSummary().avgUsed, 90);
 });
 
 test('I18N covers cooldown, signed_in and all gateway failover reasons in en and zh-HK', () => {
