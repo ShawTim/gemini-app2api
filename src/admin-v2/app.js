@@ -21,6 +21,7 @@ const S = {
   configCopied: false, lastInspectedRequestId: '', accountNotice: '', loginAcceptTerms: false,
   enterRoute: true, pendingRouteFocus: false, deepLink: {}, diagnosticsOpen: false, capabilitiesOpen: false, folds: {}, accountCategory: '',
 };
+const revealedKeys = new Map();
 const L = (en, zh) => S.lang === 'zh-HK' ? zh : en;
 const words = {
   overview: ['Overview', '總覽'], accounts: ['Accounts', '帳戶'],
@@ -77,6 +78,10 @@ const paths = {
   logout: 'M9 4H4v16h5M10 12h11M17 8l4 4-4 4', check: 'm5 12 4 4L19 6',
   clock: 'M12 8v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0', download: 'M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4',
   copy: 'M9 9h12v12H9zM15 9V3H3v12h6', warning: 'm12 3 10 18H2L12 3zM12 9v4m0 4h.01',
+  eye: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+  eyeOff: 'M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a16.8 16.8 0 0 1-3.2 4.3M6.2 6.2C3.7 8 2 12 2 12s3.5 7 10 7a10.6 10.6 0 0 0 4.6-1',
+  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5',
+  shield: 'M12 3l7 3v6c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6l7-3z',
 };
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -178,6 +183,8 @@ function safeError(error) {
     INVALID_PASSWORD: L('The password was not accepted. Please try again.', '密碼不正確，請重試。'),
     NETWORK_ERROR: L('Cannot reach the admin API. Check the gateway connection and retry.', '無法連接管理 API，請檢查閘道連線並重試。'),
     INVALID_RESPONSE: L('The server returned an unexpected response. No success was assumed.', '伺服器回傳非預期的回應，未有當作成功。'),
+    KEY_SECRET_UNAVAILABLE: L('This key was created in an earlier version that stored only a hash. Create a new key to enable copying.', '此金鑰由只儲存雜湊值的舊版建立。請建立新金鑰以支援隨時複製。'),
+    KEY_NOT_FOUND: L('This API key is no longer active.', '此 API 金鑰已失效或已被撤銷。'),
     DEMO_ONLY: L('Demo only: this action did not contact a provider.', '僅為示範，此操作沒有連接供應商。'),
   };
   return `${messages[code] || L('The operation failed. Your current view and input have been retained. Check sanitized server diagnostics.', '操作失敗，已保留目前畫面及輸入。請檢查已清理的伺服器診斷資料。')} (${code}${error?.status ? ` · HTTP ${error.status}` : ''})`;
@@ -205,7 +212,7 @@ async function api(path, { method = 'GET', data, signal, onResponse } = {}) {
   return result || {};
 }
 function expireSession() {
-  modelTests.clear();
+  modelTests.clear(); revealedKeys.clear();
   quotaRefreshErrors.clear(); subscriptionRefreshErrors.clear(); accountDisclosures.clear();
   S.epoch++; S.authenticated = false; S.csrf = ''; S.overview = null; S.accounts = null; S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.configCopied = false; S.lastInspectedRequestId = ''; S.folds = {}; S.deepLink = {}; S.accountNotice = '';
   S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = '';
@@ -216,7 +223,13 @@ function expireSession() {
   if (S.testController) S.testController.abort(); closeDialog();
   if (!S.authRequired && !S.checkingSession) { S.checkingSession = true; void boot(); } else render();
 }
-function brand() { return el('div', { class: 'brand' }, el('span', { class: 'brand-mark', 'aria-hidden': true }, '✦'), el('div', {}, el('strong', {}, 'Gemini App2API'), el('small', {}, L('Operations console', '營運管理台')))); }
+function brandMark() {
+  return el('span', { class: 'brand-mark', 'aria-hidden': true },
+    svg('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.75, 'stroke-linejoin': 'round', 'aria-hidden': true },
+      svg('path', { d: 'M12 3.5L19.5 7.75V16.25L12 20.5L4.5 16.25V7.75L12 3.5Z' }),
+      svg('path', { d: 'M12 8.2L15.6 10.3V14.5L12 16.6L8.4 14.5V10.3L12 8.2Z', fill: 'currentColor', stroke: 'none' })));
+}
+function brand() { return el('div', { class: 'brand' }, brandMark(), el('div', {}, el('strong', {}, 'Gemini App2API'), el('small', {}, L('Operations console', '營運管理台')))); }
 function renderLogin() {
   if (S.checkingSession) { $('app').replaceChildren(el('main', { id: 'main', class: 'login-area', 'aria-busy': 'true' }, el('p', { role: 'status' }, L('Opening workspace…', '正在開啟工作區…')))); return; }
   const password = el('input', { id: 'admin-password', type: 'password', name: 'password', required: true, autocomplete: 'current-password', maxlength: '1024', disabled: S.checkingSession });
@@ -290,7 +303,12 @@ function render() {
   const savedFocus = captureFocus(); applyPreferences();
   if (!S.authenticated) { renderLogin(); restoreFocus(savedFocus); return; }
   const exitDemo = new URL(location.href); exitDemo.searchParams.delete('demo');
-  const topbar = el('header', { class: 'topbar' }, brand(), desktopNavigation(), el('div', { class: 'toolbar' }, settingsDirty() && S.route !== 'settings' && link('settings', L('Unsaved settings draft', '有未儲存設定草稿'), { class: 'draft-indicator', id: 'settings-draft-indicator' }), preferenceControls(), S.authRequired && btn(icon('logout'), logout, { id: 'logout', class: 'icon-button quiet', 'aria-label': t('logout') })));
+  const topbar = el('header', { class: 'topbar' }, brand(), desktopNavigation(), el('div', { class: 'toolbar' },
+    btn([icon('models'), L('Client setup', '客戶端設定')], () => goto('models'), { id: 'shortcut-models', class: `topbar-shortcut quiet${S.route === 'models' ? ' is-active' : ''}` }),
+    btn([icon('playground'), t('playground')], () => goto('playground'), { id: 'shortcut-playground', class: `topbar-shortcut quiet${S.route === 'playground' ? ' is-active' : ''}` }),
+    settingsDirty() && S.route !== 'settings' && link('settings', L('Unsaved settings draft', '有未儲存設定草稿'), { class: 'draft-indicator', id: 'settings-draft-indicator' }),
+    preferenceControls(),
+    S.authRequired && btn(icon('logout'), logout, { id: 'logout', class: 'icon-button quiet', 'aria-label': t('logout') })));
   const demoBanner = DEMO && el('div', { class: 'demo-banner', id: 'demo-banner' }, badge(L('DEMO', '示範')), el('span', {}, L('Synthetic data · simulated refresh · no provider traffic.', '合成資料 · 模擬更新 · 不會連接供應商。')), el('label', { class: 'demo-scenario row' }, L('Scenario', '情境'), select('demo-scenario', [['sample', L('Sample activity', '活動樣本')], ['empty', L('Empty workspace', '空白工作區')], ['auth', L('Account errors', '帳戶錯誤')], ['quota', L('Quota fixture', '配額範例')], ['failure', L('API error fixture', 'API 錯誤範例')]], S.demoScenario, setDemoScenario)), el('a', { href: exitDemo.href }, L('Exit demo ↗', '離開示範 ↗')));
   const main = el('main', { id: 'main', class: 'main', tabindex: '-1' }, el('div', { class: 'page-heading' }, el('div', {}, el('h1', { id: 'page-title', tabindex: '-1' }, t(S.route)), el('p', {}, descriptions[S.route]())), el('div', { class: 'actions' }, routeActions())),
     el('div', { id: 'page-error', hidden: !S.error, role: 'alert', class: 'notice rose page-error' }, el('span', {}, S.error), btn(t('retry'), () => refresh())), el('div', { id: 'page-content', 'data-page': S.route, 'aria-busy': String(S.loading) }, renderPage()));
@@ -302,7 +320,7 @@ function select(id, options, value, action) {
   node.value = String(value ?? ''); return node;
 }
 function renderPage() {
-  if (!S.overview) return S.loading ? el('div', { class: 'panel loading' }, el('span', { class: 'brand-mark', 'aria-hidden': 'true' }, '✦'), t('loading')) : el('div', { class: 'panel' }, empty(L('No gateway snapshot', '尚無閘道資料'), L('Refresh to load the admin API. No demo data is shown in real mode.', '請重新整理以讀取管理 API。真實模式不會顯示示範資料。')));
+  if (!S.overview) return S.loading ? el('div', { class: 'panel loading' }, brandMark(), t('loading')) : el('div', { class: 'panel' }, empty(L('No gateway snapshot', '尚無閘道資料'), L('Refresh to load the admin API. No demo data is shown in real mode.', '請重新整理以讀取管理 API。真實模式不會顯示示範資料。')));
   const pages = { overview: overviewPage, accounts: accountsPage, sessions: sessionsPage, requests: requestsPage, models: modelsPage, playground: playgroundPage, keys: keysPage, settings: settingsPage };
   const animate = S.enterRoute; S.enterRoute = false;
   return el('div', { class: `stack${animate ? ' content-enter' : ''}` }, pages[S.route]());
@@ -408,6 +426,7 @@ async function logout() {
 }
 function applyRouteFromHash() {
   const { route, params } = readRouteHash(), clean = key => (params.get(key) || '').slice(0, 180);
+  if (route !== 'keys') revealedKeys.clear();
   S.route = route; S.deepLink = { account: clean('account'), model: clean('model'), session: clean('session'), diagnostics: clean('diagnostics'), capabilities: clean('capabilities') };
   if (S.deepLink.account) { S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; accountDisclosures.add(`account-${S.deepLink.account}`); document.querySelector(`[data-account-details="${CSS.escape(S.deepLink.account)}"]`)?.setAttribute('open', ''); }
   if (S.deepLink.session) S.sessionQuery = S.deepLink.session;
@@ -680,9 +699,11 @@ function dailyQuota(a) {
   return el('div', { class: 'daily-quota', 'data-daily-quota': a.id }, ['current', 'weekly'].map(identity => {
     const matches = rows.filter(row => quotaRowIdentity(row) === identity), row = matches.length === 1 ? matches[0] : null;
     const used = row && q.source === 'official' && q.provider === 'google-robin' && row.percentMeaning === 'used';
+    const pct = row && used && finite(row.providerPercent) ? Math.max(0, Math.min(100, row.providerPercent)) : null;
+    const barTone = pct === null ? '' : pct >= 92 ? 'rose' : pct >= 75 ? 'amber' : '';
     return el('section', { class: 'daily-slot', 'data-slot': identity }, el('h3', {}, identity === 'current' ? L('Current usage', '目前用量') : L('Weekly limit', '每週限額')),
-      el('strong', { class: 'daily-value number' }, row && used && finite(row.providerPercent) ? `${num(row.providerPercent)}%` : t('unknown'), el('small', {}, row && used && finite(row.providerPercent) ? L(' used', ' 已用') : '')),
-      row && used && finite(row.providerPercent) && el('div', { class: 'daily-bar', 'aria-hidden': true }, el('span', { style: `width:${Math.max(0, Math.min(100, row.providerPercent))}%` })),
+      el('strong', { class: 'daily-value number' }, pct !== null ? `${num(row.providerPercent)}%` : t('unknown'), el('small', {}, pct !== null ? L(' used', ' 已用') : '')),
+      pct !== null && el('div', { class: 'daily-bar', 'aria-hidden': true }, el('span', { class: barTone || null, style: `width:${pct}%` })),
       row?.providerTimestamp && row.timestampMeaning === 'window_refresh' && el('small', { class: 'daily-window' }, L('Updates ', '額度更新 '), el('time', { datetime: row.providerTimestamp, title: L('Update time does not guarantee a full refill.', '額度更新時間唔代表一定補滿。') }, new Intl.DateTimeFormat(S.lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(row.providerTimestamp)))));
   }), el('small', { class: 'daily-data-time', 'data-usage-observed-at': dataAt || '' }, quotaRefreshErrors.has(a.id) || q.status === 'error' ? rows.length ? L('Update failed · showing saved data', '更新失敗 · 顯示已儲存資料') : L('Update failed · no saved usage', '更新失敗 · 尚未有已儲存用量') : q.status === 'missing' && rows.length ? L('No newer usage · showing saved data', '未有新用量 · 顯示已儲存資料') : dataAt ? L('Data ', '資料 ') + date(dataAt) : L('No usage data yet', '尚未有用量資料')));
 }
@@ -690,10 +711,11 @@ function accountsPage() {
   const models = S.overview?.models || [];
   if (!models.includes(S.testModel)) S.testModel = models[0] || '';
   return [S.accountNotice && notice(S.accountNotice, '', { id: 'account-onboarding-note' }), S.accountNotice && link('keys', L('Next: create a caller key →', '下一步：建立呼叫端金鑰 →'), { class: 'button' }),
-    el('div', { class: 'refresh-strip' }, autoRefreshControl(), el('p', { id: 'bulk-status', class: 'help', role: 'status', 'aria-live': 'polite' }, bulkStatusText())),
-    el('div', { class: 'daily-filters' }, el('label', { class: 'search' }, L('Search accounts', '搜尋帳戶'), el('input', { id: 'account-search', type: 'search', value: S.accountQuery, placeholder: L('Name or email', '名稱或電郵'), onInput: event => { S.accountQuery = event.target.value; $('accounts-results').replaceChildren(accountResults()); } })),
-      el('label', {}, t('status'), select('account-status', [['', L('All accounts', '全部帳戶')], ['ready', L('Enabled', '已啟用')], ['disabled', t('disabled')], ['login_required', L('Sign-in needed', '需要登入')]], S.accountStatus, value => { S.accountStatus = value; $('accounts-results').replaceChildren(accountResults()); })),
-      el('label', {}, L('Model for Test', '測試模型'), select('account-test-model', models.map(m => [m, m]), S.testModel, value => { S.testModel = value; $('accounts-results').replaceChildren(accountResults()); }))),
+    el('section', { class: 'accounts-command', 'aria-label': L('Account controls', '帳戶控制項') },
+      el('div', { class: 'refresh-strip' }, el('p', { id: 'bulk-status', class: 'help', role: 'status', 'aria-live': 'polite', 'data-state': S.bulkError || S.bulkJob?.failed ? 'error' : S.bulkBusy ? 'running' : 'idle' }, bulkStatusText()), autoRefreshControl()),
+      el('div', { class: 'daily-filters' }, el('label', { class: 'search' }, L('Search accounts', '搜尋帳戶'), el('span', { class: 'search-input-wrap' }, icon('search'), el('input', { id: 'account-search', type: 'search', value: S.accountQuery, placeholder: L('Name or email', '名稱或電郵'), onInput: event => { S.accountQuery = event.target.value; $('accounts-results').replaceChildren(accountResults()); } }))),
+        el('label', {}, t('status'), select('account-status', [['', L('All accounts', '全部帳戶')], ['ready', L('Enabled', '已啟用')], ['disabled', t('disabled')], ['login_required', L('Sign-in needed', '需要登入')]], S.accountStatus, value => { S.accountStatus = value; $('accounts-results').replaceChildren(accountResults()); })),
+        el('label', {}, L('Model for Test', '測試模型'), select('account-test-model', models.map(m => [m, m]), S.testModel, value => { S.testModel = value; $('accounts-results').replaceChildren(accountResults()); })))),
     el('div', { id: 'accounts-results' }, accountResults())];
 }
 function accountResults() {
@@ -706,7 +728,7 @@ function accountResults() {
       const model = S.testModel, result = modelTests.get(`${a.id}:${model}`), blocked = a.routingAllowed === false || a.authenticationStatus !== 'signed_in';
       const plan = a.subscription?.source === 'official' && a.subscription?.tier && a.subscription.tier !== 'unknown' ? subscriptionTierLabel(a.subscription.tier) : '';
       return el('article', { class: 'account-card panel daily-account', id: `account-card-${a.id}`, tabindex: '-1', 'data-account-card': a.id, style: `--account-stagger:${Math.min(i, 5) * 24}ms`, 'aria-label': accountDisplayName(a) },
-        el('div', { class: 'daily-account-main' }, el('div', { class: 'daily-identity' }, el('h2', {}, accountDisplayName(a)), plan && el('small', { class: 'muted' }, plan), accountNeedsSignIn(a) && el('small', {}, L('Sign-in needed', '需要重新登入')), a.routingAllowed === false && el('small', { 'data-routing-excluded': '' }, L('Not used for requests', '不會用於請求'))),
+        el('div', { class: 'daily-account-main' }, el('div', { class: 'daily-identity' }, el('h2', {}, accountDisplayName(a)), (plan || accountNeedsSignIn(a) || a.routingAllowed === false) && el('div', { class: 'daily-identity-meta' }, plan && el('span', { class: 'plan-pill' }, plan), accountNeedsSignIn(a) && el('small', { class: 'identity-flag amber' }, L('Sign-in needed', '需要重新登入')), a.routingAllowed === false && el('small', { class: 'identity-flag muted', 'data-routing-excluded': '' }, L('Not used for requests', '不會用於請求')))),
           btn(t(a.enabled ? 'disable' : 'enable'), () => toggleAccount(a), { class: 'enabled-switch', role: 'switch', 'aria-checked': String(a.enabled), 'data-action': 'toggle-account', 'data-id': a.id, 'aria-label': `${t(a.enabled ? 'disable' : 'enable')} ${accountDisplayName(a)}` }),
           dailyQuota(a), el('div', { class: 'daily-test' }, btn(result?.status === 'busy' ? L('Testing…', '測試中…') : 'Test', () => testAccountModel(a, model), { class: 'compact', 'data-action': 'test-model', 'data-id': a.id, 'data-model': model, disabled: blocked || !model || result?.status === 'busy', title: blocked ? L('Sign in to test. Routing exclusions still apply.', '請登入以測試，路由排除仍然適用。') : L('Sends one model request; may use quota.', '發送一次模型請求，可能消耗配額。') }), el('small', { role: 'status', 'data-model-test-result': '', title: result?.error || '' }, result?.status === 'ok' ? 'OK' : result?.status === 'fail' ? L('Failed', '失敗') : L('Uses quota', '消耗配額')))),
         accountTermsView(a),
@@ -738,7 +760,7 @@ function requestMetadata(r) {
     else if (typeof value === 'string') {
       if (key === 'path') result[key] = ['/v1/models', '/v1/chat/completions', '/v1/responses'].includes(value) ? value : '[other endpoint]';
       else if (key === 'errorCode') result[key] = /^[A-Z0-9_]{1,64}$/.test(value) ? value : '[redacted]';
-      else result[key] = /https?:|@|Bearer\s|sk-/i.test(value) ? '[redacted]' : value.slice(0, 160);
+      else result[key] = /https?:|@|Bearer\s|sk-|gsk_/i.test(value) ? '[redacted]' : value.slice(0, 160);
     }
   }
   return result;
@@ -781,7 +803,7 @@ function requestRecovery(r) {
   let label = L('Open diagnostics', '開啟診斷'), route = 'settings', params = { diagnostics: '1' };
   if (r.errorCode === 'NATIVE_PRECONDITION_REQUIRED') { message = L('The upstream rejected this request. This observation does not block later requests locally; no retry allowance is required. Only a later complete validated response verifies access.', '上游拒絕咗此請求。呢個紀錄唔會喺本機封鎖之後嘅請求，亦唔需要重試名額；只有之後完整驗證嘅回應先能驗證存取。'); if (account) { route = 'accounts'; params = { account: account.id, model: r.model }; label = L('Review affected account / model', '檢視受影響帳戶／模型'); } }
   else if (['ACCOUNT_LOGIN_REQUIRED', 'NATIVE_PERMISSION_OR_AUTH', 'OAUTH_REFRESH_FAILED', 'NATIVE_AUTH_REJECTED'].includes(r.errorCode) && account) { route = 'accounts'; params = { account: account.id }; label = L('Review account evidence', '檢視帳戶證據'); message = L('Review the reported authentication state and original evidence. No sign-in or retry will be started automatically.', '請檢查已回報驗證狀態及原始證據，不會自動登入或重試。'); }
-  else if (r.errorCode === 'INVALID_API_KEY') { route = 'keys'; params = {}; label = L('Review caller keys', '檢視呼叫端金鑰'); message = L('The caller key was rejected. Review key lifecycle metadata; secrets cannot be recovered here.', '呼叫端金鑰被拒絕。請檢查金鑰生命週期，秘密無法在此取回。'); }
+  else if (r.errorCode === 'INVALID_API_KEY') { route = 'keys'; params = {}; label = L('Manage API keys', '管理 API 金鑰'); message = L('The caller key was rejected. Copy an active key or create a new one in API keys.', '呼叫端金鑰被拒絕。請在「API 金鑰」頁複製有效金鑰或建立新金鑰。'); }
   else if (['SESSION_BUSY', 'SESSION_CAPACITY', 'INVALID_SESSION_ID'].includes(r.errorCode)) { route = 'sessions'; params = {}; label = L('Review routing sessions', '檢視路由工作階段'); message = L('Review the reported routing sessions and caller session usage. This action only navigates; it does not retry the request.', '請檢查已回報路由工作階段及客戶端的 session 使用方式。此操作只會切換頁面，不會重試請求。'); }
   return el('section', { class: 'recovery-guide', 'data-request-recovery': '' }, el('h3', {}, L('Safe next step', '安全下一步')), el('p', {}, message), btn(label, () => { closeDialog(); goto(route, params); }, { id: 'request-recovery-link' }));
 }
@@ -844,10 +866,58 @@ function playgroundPage() {
       S.output && el('pre', { id: 'playground-output', tabindex: '0', 'aria-label': L('Test response', '測試回應') }, S.output),
       !S.testBusy && (S.output || S.testError) && el('div', { class: 'actions' }, S.output && btn([icon('copy'), L('Copy response', '複製回應')], () => copy(S.output), { id: 'copy-test-response' }), btn(L('Clear result', '清除結果'), () => { S.output = ''; S.testError = ''; S.testResult = null; updateContent(); }, { id: 'clear-test-result' }), link('requests', L('Request history →', '請求紀錄 →')))))))];
 }
+async function fetchKeySecret(k) {
+  if (revealedKeys.has(k.id)) return revealedKeys.get(k.id);
+  const result = await api(`/keys/${encodeURIComponent(k.id)}/reveal`, { method: 'POST', data: {} });
+  if (typeof result.key !== 'string' || !result.key) throw { code: 'INVALID_RESPONSE' };
+  return result.key;
+}
+async function copyApiKey(k) {
+  try {
+    if (!revealedKeys.has(k.id) && typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
+      let fetched = '';
+      try {
+        await navigator.clipboard.write([new ClipboardItem({
+          'text/plain': fetchKeySecret(k).then(v => { fetched = v; return new Blob([v], { type: 'text/plain' }); }),
+        })]);
+        toast(L('API key copied to clipboard.', '已複製 API 金鑰到剪貼簿。'));
+        return;
+      } catch (err) {
+        if (err && typeof err.code === 'string' && !fetched) { toast(safeError(err)); return; }
+      }
+    }
+    const secret = await fetchKeySecret(k);
+    if (await copy(secret, L('API key copied to clipboard.', '已複製 API 金鑰到剪貼簿。'))) return;
+    const node = el('pre', { tabindex: '0', class: 'key-fallback-secret' }, secret);
+    openDialog(L('Copy API key', '複製 API 金鑰'), t('copyFailed'), el('div', { class: 'form-stack' }, el('strong', {}, k.label || '—'), node), null);
+    D.cleanup = () => { node.textContent = ''; };
+  } catch (error) { toast(safeError(error)); }
+}
+async function toggleRevealKey(k) {
+  if (revealedKeys.has(k.id)) { revealedKeys.delete(k.id); updateContent(); return; }
+  try {
+    const epoch = S.epoch, secret = await fetchKeySecret(k);
+    if (epoch !== S.epoch || S.route !== 'keys') return;
+    revealedKeys.set(k.id, secret); updateContent();
+  } catch (error) { toast(safeError(error)); }
+}
 function keysPage() {
   const keys = S.keys === null ? null : S.keys.filter(k => !k.revokedAt);
-  return [notice(L('Keys authenticate API clients, not the admin console. A new secret is displayed once, never retrieved again. Revocation may affect connected clients immediately.', '金鑰用於驗證 API 客戶端，並非管理台。新秘密只顯示一次，無法再次讀取。撤銷可能即時影響已連接的客戶端。')),
-    panel(L('Gateway API keys', '閘道 API 金鑰'), L('Only active keys are listed. Revoked keys are removed from this list.', '只列出有效金鑰，撤銷後會從清單移除。'), keys === null ? (S.loading ? el('div', { class: 'loading' }, t('loading')) : empty(L('Keys not loaded', '尚未讀取金鑰'), L('Refresh to retry. No credentials are assumed.', '請重新整理以重試，不會假定任何憑證。'))) : keys.length ? table([t('label'), L('Key ID', '金鑰識別碼'), L('Created', '建立時間'), L('Last used', '上次使用'), L('Actions', '操作')], keys.map(k => [k.label || '—', mono(k.id), date(k.createdAt), date(k.lastUsedAt), btn(L('Revoke', '撤銷'), () => revokeKey(k), { class: 'compact danger', 'data-action': 'revoke-key', 'data-id': k.id })]), t('keys')) : empty(L('No active API keys', '沒有有效 API 金鑰'), L('Create a separate key for each client so access can be revoked independently.', '為每個客戶端建立獨立金鑰，以便分別撤銷存取。')))];
+  const base = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>/v1' : `${location.origin}/v1`;
+  const endpointStrip = el('section', { class: 'panel endpoint-strip' }, el('div', { class: 'endpoint-strip-main' },
+    el('div', { class: 'endpoint-strip-copy' }, el('span', { class: 'eyebrow' }, L('OPENAI-COMPATIBLE ENDPOINT', 'OPENAI 相容端點')), el('div', { class: 'endpoint-url-row' }, mono(base), btn([icon('copy'), L('Copy Base URL', '複製 Base URL')], () => copy(base), { id: 'copy-keys-base', class: 'compact' }))),
+    el('div', { class: 'endpoint-strip-aside' }, el('span', { class: 'help' }, L('Bearer keys authenticate /v1/* client requests and can be copied or revoked here anytime.', 'Bearer 金鑰用於驗證 /v1/* 客戶端請求，可隨時在此複製或撤銷。')), link('models', L('Client setup →', '客戶端設定 →'), { class: 'button compact quiet' }))));
+  return [endpointStrip,
+    panel(L('Gateway API keys', '閘道 API 金鑰'), L('Only active keys are listed. Revoked keys stop working immediately and are removed from this list.', '只列出有效金鑰。撤銷後會即時失效並從清單移除。'), keys === null ? (S.loading ? el('div', { class: 'loading' }, t('loading')) : empty(L('Keys not loaded', '尚未讀取金鑰'), L('Refresh to retry. No credentials are assumed.', '請重新整理以重試，不會假定任何憑證。'))) : keys.length ? table([t('label'), L('API key', 'API 金鑰'), L('Created', '建立時間'), L('Last used', '上次使用'), L('Actions', '操作')], keys.map(k => {
+      const shown = revealedKeys.get(k.id);
+      const secretCell = k.copyable === false
+        ? el('div', { class: 'key-secret-cell' }, badge(L('Legacy hashed key', '舊版雜湊金鑰')), el('span', { class: 'subline' }, L('Create a new key to enable copying', '建立新金鑰即可隨時複製')))
+        : el('div', { class: 'key-secret-cell' }, el('code', { class: `mono key-preview${shown ? ' is-revealed' : ''}`, 'data-key-preview': k.id }, shown || k.preview || 'gsk_••••••••••••'), btn([icon(shown ? 'eyeOff' : 'eye'), shown ? L('Hide', '隱藏') : L('Show', '顯示')], () => toggleRevealKey(k), { class: 'compact quiet', 'data-action': 'reveal-key', 'data-id': k.id, 'aria-pressed': String(Boolean(shown)), 'aria-label': `${shown ? L('Hide', '隱藏') : L('Show', '顯示')} ${k.label || ''}`.trim() }));
+      const actionCell = el('div', { class: 'row key-actions' },
+        btn([icon('copy'), L('Copy key', '複製金鑰')], () => copyApiKey(k), { class: 'compact', 'data-action': 'copy-key', 'data-id': k.id, disabled: k.copyable === false, title: k.copyable === false ? L('Legacy key stored as hash only; create a new key to copy.', '舊版金鑰僅儲存雜湊值；請建立新金鑰以支援複製。') : L('Copy full API key to clipboard', '複製完整 API 金鑰到剪貼簿') }),
+        btn(L('Revoke', '撤銷'), () => revokeKey(k), { class: 'compact danger', 'data-action': 'revoke-key', 'data-id': k.id }));
+      return [k.label || '—', secretCell, date(k.createdAt), date(k.lastUsedAt), actionCell];
+    }), t('keys')) : empty(L('No active API keys', '沒有有效 API 金鑰'), L('Create a separate key for each client so you can copy or revoke it independently.', '為每個客戶端建立獨立金鑰，方便隨時複製或撤銷。')))];
 }
 const editableSettings = ['timeoutMs', 'maxConcurrent', 'continuation', 'allowRemoteImages', 'sessionTtlMs', 'maxSessions'];
 function readableMilliseconds(value) { return finite(value) && Number.isInteger(value) && value >= 0 ? `${value} ms = ${value / 1000} s = ${value / 60000} min` : L('Enter whole milliseconds.', '請輸入整數毫秒。'); }
@@ -883,7 +953,7 @@ function sanitizeDiagnostics(value, depth = 0) {
   if (depth > 8) return '[omitted]';
   if (Array.isArray(value)) return value.slice(0, 100).map(v => sanitizeDiagnostics(v, depth + 1));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !/secret|token|password|email|authorization|cookie|csrf|prompt|message|content|reply|responsebody|raw|log|credential|url|link|code_verifier|handle/i.test(key)).map(([key, v]) => [key, sanitizeDiagnostics(v, depth + 1)]));
-  if (typeof value === 'string') return /https?:|@|Bearer\s|sk-|AIza/i.test(value) ? '[redacted]' : value.slice(0, 500);
+  if (typeof value === 'string') return /https?:|@|Bearer\s|sk-|gsk_|AIza/i.test(value) ? '[redacted]' : value.slice(0, 500);
   return value;
 }
 async function loadDiagnostics() {
@@ -1070,18 +1140,18 @@ async function addAccount(event) {
   finally { clearTimeout(timeout); }
 }
 function createKey() {
-  labelDialog(L('Create an API key', '建立 API 金鑰'), L('Name the client that will use this key. The secret will be shown once. Store it securely before closing the next dialog.', '為使用此金鑰的客戶端命名。秘密只顯示一次，請在關閉下一個對話框前安全儲存。'), '', L('Create key', '建立金鑰'), async label => {
+  labelDialog(L('Create an API key', '建立 API 金鑰'), L('Name the client or tool that will use this key (for example: Cursor, Codex CLI, or Open WebUI).', '為使用此金鑰的客戶端或工具命名（例如：Cursor、Codex CLI 或 Open WebUI）。'), '', L('Create key', '建立金鑰'), async label => {
     const epoch = S.epoch; const result = await api('/keys', { method: 'POST', data: { label } }); if (epoch !== S.epoch) return false;
     if (!result.key || !result.id) throw { code: 'INVALID_RESPONSE' };
     const secret = String(result.key);
-    const secretNode = el('pre', { id: 'created-key-secret', tabindex: '0', 'aria-label': L('One-time API key secret', '只顯示一次的 API 金鑰秘密') }, secret);
-    openDialog(L('Save your key now', '立即儲存金鑰'), L('This is the only display of this secret. It is not written to browser storage, diagnostics, URLs or examples. Closing or continuing permanently hides it; this does not confirm you saved it safely.', '此秘密只顯示一次，不會寫入瀏覽器儲存、診斷、URL 或範例。關閉或繼續會永久隱藏秘密，並不代表已安全儲存。'), el('div', { class: 'form-stack' }, DEMO && badge(L('SYNTHETIC DEMO KEY · NOT VALID', '合成示範金鑰 · 無效'), 'amber'), el('div', { class: 'dialog-context' }, label, el('br'), mono(result.id)), secretNode, btn([icon('copy'), L('Copy secret', '複製秘密')], () => copy(secret), { id: 'copy-created-key' }), btn(L('Hide secret and continue to setup', '隱藏秘密並前往設定'), () => { closeDialog(); goto('models'); }, { id: 'continue-key-setup', class: 'primary' })), null);
-    D.cleanup = () => { secretNode.textContent = ''; }; toast(L('Key created. Save the one-time secret.', '已建立金鑰，請儲存只顯示一次的秘密。'));
+    const secretNode = el('pre', { id: 'created-key-secret', tabindex: '0', 'aria-label': L('API key secret', 'API 金鑰秘密') }, secret);
+    openDialog(L('API key ready', 'API 金鑰已就緒'), L('Copy this key into your client. You can also copy or reveal it anytime from API keys on this gateway; it is not written to browser storage, diagnostics, URLs or examples.', '請複製此金鑰至你的客戶端。你之後亦可隨時在此閘道的「API 金鑰」頁複製或顯示；金鑰不會寫入瀏覽器儲存、診斷、URL 或範例。'), el('div', { class: 'form-stack' }, DEMO && badge(L('SYNTHETIC DEMO KEY · NOT VALID', '合成示範金鑰 · 無效'), 'amber'), el('div', { class: 'dialog-context' }, el('strong', {}, label)), secretNode, btn([icon('copy'), L('Copy API key', '複製 API 金鑰')], () => copy(secret), { id: 'copy-created-key' }), btn(L('Continue to client setup', '前往客戶端設定'), () => { closeDialog(); goto('models'); }, { id: 'continue-key-setup', class: 'primary' })), null);
+    D.cleanup = () => { secretNode.textContent = ''; }; toast(L('API key created.', '已建立 API 金鑰。'));
     await refresh(); return false;
   });
 }
 function revokeKey(key) {
-  confirmDialog(L('Revoke this API key?', '撤銷此 API 金鑰？'), L('Clients using this key will lose access. This cannot be undone. Create and deploy a replacement first if uninterrupted access is needed.', '使用此金鑰的客戶端將失去存取權，此操作無法還原。如需保持存取，請先建立並部署替代金鑰。'), `${key.label} · ${key.id}`, async () => { await api(`/keys/${encodeURIComponent(key.id)}`, { method: 'DELETE' }); await mutationDone(L('API key revoked.', '已撤銷 API 金鑰。')); }, L('Revoke key', '撤銷金鑰'), true);
+  confirmDialog(L('Revoke this API key?', '撤銷此 API 金鑰？'), L('Clients using this key will lose access. This cannot be undone. Create a replacement first if uninterrupted access is needed.', '使用此金鑰的客戶端將失去存取權，此操作無法還原。如需保持存取，請先建立替代金鑰。'), key.preview ? `${key.label} · ${key.preview}` : key.label, async () => { revealedKeys.delete(key.id); await api(`/keys/${encodeURIComponent(key.id)}`, { method: 'DELETE' }); await mutationDone(L('API key revoked.', '已撤銷 API 金鑰。')); }, L('Revoke key', '撤銷金鑰'), true);
 }
 function reviewPlayground() {
   if (S.testBusy || !S.prompt.trim() || !S.testModel || !modelOptions().some(([m]) => m === S.testModel)) return;
@@ -1120,7 +1190,7 @@ function makeDemo() {
   const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: i % 3 ? 'gemini-argon' : 'gemini-flash-lite', accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
   const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `sess_demo_${String(i + 1).padStart(3, '0')}`, accountId: i % 2 ? 'acct_secondary' : 'acct_primary', turns: [12, 6, 3, 8, 2, 17, 4, 1][i], lastUsedAt: ago(i * 58 + 12), inFlight: i < 3 ? 1 : 0 }));
   const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, sessionTtlMs: 1800000, maxSessions: 256 };
-  return { version: '1.1.1-demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true, metrics: { requests: 3132, errors: 20, active: 3, successRate: 99.36, p50Ms: 1248, p95Ms: 2840 }, accounts, sessions, failovers: [{ at: ago(285), sessionId: 'sess_demo_003', from: 'acct_reserve', to: 'acct_primary', reason: 'rate_limit' }, { at: ago(2140), sessionId: 'sess_demo_006', from: 'acct_primary', to: 'acct_secondary', reason: 'network_error' }], requests, audit: [{ id: 'audit_demo_4', at: ago(340), action: 'account.disabled', target: 'acct_reconnect' }, { id: 'audit_demo_3', at: ago(1250), action: 'key.created', target: 'key_demo_client' }, { id: 'audit_demo_2', at: ago(5400), action: 'settings.updated', target: 'runtime' }, { id: 'audit_demo_1', at: ago(7200), action: 'admin.login', target: 'admin-session' }], models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'], settings, keyCount: 2, keys: [{ id: 'key_demo_client', label: 'Development client', createdAt: ago(1250), lastUsedAt: ago(12), revokedAt: null }, { id: 'key_demo_automation', label: 'Local automation', createdAt: ago(86400), lastUsedAt: ago(76), revokedAt: null }, { id: 'key_demo_retired', label: 'Retired test client', createdAt: ago(172800), lastUsedAt: ago(86400), revokedAt: ago(7200) }] };
+  return { version: '1.1.1-demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true, metrics: { requests: 3132, errors: 20, active: 3, successRate: 99.36, p50Ms: 1248, p95Ms: 2840 }, accounts, sessions, failovers: [{ at: ago(285), sessionId: 'sess_demo_003', from: 'acct_reserve', to: 'acct_primary', reason: 'rate_limit' }, { at: ago(2140), sessionId: 'sess_demo_006', from: 'acct_primary', to: 'acct_secondary', reason: 'network_error' }], requests, audit: [{ id: 'audit_demo_4', at: ago(340), action: 'account.disabled', target: 'acct_reconnect' }, { id: 'audit_demo_3', at: ago(1250), action: 'key.created', target: 'Development client' }, { id: 'audit_demo_2', at: ago(5400), action: 'settings.updated', target: 'runtime' }, { id: 'audit_demo_1', at: ago(7200), action: 'admin.login', target: 'admin-session' }], models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'], settings, keyCount: 2, keys: [{ id: 'key_demo_client', label: 'Development client', secret: 'DEMO_ONLY_CLIENT_KEY_9f2b', preview: 'DEMO_O••••••9f2b', copyable: true, createdAt: ago(1250), lastUsedAt: ago(12), revokedAt: null }, { id: 'key_demo_automation', label: 'Local automation', secret: 'DEMO_ONLY_AUTOMATION_KEY_4c8a', preview: 'DEMO_O••••••4c8a', copyable: true, createdAt: ago(86400), lastUsedAt: ago(76), revokedAt: null }, { id: 'key_demo_retired', label: 'Retired test client', preview: null, copyable: false, createdAt: ago(172800), lastUsedAt: ago(86400), revokedAt: ago(7200) }] };
 }
 const demo = DEMO ? makeDemo() : null;
 let demoBulkJob = null;
@@ -1161,7 +1231,7 @@ async function demoApi(path, method, data) {
     if (path === '/session') return { authenticated: true, csrf: 'demo-csrf-not-a-real-session' };
     if (path === '/overview') { const { keys, ...overview } = demo; return clone(overview); }
     if (path === '/accounts') return { accounts: clone(demo.accounts) };
-    if (path === '/keys') return { keys: clone(demo.keys.filter(k => !k.revokedAt)) };
+    if (path === '/keys') return { keys: demo.keys.filter(k => !k.revokedAt).map(({ secret: _secret, ...rest }) => clone(rest)) };
     if (path === '/settings') return clone(demo.settings);
     if (path === '/diagnostics') return { demo: true, version: demo.version, mode: demo.mode, toolProtocol: demo.toolProtocol, ready: demo.ready, metrics: clone(demo.metrics), accountCounts: { total: demo.accounts.length, ready: demo.accounts.filter(a => a.enabled && a.status === 'ready').length }, settings: clone(demo.settings) };
   }
@@ -1177,8 +1247,10 @@ async function demoApi(path, method, data) {
     a.terms = { status: 'accepted', acceptedAt: new Date().toISOString(), version: 1 }; audit('account.terms.accepted', a.id); return { terms: clone(a.terms), generationRequests: 0 };
   }
   if (path.startsWith('/accounts/')) { const id = decodeURIComponent(path.slice('/accounts/'.length)); const a = demo.accounts.find(a => a.id === id); if (!a) throw { code: 'ACCOUNT_NOT_FOUND', status: 404 }; if (method === 'PATCH') { Object.assign(a, data); audit('account.updated', id); } else if (method === 'DELETE') { demo.accounts = demo.accounts.filter(a => a.id !== id); audit('account.removed', id); } return {}; }
-  if (path === '/keys' && method === 'POST') { const id = `key_demo_${Date.now()}`; demo.keys.push({ id, label: data.label, createdAt: new Date().toISOString(), lastUsedAt: null, revokedAt: null }); demo.keyCount++; audit('key.created', id); return { id, label: data.label, key: 'DEMO_ONLY_NOT_A_REAL_KEY_7a4e9f2b' }; }
-  if (path.startsWith('/keys/') && method === 'DELETE') { const id = decodeURIComponent(path.slice('/keys/'.length)); const key = demo.keys.find(k => k.id === id); if (!key) throw { code: 'KEY_NOT_FOUND', status: 404 }; key.revokedAt = new Date().toISOString(); demo.keyCount--; audit('key.revoked', id); return {}; }
+  if (path === '/keys' && method === 'POST') { const id = `key_demo_${Date.now()}`, secret = 'DEMO_ONLY_NOT_A_REAL_KEY_7a4e9f2b'; demo.keys.push({ id, label: data.label, secret, preview: 'DEMO_O••••••9f2b', copyable: true, createdAt: new Date().toISOString(), lastUsedAt: null, revokedAt: null }); demo.keyCount++; audit('key.created', data.label); return { id, label: data.label, key: secret, preview: 'DEMO_O••••••9f2b', copyable: true }; }
+  const keyReveal = /^\/keys\/([^/]+)\/reveal$/.exec(path);
+  if (keyReveal && method === 'POST') { const id = decodeURIComponent(keyReveal[1]), key = demo.keys.find(k => k.id === id && !k.revokedAt); if (!key) throw { code: 'KEY_NOT_FOUND', status: 404 }; if (!key.secret) throw { code: 'KEY_SECRET_UNAVAILABLE', status: 409 }; audit('key.revealed', key.label); return { id: key.id, label: key.label, key: key.secret }; }
+  if (path.startsWith('/keys/') && method === 'DELETE') { const id = decodeURIComponent(path.slice('/keys/'.length)); const key = demo.keys.find(k => k.id === id); if (!key) throw { code: 'KEY_NOT_FOUND', status: 404 }; key.revokedAt = new Date().toISOString(); delete key.secret; demo.keyCount--; audit('key.revoked', key.label); return {}; }
   if (path === '/settings' && method === 'PATCH') { Object.assign(demo.settings, data); audit('settings.updated', 'runtime'); return clone(demo.settings); }
   if (path === '/playground' && method === 'POST') return { model: data.model, choices: [{ message: { role: 'assistant', content: L('The demo is working. This is a fixed synthetic response, not model output. Your message was not sent to a provider.', '示範運作正常。這是固定的合成回應，並非模型輸出。你的訊息沒有發送至供應商。') }, finish_reason: 'stop' }] };
   throw { code: 'DEMO_ONLY' };

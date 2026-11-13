@@ -99,7 +99,7 @@ node bin/gemini-gateway start
 1. 輸入 `GATEWAY_ADMIN_PASSWORD` 登入後台（若留空，僅限本機 loopback 免密碼管理；遠端連線必須設定密碼與 [TLS 反向代理](docs/OPERATIONS.md#remote-access-with-tls--遠端-tls)）。
 2. 在 **帳戶（Accounts）** 頁面點擊 **+ Google 登入**，親自於瀏覽器完成 Google 授權與 MFA 驗證。
 3. 在帳戶卡片點擊 **Test** 測試模型連線（注意：**Test** 會發送真實請求並消耗配額；單純完成 OAuth 登入不代表模型權限已驗證）。
-4. 前往 **API 金鑰（API keys）→ 建立金鑰**，複製並妥善保存僅顯示一次的客戶端金鑰。
+4. 前往 **API 金鑰（API keys）→ 建立金鑰**，建立並複製客戶端金鑰（之後亦可在該頁隨時複製、顯示或撤銷有效金鑰）。
 
 ---
 

@@ -99,7 +99,7 @@ Open **http://127.0.0.1:18989/admin/** in your browser:
 1. Sign in with your `GATEWAY_ADMIN_PASSWORD` (if left empty, passwordless admin is restricted strictly to loopback—see [Remote access with TLS](docs/OPERATIONS.md#remote-access-with-tls--遠端-tls)).
 2. Under **Accounts**, click **+ Google sign-in** and complete Google OAuth + MFA in your browser.
 3. Click **Test** on the account card to verify live model access (note: **Test** sends one real request and uses quota; OAuth sign-in alone does not verify model entitlement).
-4. Open **API keys → Create key** and copy your one-time client API secret.
+4. Open **API keys → Create key** to generate and copy a client API key (you can copy, reveal, or revoke active keys there anytime).
 
 ---
 

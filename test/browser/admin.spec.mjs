@@ -29,10 +29,11 @@ async function route(page, name) {
   await expect(page.locator(`[data-page="${name}"]`)).toBeVisible();
   await expect(page.locator('[data-page]')).toHaveAttribute('aria-busy', 'false');
 }
-test("real admin login, one-time key create/revoke, cookie isolation and logout", async ({
+test("real admin login, copyable key vault, revoke, cookie isolation and logout", async ({
   page,
   context,
 }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto(f.base + "/admin/");
   await page.locator("#admin-password").fill("wrong-password");
   await page.locator("#login-submit").click();
@@ -66,6 +67,21 @@ test("real admin login, one-time key create/revoke, cookie isolation and logout"
     ),
   ).not.toContain(key);
   const record = f.store.listKeys().find((k) => k.label === "Browser client");
+  await expect(page.locator('[data-page="keys"]')).not.toContainText(record.id);
+  await expect(page.locator('[data-page="keys"]')).not.toContainText("Key ID");
+  await expect(page.locator(`[data-key-preview="${record.id}"]`)).toHaveText(record.preview);
+  await page.locator(`[data-action="copy-key"][data-id="${record.id}"]`).click();
+  await expect(page.locator("#toast")).toContainText("API key copied to clipboard.");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(key);
+  await page.locator(`[data-action="reveal-key"][data-id="${record.id}"]`).click();
+  await expect(page.locator(`[data-key-preview="${record.id}"]`)).toHaveText(key);
+  await page.locator(`[data-action="reveal-key"][data-id="${record.id}"]`).click();
+  await expect(page.locator(`[data-key-preview="${record.id}"]`)).toHaveText(record.preview);
+  expect(
+    JSON.stringify(
+      await page.evaluate(() => ({ ...localStorage, ...sessionStorage })),
+    ),
+  ).not.toContain(key);
   const revoke = page.locator(
     `[data-action="revoke-key"][data-id="${record.id}"]`,
   );

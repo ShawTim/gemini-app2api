@@ -15,7 +15,7 @@ Official JS / Python SDK or OpenAI-compatible coding agent
   → caller executes approved tools → next HTTP turn with complete linked history
 
 Browser → same-origin /admin/ → HttpOnly session + CSRF → local operations APIs
-Private state → scrypt admin hash / SHA-256 gateway keys / private OAuth profile + refresh tokens
+Private state → scrypt admin hash / SHA-256 + 0600 copyable gateway keys / private OAuth profile + refresh tokens
 ```
 
 The gateway entry point is `src/gateway-server.mjs`. Runtime transport relies solely on Node.js built-in modules (`node:http2`, `node:http`, `node:crypto`, `node:fs`) with zero third-party production npm dependencies. Caller-defined functions use the explicit validated prompt-tool protocol rather than native structured function calling, while `native_search: true` opts into the bounded Gemini-native Google Search path documented in [API_SUPPORT.md](API_SUPPORT.md#native-search-integration-status).
@@ -101,9 +101,9 @@ OAuth client profile **不隨專案分發**；請從獲授權私密來源匯入�
 
 ### Adding accounts and client API keys
 
-Open `/admin/` → sign in → **Accounts** → **Google sign-in**, and complete Google consent and MFA in your browser. Your verified Google email becomes the account label automatically; reconnecting the same Google subject updates the existing record in place. Access tokens stay in RAM while refresh tokens persist in `0600` private state. Removing an account deletes **local** credentials only—revoke third-party access in your Google Account settings when needed. Client API keys are shown in plaintext once on creation and stored only as SHA-256 hashes.
+Open `/admin/` → sign in → **Accounts** → **Google sign-in**, and complete Google consent and MFA in your browser. Your verified Google email becomes the account label automatically; reconnecting the same Google subject updates the existing record in place. Access tokens stay in RAM while refresh tokens persist in `0600` private state. Removing an account deletes **local** credentials only—revoke third-party access in your Google Account settings when needed. Client API keys persist inside `0600` private state alongside their SHA-256 lookup digests so the authenticated admin console can copy or reveal active keys anytime (passive list endpoints omit raw secrets, and revoking a key scrubs its secret).
 
-在 `/admin/` 登入 → **帳戶** → **Google 登入**，親自完成 Google 授權與 MFA，已驗證 email 會自動作為標籤；同一 Google 帳號重連會更新原紀錄。Access token 只留記憶體，refresh token 保存在本機 `0600` 私密 state。移除帳戶僅刪除本機憑證；API 金鑰明文只在建立當下顯示一次，磁碟只存雜湊值。
+在 `/admin/` 登入 → **帳戶** → **Google 登入**，親自完成 Google 授權與 MFA，已驗證 email 會自動作為標籤；同一 Google 帳號重連會更新原紀錄。Access token 只留記憶體，refresh token 保存在本機 `0600` 私密 state。移除帳戶僅刪除本機憑證；API 金鑰會連同 SHA-256 雜湊一併保存在 `0600` 私密 state，方便在已登入的本機後台隨時複製或顯示（被動列表回應不含明文，撤銷後會即時清除）。
 
 ## Configuration / 設定
 

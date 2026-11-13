@@ -697,6 +697,15 @@ export function createGateway({
           auditEvent("key.created", key.id);
           return json(res, key, 201);
         }
+        const keyReveal = p.match(/^\/admin\/api\/keys\/([a-zA-Z0-9_-]+)\/reveal$/);
+        if (keyReveal && req.method === "POST") {
+          const b = await readJson(req, 4096);
+          if (req.aborted || res.destroyed) return;
+          only(b, []);
+          const revealed = store.revealKey(keyReveal[1]);
+          auditEvent("key.revealed", revealed.id);
+          return json(res, revealed);
+        }
         const key = p.match(/^\/admin\/api\/keys\/([a-zA-Z0-9_-]+)$/);
         if (key && req.method === "DELETE") {
           store.revokeKey(key[1]);

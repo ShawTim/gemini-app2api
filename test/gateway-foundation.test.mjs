@@ -86,23 +86,46 @@ test("runtime lock is exclusive and released normally", (t) => {
   other.lock();
   other.unlock();
 });
-test("API keys are one-time secrets, hashed, revocable and separate from admin password", (t) => {
+test("API keys are copyable from local 0600 state via revealKey, hashed for lookup, revocable and backward-compatible with hash-only records", (t) => {
   const s = storeFor(t),
     key = s.createKey("fixture"),
     other = s.createKey("remaining client");
-  assert.equal(fs.readFileSync(s.file, "utf8").includes(key.key), false);
-  assert.equal(JSON.stringify(s.listKeys()).includes("hash"), false);
+  assert.equal(key.copyable, true);
+  assert.match(key.preview, /^gsk_.+••••••/);
+  assert.equal(fs.readFileSync(s.file, "utf8").includes(key.key), true);
+  assert.equal(fs.statSync(s.file).mode & 0o077, 0);
+  assert.doesNotMatch(JSON.stringify(s.listKeys()), /"hash"|"key"/);
+  assert.deepEqual(
+    s.revealKey(key.id),
+    { id: key.id, label: "fixture", key: key.key },
+  );
   assert.equal(s.authenticate(key.key).id, key.id);
   assert.equal(s.authenticate("fixture-password-not-real"), null);
   s.revokeKey(key.id);
   assert.equal(s.authenticate(key.key), null);
+  assert.equal(fs.readFileSync(s.file, "utf8").includes(key.key), false);
+  assert.throws(() => s.revealKey(key.id), (e) => e.code === "KEY_NOT_FOUND" && e.status === 404);
   assert.deepEqual(s.listKeys().map(k => k.id), [other.id]);
   assert.equal(s.authenticate(other.key).id, other.id);
+
+  // Legacy hash-only key record (created before persisted copyable key support)
+  const legacyCreated = s.createKey("legacy client");
+  delete s.data.keys.find((k) => k.id === legacyCreated.id).key;
+  s.save();
+
   const restarted = new StateStore({ directory: s.directory });
   assert.equal(restarted.authenticate(key.key), null);
   assert.equal(restarted.authenticate(other.key).id, other.id);
-  assert.deepEqual(restarted.listKeys().map(k => k.id), [other.id]);
-  assert.doesNotMatch(JSON.stringify(restarted.listKeys()), /"hash"|"key"/);
+  assert.equal(restarted.authenticate(legacyCreated.key).id, legacyCreated.id);
+  assert.deepEqual(restarted.revealKey(other.id), { id: other.id, label: "remaining client", key: other.key });
+  assert.throws(() => restarted.revealKey(legacyCreated.id), (e) => e.code === "KEY_SECRET_UNAVAILABLE" && e.status === 409);
+  const listed = restarted.listKeys();
+  assert.deepEqual(listed.map(k => k.id), [other.id, legacyCreated.id]);
+  assert.equal(listed[0].copyable, true);
+  assert.equal(listed[0].preview, other.preview);
+  assert.equal(listed[1].copyable, false);
+  assert.equal(listed[1].preview, null);
+  assert.doesNotMatch(JSON.stringify(listed), /"hash"|"key"/);
 });
 test("admin cookie csrf origin logout expiry and throttling", (t) => {
   const s = storeFor(t);

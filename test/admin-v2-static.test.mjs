@@ -95,12 +95,16 @@ test('demo API actions are synthetic and never call fetch', async () => {
   assert.equal(accounts.accounts[0].enabled, false);
   const key = await f.api('/keys', { method: 'POST', data: { label: 'Test client' } });
   assert.match(key.key, /^DEMO_ONLY_/);
-  assert.ok((await f.api('/keys')).keys.every(k => !('key' in k)));
+  assert.ok((await f.api('/keys')).keys.every(k => !('key' in k) && !('secret' in k) && k.copyable === true && typeof k.preview === 'string'));
+  const revealed = await f.api(`/keys/${key.id}/reveal`, { method: 'POST', data: {} });
+  assert.equal(revealed.key, key.key);
   await f.api(`/keys/${key.id}`, { method: 'DELETE' });
+  await assert.rejects(f.api(`/keys/${key.id}/reveal`, { method: 'POST', data: {} }), e => e.code === 'KEY_NOT_FOUND');
   const remainingKeys = (await f.api('/keys')).keys;
   assert.equal(remainingKeys.some(k => k.id === key.id), false);
   assert.ok(remainingKeys.length > 0);
   assert.ok(remainingKeys.every(k => !k.revokedAt));
+  assert.doesNotMatch(source, /Key ID|金鑰識別碼/);
   const completion = await f.api('/playground', { method: 'POST', data: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Synthetic test' }], thinking_level: 2 } });
   assert.match(completion.choices[0].message.content, /synthetic/);
   assert.equal(calls, 0);
@@ -111,7 +115,7 @@ test('real API uses exact same-origin contract and CSRF on every protected mutat
   const f = fixture(false, async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, json: async () => ({ csrf: 'fixture-csrf' }) }; });
   await f.api('/login', { method: 'POST', data: { password: 'SYNTHETIC_TEST_PASSWORD' } });
   f.S.authenticated = true; f.S.csrf = 'fixture-csrf';
-  for (const [path, method, data] of [['/accounts/login', 'POST', {}], ['/accounts/login/flow_1', 'DELETE'], ['/accounts/account_1', 'PATCH', { enabled: false }], ['/accounts/account_1', 'DELETE'], ['/keys', 'POST', { label: 'Test' }], ['/keys/key_1', 'DELETE'], ['/settings', 'PATCH', { maxConcurrent: 2 }], ['/playground', 'POST', { model: 'gemini-argon', messages: [{ role: 'user', content: 'Test' }], thinking_level: 2 }], ['/logout', 'POST']]) await f.api(path, { method, data });
+  for (const [path, method, data] of [['/accounts/login', 'POST', {}], ['/accounts/login/flow_1', 'DELETE'], ['/accounts/account_1', 'PATCH', { enabled: false }], ['/accounts/account_1', 'DELETE'], ['/keys', 'POST', { label: 'Test' }], ['/keys/key_1/reveal', 'POST', {}], ['/keys/key_1', 'DELETE'], ['/settings', 'PATCH', { maxConcurrent: 2 }], ['/playground', 'POST', { model: 'gemini-argon', messages: [{ role: 'user', content: 'Test' }], thinking_level: 2 }], ['/logout', 'POST']]) await f.api(path, { method, data });
   assert.equal(calls[0].url, '/admin/api/login');
   assert.ok(!('X-CSRF-Token' in calls[0].options.headers));
   for (const { url, options } of calls.slice(1)) {

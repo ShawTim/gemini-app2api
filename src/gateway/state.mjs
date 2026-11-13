@@ -94,6 +94,12 @@ function checkFile(file, directory = false) {
   )
     throw fault("UNSAFE_STATE_PERMISSIONS", 503);
 }
+function maskKey(secret) {
+  if (typeof secret !== "string" || !secret) return null;
+  return secret.length >= 12
+    ? `${secret.slice(0, 6)}••••••${secret.slice(-4)}`
+    : "••••••••";
+}
 export class StateStore {
   constructor({
     directory = process.env.GATEWAY_DATA_DIR ||
@@ -242,6 +248,7 @@ export class StateStore {
     const record = {
       id: "key_" + crypto.randomBytes(10).toString("hex"),
       label: label.trim(),
+      key,
       hash: digest(key),
       createdAt: Date.now(),
       lastUsedAt: null,
@@ -249,10 +256,29 @@ export class StateStore {
     };
     this.data.keys.push(record);
     this.save();
-    return { id: record.id, label: record.label, key };
+    return {
+      id: record.id,
+      label: record.label,
+      key,
+      preview: maskKey(key),
+      copyable: true,
+    };
   }
   listKeys() {
-    return this.data.keys.filter((key) => !key.revokedAt).map(({ hash, ...rest }) => rest);
+    return this.data.keys
+      .filter((entry) => !entry.revokedAt)
+      .map(({ hash: _hash, key: secret, ...rest }) => ({
+        ...rest,
+        copyable: typeof secret === "string" && secret.length > 0,
+        preview: maskKey(secret),
+      }));
+  }
+  revealKey(id) {
+    const r = this.data.keys.find((k) => k.id === id && !k.revokedAt);
+    if (!r) throw fault("KEY_NOT_FOUND", 404);
+    if (typeof r.key !== "string" || !r.key)
+      throw fault("KEY_SECRET_UNAVAILABLE", 409);
+    return { id: r.id, label: r.label, key: r.key };
   }
   authenticate(key) {
     if (typeof key !== "string" || key.length > 256) return null;
@@ -266,6 +292,7 @@ export class StateStore {
     const r = this.data.keys.find((k) => k.id === id);
     if (!r) throw fault("KEY_NOT_FOUND", 404);
     r.revokedAt ??= Date.now();
+    delete r.key;
     this.save();
   }
   importProfile(input) {

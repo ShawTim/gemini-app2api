@@ -104,6 +104,32 @@ test("admin mutations require csrf and same origin, keys are one-time and revoca
   const keys = await f.admin("keys").then((r) => r.json());
   assert.equal(JSON.stringify(keys).includes(created.key), false);
   assert.equal(JSON.stringify(keys).includes("hash"), false);
+  assert.equal(keys.keys[0].copyable, true);
+  assert.match(keys.keys[0].preview, /^gsk_.+••••••/);
+  assert.equal(
+    (
+      await f.admin(`keys/${created.id}/reveal`, {
+        method: "POST",
+        body: {},
+        headers: { "X-CSRF-Token": "wrong" },
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.admin(`keys/${created.id}/reveal`, {
+        method: "POST",
+        body: {},
+        headers: { Origin: "https://evil.invalid" },
+      })
+    ).status,
+    403,
+  );
+  const revealed = await f
+    .admin(`keys/${created.id}/reveal`, { method: "POST", body: {} })
+    .then((r) => r.json());
+  assert.deepEqual(revealed, { id: created.id, label: "one", key: created.key });
   assert.equal(
     (
       await f.request("/v1/models", {
@@ -115,6 +141,10 @@ test("admin mutations require csrf and same origin, keys are one-time and revoca
   assert.equal(
     (await f.admin("keys/" + created.id, { method: "DELETE" })).status,
     200,
+  );
+  assert.equal(
+    (await f.admin(`keys/${created.id}/reveal`, { method: "POST", body: {} })).status,
+    404,
   );
   assert.equal(
     (

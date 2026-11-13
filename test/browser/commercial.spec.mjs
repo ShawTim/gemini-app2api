@@ -77,7 +77,7 @@ test('commercial onboarding and one-time key handoff never infer client connecti
   await page.locator('#dialog-label').fill('Synthetic client'); await page.locator('#dialog-confirm').click();
   await expect(page.locator('#created-key-secret')).toBeVisible();
   const secret = await page.locator('#created-key-secret').textContent();
-  await expect(page.locator('#dialog-description')).toContainText('permanently hides');
+  await expect(page.locator('#dialog-description')).toContainText('not written to browser storage');
   await page.locator('#continue-key-setup').click();
   await expect(page.locator('[data-page="models"]')).toBeVisible();
   await expect(page.locator('#created-key-secret')).toHaveCount(0);
