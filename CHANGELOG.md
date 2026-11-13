@@ -2,7 +2,7 @@
 
 Release notes for Gemini App2API.
 
-## Unreleased
+## 1.1.1 — 2026-11-13
 
 ### Fixes and model metadata
 

@@ -52,7 +52,7 @@ export async function liveCase({
   )
     throw Error("UNKNOWN_LIVE_CASE");
   const report = {
-    version: "1.1.0",
+    version: "1.1.1",
     sourceHash,
     at: new Date().toISOString(),
     platform: process.platform + "-" + process.arch,
