@@ -272,3 +272,97 @@ test('gemini-hydrogen enforces field 30 Hydrogen attribution across buffered, in
   const badAttrWire = m(1003, m(1, Buffer.concat([v(30, 1), v(41, 1), v(9, 1)])));
   await rejects(fixture([event(badAttrWire), end()]).p.runTurn('a', request({ model: 'gemini-hydrogen' })), 'INVALID_NATIVE_RESPONSE');
 });
+
+test('gemini-hydrogen ignores unresolved legacy thinking heartbeats while failing closed on resolved/text/completed non-Hydrogen frames', async () => {
+  const interleavedEvents = () => [
+    event(frame(null, { mode: null, attribution: 'Used Legacy model', complete: false })),
+    event(frame('', { mode: 0, attribution: 'Used Legacy model', complete: false })),
+    event(frame(null, { mode: 1, attribution: 'Used 4 Hydrogen High model', complete: false })),
+    event(frame(null, { mode: null, attribution: 'Used Legacy model', complete: false })),
+    event(frame('', { mode: 0, attribution: 'Used Legacy model', complete: false })),
+    event(frame('hello ', { mode: 1, attribution: 'Used 4 Hydrogen High model', complete: false })),
+    event(frame(null, { mode: 0, attribution: 'Used Legacy model', complete: false })),
+    event(frame('hello world', { mode: 1, attribution: 'Used 4 Hydrogen High model', complete: true })),
+    event(frame(null, { mode: null, attribution: 'Used Legacy model', complete: false })),
+    event(frame(null, { mode: 0, attribution: 'Used Legacy model', complete: false })),
+    end(),
+  ];
+  for (const incrementalOutput of [false, true]) {
+    const deltas = [];
+    const { p } = fixture(interleavedEvents());
+    const result = await p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => deltas.push(item), { incrementalOutput });
+    assert.equal(result.content, 'hello world');
+    assert.equal(result.resolvedModeCategory, 1);
+    assert.equal(result.attribution, 'Used 4 Hydrogen High model');
+    assert.equal(deltas.filter(d => d.content).map(d => d.content).join(''), 'hello world');
+  }
+
+  for (const [model, mode] of [['gemini-argon', 8], ['gemini-flash-lite', 6]]) {
+    const { p } = fixture([
+      event(frame(null, { mode: 0, attribution: 'Used Legacy model', complete: false })),
+      event(frame('ok', { mode, attribution: null, complete: true })),
+      end(),
+    ]);
+    const result = await p.runTurn('a', request({ model }));
+    assert.equal(result.content, 'ok');
+    assert.equal(result.resolvedModeCategory, mode);
+    assert.equal(result.attribution, undefined);
+  }
+
+  for (const incrementalOutput of [false, true]) {
+    const deltas = [];
+    const { p } = fixture([
+      event(frame(null, { mode: null, attribution: 'Used Legacy model', complete: false })),
+      event(frame('', { mode: 0, attribution: 'Used Legacy model', complete: false })),
+      end(),
+    ]);
+    await rejects(p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => deltas.push(item), { incrementalOutput }), 'INCOMPLETE_NATIVE_RESPONSE');
+    assert.deepEqual(deltas.filter(d => d.content || d.call), []);
+  }
+
+  await rejects(
+    fixture([
+      event(frame(null, { mode: 1, attribution: 'Used 4 Hydrogen High model', complete: false })),
+      event(frame('ok', { mode: 0, attribution: 'Used 4 Hydrogen High model', complete: true })),
+      end(),
+    ]).p.runTurn('a', request({ model: 'gemini-hydrogen' })),
+    'MISSING_NATIVE_MODE_EVIDENCE',
+  );
+
+  for (const badEvents of [
+    [event(frame('LEAKED', { mode: null, attribution: 'Used Legacy model', complete: false })), end()],
+    [event(frame(null, { mode: null, attribution: 'Used Legacy model', complete: true })), end()],
+    [event(frame(null, { mode: 1, attribution: 'Used Legacy model', complete: false })), end()],
+    [
+      event(frame(null, { mode: null, attribution: 'Used Legacy model', complete: false })),
+      event(frame('LEAKED', { mode: 1, attribution: null, complete: true })),
+      end(),
+    ],
+  ]) {
+    for (const incrementalOutput of [false, true]) {
+      const deltas = [];
+      const { p } = fixture(badEvents);
+      await assert.rejects(
+        p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => deltas.push(item), { incrementalOutput }),
+        error => error.code === 'MODEL_DOWNGRADE_REJECTED' && error.status === 502 && error.unverifiedOutput === true && error.partialResult === undefined,
+      );
+      assert.deepEqual(deltas.filter(d => d.content || d.call), []);
+    }
+  }
+
+  for (const incrementalOutput of [false, true]) {
+    const deltas = [];
+    const { p } = fixture([
+      event(frame('hello ', { mode: 1, attribution: 'Used 4 Hydrogen High model', complete: false })),
+      event(frame('hello world', { mode: 1, attribution: 'Used 3.5 Flash model', complete: true })),
+      end(),
+    ]);
+    await assert.rejects(
+      p.runTurn('a', request({ model: 'gemini-hydrogen' }), item => deltas.push(item), { incrementalOutput }),
+      error => error.code === 'MODEL_DOWNGRADE_REJECTED' && error.status === 502 && error.unverifiedOutput === true && error.partialResult === undefined,
+    );
+    const emitted = deltas.filter(d => d.content).map(d => d.content).join('');
+    assert.equal(emitted.includes('world'), false);
+    if (!incrementalOutput) assert.equal(emitted, '');
+  }
+});

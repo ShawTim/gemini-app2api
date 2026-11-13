@@ -14,7 +14,7 @@ Unsupported OpenAI endpoints (image generation/editing, file uploads, audio, Rea
 
 ### Model context metadata
 
-`GET /v1/models` publishes `context_window: 128000` for `gemini-argon`. This field is the gateway's advisory client context budget—not a measured Gemini hard limit, billing figure, or enforced input-token ceiling. Compatible coding agents can discover this field for local context management while allowing explicit user model overrides to take priority. Other listed aliases omit `context_window`; callers must not assume `128k` for them.
+`GET /v1/models` publishes `context_window: 128000` for `gemini-argon` and `context_window: 512000` for `gemini-hydrogen`. Both values are empirical advisory client context budgets calibrated to single-turn recall, prefill latency, and the gateway's `4 MiB` request ceiling—not enforced input-token ceilings, billing figures, or official Google SLA limits. Compatible coding agents can discover this field for local context management while allowing explicit user model overrides to take priority. `gemini-flash-lite` omits `context_window`; callers must not assume a budget for it.
 
 ## Support depth at a glance
 
@@ -37,7 +37,7 @@ Unsupported OpenAI endpoints (image generation/editing, file uploads, audio, Rea
 - `gemini-hydrogen` requests native `FAST` mode `1` (Gemini 4 Hydrogen; distinct from `AUTO` `4`, `FAST_DYNAMIC_THINKING` `5`, `FLASH_LITE` `6`, or `FLASH_PLUS` `7`) and additionally requires upstream Hydrogen attribution in `ClientGenerateResponse` field `30` (rejecting non-Hydrogen / legacy Flash responses with `502 MODEL_DOWNGRADE_REJECTED`; retired `gemini-flash` returns `400 UNSUPPORTED_MODEL`).
 - `gemini-flash-lite` requests native mode `6`.
 
-Request field `47` and response field `41` carry the requested and resolved model categories (plus response field `30` model attribution verification for `gemini-hydrogen`). A completed turn must resolve to the exact requested mode without fallback or downgrade flags; streamed chunk `model` labels identify the requested alias, incremental output on `gemini-hydrogen` is withheld until both mode `1` and Hydrogen attribution are proven, and final verification checks the upstream mode and attribution evidence. All three aliases share the same text/history, caller function-tool protocol, and incremental SSE / partial-JSON semantics, with independent per-account verification records.
+Request field `47` and response field `41` carry the requested and resolved model categories (plus response field `30` model attribution verification for `gemini-hydrogen`). A completed turn must resolve to the exact requested mode without fallback or downgrade flags; streamed chunk `model` labels identify the requested alias, incremental output on `gemini-hydrogen` is withheld until both mode `1` and Hydrogen attribution are proven, unresolved thinking-progress placeholder frames (`resolvedModeCategory` absent or `0` with no display text or completion flag) neither record placeholder attribution nor clear an already-resolved mode, and any resolved, text-bearing, or completed frame lacking Hydrogen attribution fails closed alongside final verification. All three aliases share the same text/history, caller function-tool protocol, and incremental SSE / partial-JSON semantics, with independent per-account verification records.
 
 ## Inputs and parameter rules
 

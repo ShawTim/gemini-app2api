@@ -25,7 +25,7 @@ When `PI_SCRATCH_DIR` is set, temporary artifacts are written under that directo
 
 | Program | Contract verified |
 |---|---|
-| `test/models-metadata-offline.mjs` | Authenticated model discovery, `gemini-argon` advisory 128k metadata, zero upstream traffic |
+| `test/models-metadata-offline.mjs` | Authenticated model discovery, `gemini-argon` (128k) and `gemini-hydrogen` (512k) advisory context metadata, zero upstream traffic |
 | `test/responses-delivery-offline.mjs` | Endpoint-specific token usage estimates, partial-completion metadata, short/zero output gates, idempotent terminal SSE events |
 | `test/responses-namespaces-offline.mjs` | Responses function-only namespaces, name collision rules, call-ID linkage, schema limits and round-trip serialization |
 | `test/zero-output-terminal-offline.mjs` | Terminal Chat 422 / Responses 400 after bounded internal recovery, upstream cause reporting, post-header SSE error handling and clean next-turn session state |

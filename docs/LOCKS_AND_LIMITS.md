@@ -50,7 +50,7 @@
 | HTTP 請求接收逾時 | `requestTimeout = 30,000 ms`；`headersTimeout = 15,000 ms` | 慢速或不完整 HTTP 請求頭／主體逾時關閉 |
 | HTTP 連線與標頭 | 最多 `128` 條並行 socket、`64` 個 headers；keep-alive 閒置 `5,000 ms` | 連線／HTTP 解析層保護 |
 | 請求主體與 Prompt 大小 | 原始 HTTP JSON 預設上限 `4 MiB`；非圖片正規化資料與完整渲染 UTF-8 prompt 各上限 `4 MiB`（`native_search: true` 為 `16 KiB`）；最多 `1,024` 則訊息／input items | 超限回 `400` / `413`；另支援可選 `maxPromptBytes`（預設 `0` 關閉），啟用時按原始 UTF-8 HTTP body bytes 檢查並回 `413 PROMPT_SIZE_LIMIT` |
-| 模型建議 Context Metadata | `/v1/models` 為 `gemini-argon` 公布 `context_window: 128000` | 屬客戶端建議預算（非閘道硬性上限或計費 token 數） |
+| 模型建議 Context Metadata | `/v1/models` 為 `gemini-argon` 公布 `context_window: 128000`，為 `gemini-hydrogen` 公布 `context_window: 512000` | 屬客戶端建議預算（非閘道硬性上限或計費 token 數） |
 | 函數工具（Function Tools） | 最多 `64` 個工具宣告（含 Responses `type: "namespace"` 純函數分組）、單輪最多 `32` 個呼叫、相關 JSON 上限 `256 KiB`、JSON 深度 `16`、節點數 `4,096` | 超出邊界或 Schema 不符於模型執行前或輸出驗證時明確拒絕 |
 | 靜態圖片輸入 | 整份重播請求最多 `4` 張圖片、單張及合計解碼上限 `2 MiB`、單邊 `32,768 px`、總像素 `4,000 萬`；僅限靜態 PNG / JPEG / WebP | 格式／大小／動畫圖片直接拒絕；公開遠端圖片 URL 預設關閉（未開啟回 `403 REMOTE_IMAGES_DISABLED`） |
 | 原生 HTTP/2 接收緩衝 | 單一 frame `1 MiB`、未讀佇列 `8 MiB`、單輪最多 `4,096` frames、累計 `256 MiB` | `502 NATIVE_RECEIVE_LIMIT` / `NATIVE_RESPONSE_LIMIT`，絕不釋出未驗證殘缺結構 |

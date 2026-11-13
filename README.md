@@ -187,10 +187,10 @@ wire_api = "responses"
 | Model Alias | Role & Tier | Native Mode | Advertised Context Metadata |
 |---|---|---:|---|
 | **`gemini-argon`** | **Flagship Pro-tier mode** for complex coding, architecture, and multi-step agent loops | `8` | `context_window: 128000` (advisory client budget) |
-| **`gemini-hydrogen`** | **Gemini 4 Hydrogen** for low-latency everyday reasoning and fast interactive tasks (upstream Hydrogen attribution verified) | `FAST` (`1`) | Not advertised |
+| **`gemini-hydrogen`** | **Gemini 4 Hydrogen** for low-latency everyday reasoning and fast interactive tasks (upstream Hydrogen attribution verified) | `FAST` (`1`) | `context_window: 512000` (advisory client budget) |
 | **`gemini-flash-lite`** | High-throughput lightweight tasks | `6` | Not advertised |
 
-> Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. `context_window: 128000` is an advisory hint for client-side context management—not an enforced token cap or upstream guarantee.
+> Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. `context_window: 128000` (`gemini-argon`) and `context_window: 512000` (`gemini-hydrogen`) are empirical advisory client budgets calibrated to single-turn recall, prefill latency, and the gateway's `4 MiB` request ceiling—not enforced token caps or official Google SLA guarantees.
 
 <a id="quota-consumption"></a>
 ### Quota Consumption: gemini-argon vs gemini-hydrogen

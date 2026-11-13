@@ -284,8 +284,13 @@ export class NativeDirectProvider {
           if (!info) continue;
           observedFallback = info.fallback ?? observedFallback;
           downgradeReason = info.downgradeReason ?? downgradeReason;
-          observedMode = info.resolvedModeCategory ?? observedMode;
-          if (info.attribution !== null && info.attribution.length > 0) {
+          const frameMode = info.resolvedModeCategory;
+          const hasContentOrComplete = (info.text !== null && info.text.length > 0) || info.completed === true;
+          const frameResolved = (frameMode !== null && frameMode !== undefined && frameMode !== 0) || hasContentOrComplete;
+          if (frameMode !== null && frameMode !== undefined && (frameMode !== 0 || hasContentOrComplete || observedMode === null)) {
+            observedMode = frameMode;
+          }
+          if (frameResolved && info.attribution !== null && info.attribution.length > 0) {
             observedAttribution = info.attribution;
             if (requiresHydrogen && !HYDROGEN_ATTRIBUTION.test(info.attribution)) downgrade = true;
           }
@@ -436,7 +441,7 @@ export class NativeDirectProvider {
         ...(emptyResponseReason ? { emptyResponseReason } : {}),
       });
       if (incremental && modeVerified && (publishedContent.length || publishedCalls)) safe.partialResult = { ...identity, content: publishedContent, calls: liveCalls.slice(0, publishedCalls),
-        thinkingLevel: observedThinking, resolvedModeCategory: observedMode, nativeEvidence: safe.nativeEvidence };
+        thinkingLevel: observedThinking, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), nativeEvidence: safe.nativeEvidence };
       throw safe;
     }
     finally {

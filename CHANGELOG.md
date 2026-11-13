@@ -2,6 +2,23 @@
 
 Release notes for Gemini App2API.
 
+## Unreleased
+
+### Fixes and model metadata
+
+- Fixed false `502 MODEL_DOWNGRADE_REJECTED` aborts on `gemini-hydrogen` when upstream
+  Robin emits interleaved unresolved thinking-progress frames (`resolvedModeCategory`
+  omitted or `0`, empty/absent text, `completed: false`) carrying placeholder `Used
+  Legacy model` field-30 attribution before, during, or after resolved `Used 4
+  Hydrogen High model` frames. Attribution and resolved-mode tracking now ignore
+  unresolved placeholder heartbeats without text or completion across all models so
+  mid-turn or trailing heartbeats never clobber resolved mode state or record
+  placeholder attribution, while still failing closed on any resolved, text-bearing,
+  or completed non-Hydrogen frame or mode `0` withdrawal.
+- Published advisory `context_window: 512000` metadata for `gemini-hydrogen` in
+  `GET /v1/models` (`gemini-argon` remains `128000`, and `gemini-flash-lite` omits
+  `context_window`).
+
 ## 1.1.0 — 2026-11-13
 
 ### Breaking changes

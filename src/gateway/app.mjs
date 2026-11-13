@@ -751,7 +751,11 @@ export function createGateway({
       if (p.startsWith("/v1/")) {
         const owner = security.apiOwner(req);
         if (url.search) throw fault("UNSUPPORTED_QUERY_PARAMETER");
-        if (p === "/v1/models" && req.method === "GET")
+        if (p === "/v1/models" && req.method === "GET") {
+          const contextWindows = {
+            "gemini-argon": 128000,
+            "gemini-hydrogen": 512000,
+          };
           return json(res, {
             object: "list",
             data: protocol.NATIVE_MODELS.map((id) => ({
@@ -760,9 +764,12 @@ export function createGateway({
               created: 0,
               owned_by: "google",
               // Advisory gateway budget, not a measured upstream token limit.
-              ...(id === "gemini-argon" ? { context_window: 128000 } : {}),
+              ...(Object.hasOwn(contextWindows, id)
+                ? { context_window: contextWindows[id] }
+                : {}),
             })),
           });
+        }
         if (
           req.method === "POST" &&
           ["/v1/chat/completions", "/v1/responses"].includes(p)

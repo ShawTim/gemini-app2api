@@ -8,7 +8,7 @@ import { safeAccountError } from '../src/gateway/native-evidence.mjs';
 import { safeQuota } from '../src/gateway/quota.mjs';
 import { modelStates, verifiedState } from '../src/gateway/provider-state.mjs';
 import { buildConsumerToolInitial } from '../native-wire/consumer-tool-codec.mjs';
-import { parse } from '../native-wire/protobuf.mjs';
+import { parse, lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 import { fixture, tools, responseTools, toolBlock } from './gateway-fixture.mjs';
 const HYDROGEN = 'gemini-hydrogen';
 const input = { model: HYDROGEN, messages: [{ role: 'user', content: 'Synthetic Hydrogen request' }] };
@@ -55,7 +55,8 @@ test('all four Hydrogen HTTP formats forward FAST and preserve requested/resolve
   assert.ok(models.data.some(m => m.id === HYDROGEN));
   assert.equal(models.data.some(m => m.id === 'gemini-flash'), false);
   assert.equal(models.data.find(m => m.id === 'gemini-argon').context_window, 128000); // advisory client budget
-  assert.ok(models.data.filter(m => m.id !== 'gemini-argon').every(m => !Object.hasOwn(m, 'context_window')));
+  assert.equal(models.data.find(m => m.id === HYDROGEN).context_window, 512000); // advisory client budget
+  assert.ok(models.data.filter(m => !['gemini-argon', HYDROGEN].includes(m.id)).every(m => !Object.hasOwn(m, 'context_window')));
   const before = (await (await f.admin('accounts')).json()).accounts[0];
   assert.equal(before.modelStates[HYDROGEN].state, 'unverified'); assert.equal(f.seen.length, 0);
   for (const api of ['chat', 'responses']) for (const stream of [false, true]) {
@@ -184,4 +185,46 @@ test('Hydrogen transport reset and unexpected errors fail safely before output, 
     assert.ok(!text.includes('SYNTHETIC_PRIVATE'));
   }
   assert.equal(f.seen.length, 2);
+});
+
+test('Hydrogen accepts interleaved unresolved Legacy thinking frames before and after Hydrogen resolution across Chat and Responses', async t => {
+  const f = await setup(t);
+  const rawFrame = (text, { mode = null, complete = false, thinking = 2, attribution = null } = {}) =>
+    m(1003, m(1, Buffer.concat([
+      ...(text === null ? [] : [m(1, m(2, m(1, Buffer.from(text))))]),
+      v(9, Number(complete)),
+      v(11, 0),
+      ...(typeof attribution === 'string' ? [m(30, Buffer.from(attribution))] : []),
+      v(31, 0),
+      ...(mode === null ? [] : [v(41, mode)]),
+      v(42, thinking),
+    ])));
+  f.app.provider.openTurn = (_token, options) => {
+    f.seen.push(options);
+    return {
+      events: {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'frame', bytes: rawFrame(null, { mode: null, complete: false, attribution: 'Used Legacy model' }) };
+          yield { type: 'frame', bytes: rawFrame(null, { mode: 1, complete: false, attribution: 'Used 4 Hydrogen High model' }) };
+          yield { type: 'frame', bytes: rawFrame(null, { mode: 0, complete: false, attribution: 'Used Legacy model' }) };
+          yield { type: 'frame', bytes: rawFrame('Synthetic interleaved ', { mode: 1, complete: false, attribution: 'Used 4 Hydrogen High model' }) };
+          yield { type: 'frame', bytes: rawFrame(null, { mode: null, complete: false, attribution: 'Used Legacy model' }) };
+          yield { type: 'frame', bytes: rawFrame('Synthetic interleaved Hydrogen answer', { mode: 1, complete: true, attribution: 'Used 4 Hydrogen High model' }) };
+          yield { type: 'frame', bytes: rawFrame(null, { mode: null, complete: false, attribution: 'Used Legacy model' }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        },
+      },
+      cancel() {},
+    };
+  };
+  for (const api of ['chat', 'responses']) for (const stream of [false, true]) {
+    const path = api === 'chat' ? '/v1/chat/completions' : '/v1/responses';
+    const body = api === 'chat' ? { ...input, stream } : { model: HYDROGEN, input: 'Synthetic', stream };
+    const response = await f.api(path, { method: 'POST', body });
+    assert.equal(response.status, 200);
+    const wire = await response.text();
+    assert.ok(wire.includes('Synthetic interleaved Hydrogen answer'));
+  }
+  const account = (await (await f.admin('accounts')).json()).accounts[0];
+  assert.equal(account.modelStates[HYDROGEN].state, 'verified');
 });
