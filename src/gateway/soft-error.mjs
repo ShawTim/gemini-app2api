@@ -4,6 +4,7 @@
 const GENERIC_ERROR_OFFERS = new Set([
   'I seem to be encountering an error. Can I try something else for you?',
   "I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+  'I encountered an error doing what you asked. Could you try again?',
 ]);
 const folded = text => text.replace(/\s+/gu, ' ').trim();
 const contentText = content => typeof content === 'string' ? content : Array.isArray(content)

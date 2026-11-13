@@ -7,6 +7,8 @@ import { NativeDirectProvider } from '../src/native-provider.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 import { fixture, tools, responseTools, toolBlock } from './gateway-fixture.mjs';
 const phrase = 'I seem to be encountering an error. Can I try something else for you?';
+const secondPhrase = "I'm having a hard time fulfilling your request. Can I help you with something else instead?";
+const hydrogenPhrase = 'I encountered an error doing what you asked. Could you try again?';
 const request = { model: 'gemini-argon', messages: [{ role: 'user', content: 'Continue the actual task using the permitted tools.' }], tools };
 const frame = (text, { complete = true, mode = 8, extra = [], completeness } = {}) => m(1003, m(1, Buffer.concat([
   m(1, Buffer.concat([m(1, Buffer.from('synthetic-private-response-id')), m(2, m(1, Buffer.from(text))), ...(completeness === undefined ? [] : [v(19, completeness)])])),
@@ -19,28 +21,39 @@ const evidence = extra => ({ phase: 'validate', upstreamHttpStatus: 200, grpcSta
   nativeRefusalPresent: false, nativeStructuredOutputPresent: false, outputFailureReason: 'generic_error_offer', outputFailureSource: 'exact_text_signature', outputToolCalls: 0, ...extra });
 
 test('only the observed complete whole-answer failure signature is matched', () => {
-  assert.equal(softErrorReason(phrase, request), 'generic_error_offer');
+  for (const matched of [phrase, secondPhrase, hydrogenPhrase]) assert.equal(softErrorReason(matched, request), 'generic_error_offer');
   assert.equal(softErrorReason(' \n'+phrase.replace('. Can', '.\n\tCan')+'\n', request), 'generic_error_offer');
-  for (const text of ['An error occurred in line 3; here is the fix.', 'The server said: '+phrase, '"'+phrase+'"', '```text\n'+phrase+'\n```', 'Something went wrong.', 'I cannot help with that request.']) assert.equal(softErrorReason(text, request), null);
+  assert.equal(softErrorReason(' \n'+hydrogenPhrase.replace('. Could', '.\n\tCould')+'\n ', request), 'generic_error_offer');
+  for (const text of [
+    'An error occurred in line 3; here is the fix.', 'The server said: '+phrase, '"'+phrase+'"', '```text\n'+phrase+'\n```',
+    'Something went wrong.', 'I cannot help with that request.',
+    'I encountered an error doing what you asked.', 'Could you try again?',
+    'I encountered an error doing what you asked. Can you try again?',
+    'The model replied: '+hydrogenPhrase, '"'+hydrogenPhrase+'"', '```text\n'+hydrogenPhrase+'\n```',
+    ' '.repeat(1000)+hydrogenPhrase,
+  ]) assert.equal(softErrorReason(text, request), null, text);
   assert.equal(softErrorReason(phrase, request, 1), null);
+  assert.equal(softErrorReason(hydrogenPhrase, request, 1), null);
 });
 
 test('literal user/system instructions and a latest caller result are conservatively exempt', async () => {
-  const variants = [
-    { ...request, messages: [{ role: 'user', content: 'Return exactly this text: '+phrase }] },
-    { ...request, messages: [{ role: 'system', content: 'The literal requested output is '+phrase }, ...request.messages] },
-    { ...request, messages: [{ role: 'developer', content: 'Quote '+phrase }, ...request.messages] },
-    { ...request, messages: [{ role: 'user', content: [{ type: 'text', text: 'Return '+phrase }] }] },
-    { ...request, tools: [], tool_choice: 'none', messages: [request.messages[0],
-      { role: 'assistant', content: null, tool_calls: [{ id: 'call_old', type: 'function', function: { name: 'Read', arguments: '{}' } }] },
-      { role: 'tool', tool_call_id: 'call_old', content: JSON.stringify({ fileText: phrase }) }] },
-  ];
-  for (const body of variants) {
-    assert.equal(softErrorReason(phrase, body), null);
-    const result = await provider(phrase).runTurn('synthetic', body); assert.equal(result.content, phrase);
+  for (const targetPhrase of [phrase, hydrogenPhrase]) {
+    const variants = [
+      { ...request, messages: [{ role: 'user', content: 'Return exactly this text: '+targetPhrase }] },
+      { ...request, messages: [{ role: 'system', content: 'The literal requested output is '+targetPhrase }, ...request.messages] },
+      { ...request, messages: [{ role: 'developer', content: 'Quote '+targetPhrase }, ...request.messages] },
+      { ...request, messages: [{ role: 'user', content: [{ type: 'text', text: 'Return '+targetPhrase }] }] },
+      { ...request, tools: [], tool_choice: 'none', messages: [request.messages[0],
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call_old', type: 'function', function: { name: 'Read', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'call_old', content: JSON.stringify({ fileText: targetPhrase }) }] },
+    ];
+    for (const body of variants) {
+      assert.equal(softErrorReason(targetPhrase, body), null);
+      const result = await provider(targetPhrase).runTurn('synthetic', body); assert.equal(result.content, targetPhrase);
+    }
+    const previous = { ...request, messages: [{ role: 'assistant', content: targetPhrase }, ...request.messages] };
+    assert.equal(softErrorReason(targetPhrase, previous), 'generic_error_offer', 'a prior failed answer is not a standing literal-output exemption');
   }
-  const previous = { ...request, messages: [{ role: 'assistant', content: phrase }, ...request.messages] };
-  assert.equal(softErrorReason(phrase, previous), 'generic_error_offer', 'a prior failed answer is not a standing literal-output exemption');
 });
 
 test('completed requested-model soft error is rejected without emitting any answer/tool or native status fabrication', async () => {
@@ -57,8 +70,11 @@ test('completed requested-model soft error is rejected without emitting any answ
 });
 
 test('a valid caller tool plus text is not mistaken for a tool-free soft error', async () => {
-  const result = await provider(phrase+'\n'+toolBlock).runTurn('synthetic', request);
-  assert.equal(result.calls.length, 1); assert.equal(result.calls[0].function.name, 'fixture_lookup'); assert.match(result.content, /I seem/);
+  for (const targetPhrase of [phrase, hydrogenPhrase]) {
+    const result = await provider(targetPhrase+'\n'+toolBlock).runTurn('synthetic', request);
+    assert.equal(result.calls.length, 1); assert.equal(result.calls[0].function.name, 'fixture_lookup');
+    assert.ok(result.content.includes(targetPhrase.slice(0, 12)));
+  }
 });
 
 test('soft-error recovery requires clean terminal requested-model evidence and exact policy diagnostics', () => {
@@ -149,4 +165,91 @@ test('successful native verification retains bounded diagnostics without treatin
   const safe = safeNativeEvidence({ ...evidence(), nativeCompletenessState: 7 }); assert.deepEqual(safeNativeEvidence(safe), safe);
   const bad = safeNativeEvidence({ nativeCompletenessState: -1, outputFailureReason: 'private', outputFailureSource: 'private', outputToolCalls: 999 });
   for (const field of ['nativeCompletenessState','outputFailureReason','outputFailureSource','outputToolCalls']) assert.equal(Object.hasOwn(bad,field), false);
+});
+
+test('gemini-hydrogen recovers from the observed try-again soft-error across JSON and SSE without leaking boilerplate', async () => {
+  for (const route of ['chat/completions', 'responses']) for (const stream of [false, true]) {
+    const f = await fixture({ turns: [hydrogenPhrase, toolBlock], allowFailover: false, allowAutomaticRecovery: true });
+    try {
+      const body = route === 'responses' ? { model: 'gemini-hydrogen', input: request.messages[0].content, tools: responseTools, stream }
+        : { ...request, model: 'gemini-hydrogen', stream };
+      const r = await f.api('/v1/'+route, { method: 'POST', body, headers: { 'X-Session-ID': 'soft-error-hydrogen' } });
+      assert.equal(r.status, 200);
+      if (!stream) {
+        assert.equal(r.headers.get('x-gemini-provider-attempts'), '2');
+        assert.equal(r.headers.get('x-gemini-failover-reason'), 'provider_soft_error');
+        assert.equal(r.headers.get('x-gemini-recovery-errors'), 'NATIVE_SOFT_ERROR_RESPONSE');
+      }
+      const text = await r.text();
+      assert.match(text, /fixture_lookup/);
+      assert.doesNotMatch(text, /I encountered an error|"incomplete":true/);
+      assert.equal(f.seen.length, 2);
+      const log = f.app.overview().requests[0];
+      assert.equal(log.errorCode, null);
+      assert.equal(log.providerAttempts, 2);
+      assert.equal(log.providerFailures.length, 1);
+      assert.equal(log.providerFailures[0].code, 'NATIVE_SOFT_ERROR_RESPONSE');
+      assert.equal(log.providerFailures[0].nativeEvidence.outputFailureSource, 'exact_text_signature');
+    } finally { await f.close(); }
+  }
+});
+
+test('committed SSE output is never replayed or spliced with a second answer on soft-error or mid-stream interruption', async () => {
+  const paddedSoftError = '\u3000'.repeat(700) + hydrogenPhrase;
+  for (const route of ['chat/completions', 'responses']) {
+    const f = await fixture({ turns: [paddedSoftError, 'SECOND_TURN_MUST_NOT_SPLICE'], allowFailover: true, allowAutomaticRecovery: true });
+    try {
+      const body = route === 'responses' ? { model: 'gemini-hydrogen', input: 'Continue.', stream: true }
+        : { model: 'gemini-hydrogen', messages: [{ role: 'user', content: 'Continue.' }], stream: true };
+      const r = await f.api('/v1/'+route, { method: 'POST', body });
+      assert.equal(r.status, 200);
+      const text = await r.text();
+      assert.equal(f.seen.length, 1);
+      assert.doesNotMatch(text, /SECOND_TURN_MUST_NOT_SPLICE/);
+      assert.match(text, /NATIVE_SOFT_ERROR_RESPONSE/);
+      assert.match(text, /"incomplete":true/);
+      const row = f.app.overview().requests[0];
+      assert.equal(row.providerAttempts, 1);
+      assert.equal(row.outputIncomplete, true);
+    } finally { await f.close(); }
+  }
+
+  for (const route of ['chat/completions', 'responses']) {
+    const f = await fixture({ allowFailover: true, allowAutomaticRecovery: true });
+    try {
+      let opened = 0;
+      f.app.provider.openTurn = () => {
+        opened++;
+        if (opened > 1) {
+          return {
+            events: (async function* () {
+              yield { type: 'frame', bytes: m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('SECOND_TURN_MUST_NOT_SPLICE')))), v(9, 1), m(30, Buffer.from('Used 4 Hydrogen High model')), v(41, 1), v(42, 2)]))) };
+              yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+            })(),
+            cancel() {},
+          };
+        }
+        return {
+          events: (async function* () {
+            yield { type: 'frame', bytes: m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('Delivered prefix. '.repeat(130))))), v(9, 0), v(11, 0), m(30, Buffer.from('Used 4 Hydrogen High model')), v(31, 0), v(41, 1), v(42, 2)]))) };
+            throw Object.assign(Error('Synthetic reset'), { code: 'NATIVE_STREAM_RESET' });
+          })(),
+          cancel() {},
+        };
+      };
+      const body = route === 'responses' ? { model: 'gemini-hydrogen', input: 'Continue.', stream: true }
+        : { model: 'gemini-hydrogen', messages: [{ role: 'user', content: 'Continue.' }], stream: true };
+      const r = await f.api('/v1/'+route, { method: 'POST', body });
+      assert.equal(r.status, 200);
+      const text = await r.text();
+      assert.equal(opened, 1);
+      assert.match(text, /Delivered prefix\./);
+      assert.doesNotMatch(text, /SECOND_TURN_MUST_NOT_SPLICE/);
+      assert.match(text, /NATIVE_STREAM_RESET/);
+      assert.match(text, /"incomplete":true/);
+      const row = f.app.overview().requests[0];
+      assert.equal(row.providerAttempts, 1);
+      assert.equal(row.outputIncomplete, true);
+    } finally { await f.close(); }
+  }
 });
