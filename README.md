@@ -55,12 +55,12 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 
 - **Scoped OpenAI Compatibility (`Chat` & `Responses`):** Supports `GET /v1/models`, `POST /v1/chat/completions`, and `POST /v1/responses` with JSON or incremental SSE streaming, `reasoning_effort` / `reasoning.effort` mapping, and static PNG/JPEG/WebP image input.
 - **Caller-Owned Function Tools:** Clients declare JSON Schema functions (including Responses `type: "namespace"` groups), execute approved calls locally, and replay results. The gateway validates every tool name and argument schema before emission—never executing shell commands or touching your workspace.
-- **Zero-Dependency, Security-First Runtime:** Zero third-party production npm packages. Enforces `0700`/`0600` private state permissions, `scrypt` admin password hashing, SHA-256 hashed client API keys, strict `Origin`/`Host`/`X-CSRF-Token` admin protections, and SSRF-guarded opt-in remote image fetching.
-- **Bilingual Operations Console (`English` / `繁體中文`):** Manage accounts, inspect rolling **Current usage** and **Weekly limit** bars via read-only `GetUsageInfo` batches, explicitly review or accept Gemini Terms of Service, issue client API keys, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
+- **Zero-Dependency, Security-First Runtime:** Zero third-party production npm packages. Enforces `0700`/`0600` private state permissions, `scrypt` admin password hashing, SHA-256 API key lookup digests with `0600` private-state key storage (revealed only via authenticated CSRF-protected requests), strict `Origin`/`Host`/`X-CSRF-Token` admin protections, and SSRF-guarded opt-in remote image fetching.
+- **Bilingual Operations Console (`English` / `繁體中文`):** Monitor live pool pulse and latency sparklines, inspect per-account **Current usage** / **Weekly limit** bars and model states in a slide-over inspector drawer, copy ready-to-paste client configs (`Codex CLI`, `Cline`, `cURL`), manage copyable client API keys, explicitly review or accept Gemini Terms of Service, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
 
-| Light Theme — Overview & Latency Telemetry | Mobile Console — Traditional Chinese (`繁體中文`) |
+| Light Theme — Account Inspector & Pool Pulse | Mobile Console — Traditional Chinese (`繁體中文`) |
 |---|---|
-| ![Light theme management console, synthetic demo data](docs/assets/admin-v2-demo-light-desktop.png) | ![Mobile management console, synthetic demo data](docs/assets/admin-v2-demo-zh-hk-mobile.png) |
+| ![Light theme account inspector drawer and pool telemetry, synthetic demo data](docs/assets/admin-v2-demo-light-desktop.png) | ![Mobile management console, synthetic demo data](docs/assets/admin-v2-demo-zh-hk-mobile.png) |
 
 ---
 
