@@ -157,6 +157,27 @@ function decodeString(bytes, maxLength, fieldName) {
   }
 }
 
+/** Canonicalize HTTP(S) URL identity for internal exclusion, title lookup, and dedup. */
+export function canonicalWebUrlKey(urlString, { stripHash = false } = {}) {
+  if (typeof urlString !== "string") return "";
+  const trimmed = urlString.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return trimmed;
+    }
+    parsed.username = "";
+    parsed.password = "";
+    const trimmedHost = parsed.hostname.replace(/\.+$/, "");
+    if (trimmedHost) parsed.hostname = trimmedHost;
+    if (stripHash) parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return trimmed;
+  }
+}
+
 const NON_PUBLIC_HOST_SUFFIX = /(?:^|\.)(?:localhost|local|localdomain|internal|home|lan|arpa|invalid|test|onion)$/i;
 
 /**
@@ -408,8 +429,14 @@ function decodeWebAction(payload) {
     }
   }
 
-  if (!rawUrl || !isSafeWebUrl(rawUrl)) {
+  if (!rawUrl) {
     return null;
+  }
+
+  if (!isSafeWebUrl(rawUrl)) {
+    return forceAccount === true
+      ? { excludedUrl: rawUrl, forceAccount: true }
+      : null;
   }
 
   return {
@@ -511,15 +538,31 @@ function decodeRenderableSource(payload) {
     }
   }
 
-  // Non-web only or mixed actions (action-ambiguous): never turn into web results
-  if (!webActionField || hasNonWebAction) {
+  // Non-web only or mixed actions (action-ambiguous): never turn into web results,
+  // but still preserve any bounded forceAccount exclusion identity.
+  if (!webActionField) {
+    return null;
+  }
+  if (hasNonWebAction) {
+    try {
+      const mixedAction = decodeWebAction(webActionField.payload);
+      if (mixedAction?.forceAccount === true) {
+        const excludedUrl = mixedAction.excludedUrl ?? mixedAction.url;
+        if (excludedUrl) return { excludedUrl, forceAccount: true };
+      }
+    } catch {
+      // Mixed/non-web actions continue to be ignored on malformed web subfields.
+    }
     return null;
   }
 
   const webAction = decodeWebAction(webActionField.payload);
   if (!webAction) {
-    // Missing, invalid, or unsafe URL: excluded from web sources
+    // Missing, invalid, or unsafe non-excluded URL: omitted from web sources
     return null;
+  }
+  if (webAction.excludedUrl) {
+    return { excludedUrl: webAction.excludedUrl, forceAccount: true };
   }
 
   return {
@@ -658,6 +701,8 @@ export function decodeNativeSearchMetadata(modelResponseBytes, options = {}) {
 
   const citations = [];
   const webSources = [];
+  const excludedUrls = [];
+  const excludedSeen = new Set();
 
   for (const f of fields) {
     if (f.number === 6) {
@@ -666,7 +711,15 @@ export function decodeNativeSearchMetadata(modelResponseBytes, options = {}) {
       const source = decodeRenderableSource(f.payload);
 
       if (source !== null) {
-        webSources.push(source);
+        if (source.excludedUrl) {
+          const canonicalExcluded = canonicalWebUrlKey(source.excludedUrl);
+          if (canonicalExcluded && !excludedSeen.has(canonicalExcluded)) {
+            excludedSeen.add(canonicalExcluded);
+            excludedUrls.push(canonicalExcluded);
+          }
+        } else {
+          webSources.push(source);
+        }
       }
     }
   }
@@ -676,6 +729,7 @@ export function decodeNativeSearchMetadata(modelResponseBytes, options = {}) {
   return {
     citations,
     webSources,
+    ...(excludedUrls.length ? { excludedUrls } : {}),
     counts: {
       citations: citations.length,
       webSources: webSources.length,

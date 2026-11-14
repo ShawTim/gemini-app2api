@@ -1,4 +1,4 @@
-import { isSafeWebUrl } from './native-search-metadata.mjs';
+import { canonicalWebUrlKey, isSafeWebUrl } from './native-search-metadata.mjs';
 
 export const CITATION_LIMITS = Object.freeze({
   MAX_ANNOTATIONS: 64,
@@ -28,18 +28,6 @@ function hostnameFallback(url) {
   }
 }
 
-function canonicalWebUrlKey(urlString, { stripHash = false } = {}) {
-  if (typeof urlString !== 'string') return '';
-  try {
-    const parsed = new URL(urlString);
-    parsed.hostname = parsed.hostname.replace(/\.+$/, '');
-    if (stripHash) parsed.hash = '';
-    return parsed.href;
-  } catch {
-    return urlString;
-  }
-}
-
 function filterReportMetadata(report) {
   const minFrame = Number.isInteger(report?.lastTextFrameIndex) ? report.lastTextFrameIndex : 0;
   const frameOk = (item) => (minFrame === 0
@@ -49,13 +37,21 @@ function filterReportMetadata(report) {
   const rawSources = Array.isArray(report?.webSources) ? report.webSources : [];
   const excludedUrls = new Set();
   const excludedBaseUrls = new Set();
+  const addExcludedUrl = (url) => {
+    if (typeof url !== 'string' || !url) return;
+    excludedUrls.add(canonicalWebUrlKey(url));
+    try {
+      const parsed = new URL(url.trim());
+      if (!parsed.hash) excludedBaseUrls.add(canonicalWebUrlKey(url, { stripHash: true }));
+    } catch {}
+  };
   for (const src of rawSources) {
     if (typeof src?.url === 'string' && src.forceAccount === true) {
-      excludedUrls.add(canonicalWebUrlKey(src.url));
-      try {
-        if (!new URL(src.url).hash) excludedBaseUrls.add(canonicalWebUrlKey(src.url, { stripHash: true }));
-      } catch {}
+      addExcludedUrl(src.url);
     }
+  }
+  for (const url of Array.isArray(report?.excludedUrls) ? report.excludedUrls : []) {
+    addExcludedUrl(url);
   }
   const isExcludedUrl = (url) => (
     excludedUrls.has(canonicalWebUrlKey(url))

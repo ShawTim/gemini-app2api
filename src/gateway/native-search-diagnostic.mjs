@@ -171,13 +171,14 @@ export async function runNativeSearchDiagnostic({
                     }
                   }
                   const metadata = decodeNativeSearchMetadata(model.payload);
-                  if (metadata.citations.length || metadata.webSources.length) {
+                  const excludedUrls = Array.isArray(metadata.excludedUrls) ? metadata.excludedUrls : [];
+                  if (metadata.citations.length || metadata.webSources.length || excludedUrls.length) {
                     if (metadataFrames.length >= MAX_METADATA_FRAMES)
                       throw Object.assign(new Error(), {
                         code: "NATIVE_METADATA_LIMIT",
                       });
                     citationCount += metadata.citations.length;
-                    sourceCount += metadata.webSources.length;
+                    sourceCount += metadata.webSources.length + excludedUrls.length;
                     if (
                       citationCount > MAX_METADATA_ITEMS ||
                       sourceCount > MAX_METADATA_ITEMS
@@ -189,6 +190,7 @@ export async function runNativeSearchDiagnostic({
                       frameIndex: frameCount,
                       citations: metadata.citations,
                       webSources: metadata.webSources,
+                      excludedUrls,
                     });
                   }
                 }
@@ -256,6 +258,7 @@ export async function runNativeSearchDiagnostic({
       webSources: metadataFrames.flatMap(({ frameIndex, webSources }) =>
         webSources.map((item) => ({ ...item, frameIndex })),
       ),
+      excludedUrls: metadataFrames.flatMap(({ excludedUrls = [] }) => excludedUrls),
       citationCount: metadataFrames.reduce(
         (n, item) => n + item.citations.length,
         0,

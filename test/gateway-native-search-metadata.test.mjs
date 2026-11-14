@@ -252,3 +252,22 @@ test("isSafeWebUrl rejects internal/reserved host suffixes and non-alphabetic TL
     assert.equal(isSafeWebUrl(rejectedUrl), false, rejectedUrl);
   }
 });
+
+test("decodeNativeSearchMetadata preserves canonical forceAccount exclusions even when webAction URL fails isSafeWebUrl", () => {
+  const direct = decodeNativeSearchMetadata(
+    msg(
+      citation(str(3, "https://example.org/private"), varintField(1, 0), varintField(2, 5)),
+      source(urlAction("https://example.org./private", varintField(2, 1))),
+      source(urlAction("https://user:secret@example.org/cred-private", varintField(2, 1))),
+      source(urlAction("https://example.org./mixed-private", varintField(2, 1)), str(9, "mixed")),
+      source(urlAction("https://example.org./public-unsafe", varintField(2, 0))),
+    ),
+  );
+  assert.deepEqual(direct.webSources, []);
+  assert.deepEqual(direct.excludedUrls, [
+    "https://example.org/private",
+    "https://example.org/cred-private",
+    "https://example.org/mixed-private",
+  ]);
+  assert.equal(direct.excludedUrls.some((u) => u.includes("secret")), false);
+});

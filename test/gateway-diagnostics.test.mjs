@@ -673,3 +673,51 @@ test("ModelTelemetry classifies native-search metadata, decoder, limit, and thin
   assert.equal(argon.errorCounts.protocol, 3);
   assert.equal(argon.errorCounts.other, 0);
 });
+
+test("HTTP transport protocol failures NATIVE_FRAME_REJECTED, NATIVE_INVALID_STATUS, and NATIVE_RECEIVE_LIMIT increment telemetry protocol counter", async (t) => {
+  for (const code of [
+    "NATIVE_FRAME_REJECTED",
+    "NATIVE_INVALID_STATUS",
+    "NATIVE_RECEIVE_LIMIT",
+    "NATIVE_READER_BUSY",
+    "NATIVE_TEXT_SNAPSHOT_TOOLS_FORBIDDEN",
+  ]) {
+    assert.equal(classifyTelemetryError({ code, status: 502 }), "protocol", code);
+  }
+  assert.equal(classifyTelemetryError({ code: "NATIVE_HTTP_REJECTED", status: 502 }), "transient");
+  assert.equal(classifyTelemetryError({ code: "NATIVE_CREDENTIAL_REQUIRED", status: 503 }), "auth");
+
+  const f = await fixture({ allowFailover: false, accountCount: 1 });
+  t.after(f.close);
+  const injectedCodes = ["NATIVE_FRAME_REJECTED", "NATIVE_INVALID_STATUS", "NATIVE_RECEIVE_LIMIT"];
+  let idx = 0;
+  f.app.provider.openTurn = () => {
+    const code = injectedCodes[idx++];
+    return {
+      cancel() {},
+      events: (async function* () {
+        throw Object.assign(new Error("synthetic transport failure"), { code, status: 502 });
+      })(),
+    };
+  };
+
+  for (const expectedCode of injectedCodes) {
+    const res = await f.api("/v1/chat/completions", {
+      method: "POST",
+      body: {
+        model: "gemini-argon",
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.equal(body.error.code, expectedCode);
+  }
+
+  const overview = await (await f.admin("overview")).json();
+  const argon = overview.modelTelemetry.byModel["gemini-argon"];
+  assert.equal(argon.requests, 3);
+  assert.equal(argon.failures, 3);
+  assert.equal(argon.errorCounts.protocol, 3);
+  assert.equal(argon.errorCounts.other, 0);
+});

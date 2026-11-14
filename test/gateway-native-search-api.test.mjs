@@ -685,3 +685,49 @@ test("canonical URL identity enforces forceAccount exclusion, source title looku
     assert.doesNotMatch(serialized, /private|Secret/);
   }
 });
+
+test("decoder-through-HTTP deny-wins blocks citation when forceAccount webSource uses trailing-dot or credentialed URL across Chat/Responses JSON/SSE", async (t) => {
+  const answer = "Secret and Public docs.";
+  const events = [
+    frame({
+      text: "draft",
+      modelExtra: [
+        webSourceMsg({ url: "https://example.org./cross-frame-private", sourceTitle: "Cross Frame Secret", forceAccount: true }),
+      ],
+    }),
+    frame({
+      text: answer,
+      tool: "google",
+      modelExtra: [
+        citationMsg({ url: "https://example.org/private", start: 0, end: 6, title: "Secret Trailing Dot Citation" }),
+        citationMsg({ url: "https://example.org/cross-frame-private", start: 0, end: 6, title: "Secret Cross Frame Citation" }),
+        citationMsg({ url: "https://docs.example.org/public", start: 11, end: 17, title: "Public Doc" }),
+        webSourceMsg({ url: "https://example.org./private", sourceTitle: "Private Trailing Dot Source", forceAccount: true }),
+        webSourceMsg({ url: "https://docs.example.org/public", sourceTitle: "Public Doc", forceAccount: false }),
+      ],
+    }),
+    end,
+  ];
+
+  for (const kind of ["chat", "responses"]) {
+    for (const stream of [false, true]) {
+      const f = await setup(t, events);
+      const res = await f.request(kind, body(kind, stream));
+      assert.equal(res.status, 200);
+      const raw = await res.text();
+      assert.doesNotMatch(raw, /example\.org\/private|cross-frame-private|Secret Trailing Dot|Secret Cross Frame|Private Trailing Dot/);
+      if (!stream) {
+        const data = JSON.parse(raw);
+        assert.deepEqual(data.native_search.sources, [{ url: "https://docs.example.org/public", title: "Public Doc" }]);
+      } else if (kind === "chat") {
+        const chunks = raw.split("\n").filter((x) => x.startsWith("data: ") && x !== "data: [DONE]").map((x) => JSON.parse(x.slice(6)));
+        const finishChunk = chunks.find((x) => x.choices[0]?.finish_reason === "stop");
+        assert.deepEqual(finishChunk.native_search.sources, [{ url: "https://docs.example.org/public", title: "Public Doc" }]);
+      } else {
+        const eventsOut = raw.split("\n").filter((x) => x.startsWith("data: ")).map((x) => JSON.parse(x.slice(6)));
+        const completed = eventsOut.at(-1);
+        assert.deepEqual(completed.response.native_search.sources, [{ url: "https://docs.example.org/public", title: "Public Doc" }]);
+      }
+    }
+  }
+});
