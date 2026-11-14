@@ -30,8 +30,16 @@ export function createLocalController({
   const registrationPath = path.join(privateRoot, "service-registration.private.json");
   const ackPath = path.join(privateRoot, "supervisor-ack.private.json");
   let supervising = false;
+  const waitBuf = typeof SharedArrayBuffer === "function"
+    ? new Int32Array(new SharedArrayBuffer(4))
+    : null;
+  const pauseSync = (ms) => {
+    if (waitBuf) Atomics.wait(waitBuf, 0, 0, ms);
+  };
+  const READ_FLAGS =
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW;
   const exists = (file) => { try { fs.lstatSync(file); return true; } catch (e) { if (e.code === "ENOENT") return false; throw e; } };
-  function safeFile(file) {
+  function safeAncestors(file) {
     for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
       const s = fs.lstatSync(dir);
       if (!s.isDirectory() || s.isSymbolicLink()) fail("UNSAFE_PRIVATE_PATH");
@@ -40,15 +48,56 @@ export function createLocalController({
         fail("UNSAFE_PRIVATE_PATH");
       if (path.dirname(dir) === dir) break;
     }
-    const stat = fs.lstatSync(file);
-    if (
-      !stat.isFile() ||
-      stat.isSymbolicLink() ||
-      stat.nlink !== 1 ||
-      (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
-      stat.mode & 0o077
-    )
-      fail("UNSAFE_PRIVATE_FILE");
+  }
+  function readVerified(
+    file,
+    { readBytes = true, allowMissing = false, retryMissing = false } = {},
+  ) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        safeAncestors(file);
+      } catch (e) {
+        if (e.code === "ENOENT") {
+          if (retryMissing && attempt < 3) { pauseSync(5); continue; }
+          if (allowMissing) return null;
+        }
+        throw e;
+      }
+      let fd;
+      try {
+        fd = fs.openSync(file, READ_FLAGS);
+      } catch (e) {
+        if (e.code === "ELOOP") fail("UNSAFE_PRIVATE_FILE");
+        if (e.code === "ENOENT") {
+          if (retryMissing && attempt < 3) { pauseSync(5); continue; }
+          if (allowMissing) return null;
+        }
+        throw e;
+      }
+      try {
+        const stat = fs.fstatSync(fd);
+        if (
+          !stat.isFile() ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+          (stat.mode & 0o077) ||
+          stat.nlink > 1
+        ) {
+          fail("UNSAFE_PRIVATE_FILE");
+        }
+        // An atomic rename replacement between open and fstat drops the old inode link count to 0.
+        if (stat.nlink !== 1) {
+          if (attempt < 3) { pauseSync(5); continue; }
+          fail("UNSAFE_PRIVATE_FILE");
+        }
+        const bytes = readBytes ? fs.readFileSync(fd, "utf8") : undefined;
+        return { stat, bytes };
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+  }
+  function safeFile(file, opts) {
+    readVerified(file, { readBytes: false, ...opts });
   }
   function sourcePath(source) {
     const parent = path.join(root, "artifacts/internal-server");
@@ -61,11 +110,16 @@ export function createLocalController({
     return source;
   }
   function loadControl() {
-    if (!exists(controlPath)) fail("INTERNAL_DEPLOYMENT_REQUIRED");
-    safeFile(controlPath);
+    let snap;
+    try {
+      snap = readVerified(controlPath, { retryMissing: true });
+    } catch (e) {
+      if (e.code === "ENOENT") fail("INTERNAL_DEPLOYMENT_REQUIRED");
+      throw e;
+    }
     let c;
     try {
-      c = JSON.parse(fs.readFileSync(controlPath, "utf8"));
+      c = JSON.parse(snap.bytes);
     } catch {
       fail("INVALID_DEPLOYMENT_CONTROL");
     }
@@ -107,22 +161,45 @@ export function createLocalController({
     return c;
   }
   function atomicJSON(file, value) {
-    if (exists(file)) safeFile(file);
+    safeFile(file, { allowMissing: true });
     const temp = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-    const fd = fs.openSync(temp, "wx", 0o600);
-    try { fs.writeFileSync(fd, JSON.stringify(value)); fs.fsyncSync(fd); }
-    finally { fs.closeSync(fd); }
-    fs.renameSync(temp, file);
+    let renamed = false;
+    const fd = fs.openSync(
+      temp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      try {
+        fs.fchmodSync(fd, 0o600);
+        fs.writeFileSync(fd, JSON.stringify(value));
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temp, file);
+      renamed = true;
+    } finally {
+      if (!renamed) {
+        try { fs.unlinkSync(temp); } catch {}
+      }
+    }
   }
   const saveControl = (c) => atomicJSON(controlPath, c);
-  function readJSON(file) { safeFile(file); return JSON.parse(fs.readFileSync(file, "utf8")); }
+  function readJSON(file, opts) { return JSON.parse(readVerified(file, opts).bytes); }
+  function readJSONIfExists(file, opts) {
+    const snap = readVerified(file, { allowMissing: true, ...opts });
+    return snap ? JSON.parse(snap.bytes) : null;
+  }
   function dead(pid) {
     try { process.kill(pid, 0); return false; }
     catch (e) { if (e.code === "ESRCH") return true; throw e; }
   }
-  function snapshot(file) {
-    safeFile(file);
-    return { stat: fs.lstatSync(file), bytes: fs.readFileSync(file, "utf8") };
+  function snapshot(file, opts) {
+    return readVerified(file, opts);
+  }
+  function snapshotIfExists(file, opts) {
+    return readVerified(file, { allowMissing: true, ...opts });
   }
   function unchanged(file, prior) {
     const next = snapshot(file);
@@ -132,36 +209,51 @@ export function createLocalController({
   }
   async function recoverDeadLock(c) {
     const lock = path.join(c.directory, "runtime.lock");
-    if (!exists(lock)) return;
-    const prior = snapshot(lock), pid = Number(prior.bytes.trim());
+    const prior = snapshotIfExists(lock);
+    if (!prior) return;
+    const pid = Number(prior.bytes.trim());
     if (!Number.isSafeInteger(pid) || pid < 2 || pid !== c.serverPid) fail("OWNERSHIP_GUARD");
     if (!dead(pid)) return;
     await verifySource(c);
     const current = loadControl();
     if (current.serverPid !== pid || current.source !== c.source || current.runtimeSha256 !== c.runtimeSha256)
       fail("OWNERSHIP_GUARD");
-    unchanged(lock, prior);
-    if (!dead(pid)) fail("PROCESS_GUARD");
-    fs.unlinkSync(lock);
+    try {
+      unchanged(lock, prior);
+      if (!dead(pid)) fail("PROCESS_GUARD");
+      fs.unlinkSync(lock);
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
   }
   function supervisorActive() {
-    if (!exists(supervisorPath)) return false;
-    const prior = snapshot(supervisorPath), pid = JSON.parse(prior.bytes).pid;
+    let prior = snapshotIfExists(supervisorPath);
+    if (!prior) return false;
+    if (prior.bytes === "") {
+      pauseSync(5);
+      prior = snapshotIfExists(supervisorPath);
+      if (!prior) return false;
+    }
+    const pid = JSON.parse(prior.bytes).pid;
     if (!Number.isSafeInteger(pid) || pid < 2) fail("SUPERVISOR_OWNERSHIP_GUARD");
     if (!dead(pid)) return true;
-    unchanged(supervisorPath, prior);
-    if (!dead(pid)) fail("SUPERVISOR_OWNERSHIP_GUARD");
-    fs.unlinkSync(supervisorPath);
+    try {
+      unchanged(supervisorPath, prior);
+      if (!dead(pid)) fail("SUPERVISOR_OWNERSHIP_GUARD");
+      fs.unlinkSync(supervisorPath);
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
     return false;
   }
   function managed() {
     if (supervising) return false;
-    if (exists(registrationPath)) safeFile(registrationPath);
+    safeFile(registrationPath, { allowMissing: true });
     return supervisorActive() || exists(registrationPath);
   }
   function intent() {
-    if (!exists(intentPath)) return { enabled: true, revision: "initial" };
-    const value = readJSON(intentPath);
+    const value = readJSONIfExists(intentPath);
+    if (!value) return { enabled: true, revision: "initial" };
     if (typeof value.enabled !== "boolean" || typeof value.revision !== "string") fail("INVALID_SERVICE_INTENT");
     return value;
   }
@@ -177,12 +269,15 @@ export function createLocalController({
       }
     }
     for (let n = 0; n < 200; n++) {
-      if (exists(ackPath)) {
-        const ack = readJSON(ackPath);
-        if (ack.revision === value.revision) {
-          if (ack.error) fail(ack.error);
-          return;
-        }
+      const ack = readJSONIfExists(ackPath);
+      if (ack && ack.revision === value.revision) {
+        if (ack.error) fail(ack.error);
+        return;
+      }
+      if (!enabled && !supervisorActive()) {
+        const finalAck = readJSONIfExists(ackPath);
+        if (finalAck && finalAck.revision === value.revision && finalAck.error) fail(finalAck.error);
+        return;
       }
       await sleep(100);
     }
@@ -190,9 +285,9 @@ export function createLocalController({
   }
   function ownedPid(c) {
     const lock = path.join(c.directory, "runtime.lock");
-    if (!exists(lock)) return null;
-    safeFile(lock);
-    const pid = Number(fs.readFileSync(lock, "utf8").trim());
+    const snap = snapshotIfExists(lock);
+    if (!snap) return null;
+    const pid = Number(snap.bytes.trim());
     if (!Number.isSafeInteger(pid) || pid < 2 || pid !== c.serverPid)
       fail("OWNERSHIP_GUARD");
     let owned = false;
@@ -288,8 +383,8 @@ export function createLocalController({
       ? path.resolve(root, process.env.GATEWAY_ENV_FILE)
       : exists(path.join(root, ".env")) ? path.join(root, ".env") : null;
     if (file) {
-      safeFile(file);
-      if (fs.lstatSync(file).size > 65536) fail("UNSAFE_ENV_FILE");
+      const snap = readVerified(file, { readBytes: false });
+      if (snap.stat.size > 65536) fail("UNSAFE_ENV_FILE");
     }
     return file;
   }
@@ -308,7 +403,7 @@ export function createLocalController({
     safeFile(path.join(c.directory, "state.json"));
     const envFile = environmentFile();
     const log = path.join(privateRoot, "server.private.log");
-    if (exists(log)) safeFile(log);
+    safeFile(log, { allowMissing: true });
     const fd = fs.openSync(log, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600);
     let child,
       spawnError = false;
@@ -418,7 +513,21 @@ export function createLocalController({
     if (!exists(registrationPath) && exists(path.join(privateRoot, "controller.private.lock")))
       fail("CONTROLLER_BUSY");
     const token = `${process.pid}-${Math.random()}`;
-    fs.writeFileSync(supervisorPath, JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 });
+    const lockFd = fs.openSync(
+      supervisorPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      fs.fchmodSync(lockFd, 0o600);
+      fs.writeFileSync(lockFd, JSON.stringify({ pid: process.pid, token }));
+      fs.fsyncSync(lockFd);
+    } catch (e) {
+      try { fs.closeSync(lockFd); } catch {}
+      try { fs.unlinkSync(supervisorPath); } catch {}
+      throw e;
+    }
+    fs.closeSync(lockFd);
     supervising = true;
     let stopping = false, failures = 0, lastRevision;
     const onSignal = () => { stopping = true; };
@@ -483,8 +592,10 @@ export function createLocalController({
       } finally {
         process.off("SIGTERM", onSignal);
         process.off("SIGINT", onSignal);
-        const lock = readJSON(supervisorPath);
-        if (lock.token === token) fs.unlinkSync(supervisorPath);
+        const lock = readJSONIfExists(supervisorPath);
+        if (lock?.token === token) {
+          try { fs.unlinkSync(supervisorPath); } catch (e) { if (e.code !== "ENOENT") throw e; }
+        }
         supervising = false;
       }
     }
@@ -494,17 +605,53 @@ export function createLocalController({
   const serialized = (fn) => async () => {
     loadControl();
     const file = path.join(privateRoot, "controller.private.lock");
-    if (exists(file)) {
-      const prior = snapshot(file), pid = Number(prior.bytes);
-      if (!Number.isSafeInteger(pid) || pid < 2 || !dead(pid)) fail("CONTROLLER_BUSY");
-      unchanged(file, prior);
-      if (!dead(pid)) fail("CONTROLLER_BUSY");
-      fs.unlinkSync(file);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const prior = snapshotIfExists(file);
+      if (prior) {
+        let bytes = prior.bytes;
+        if (bytes === "") {
+          pauseSync(5);
+          const retry = snapshotIfExists(file);
+          if (!retry) continue;
+          bytes = retry.bytes;
+        }
+        const pid = Number(bytes);
+        if (!Number.isSafeInteger(pid) || pid < 2 || !dead(pid)) fail("CONTROLLER_BUSY");
+        try {
+          unchanged(file, prior);
+          if (!dead(pid)) fail("CONTROLLER_BUSY");
+          fs.unlinkSync(file);
+        } catch (e) {
+          if (e.code === "ENOENT") continue;
+          throw e;
+        }
+      }
+      let fd;
+      try {
+        fd = fs.openSync(
+          file,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+          0o600,
+        );
+      } catch (e) {
+        if (e.code === "EEXIST") fail("CONTROLLER_BUSY");
+        throw e;
+      }
+      try {
+        fs.fchmodSync(fd, 0o600);
+        fs.writeFileSync(fd, String(process.pid));
+      } catch (e) {
+        try { fs.closeSync(fd); } catch {}
+        try { fs.unlinkSync(file); } catch {}
+        throw e;
+      }
+      try { return await fn(); }
+      finally {
+        try { fs.closeSync(fd); } catch {}
+        try { fs.unlinkSync(file); } catch {}
+      }
     }
-    const fd = fs.openSync(file, "wx", 0o600);
-    fs.writeFileSync(fd, String(process.pid));
-    try { return await fn(); }
-    finally { fs.closeSync(fd); fs.unlinkSync(file); }
+    fail("CONTROLLER_BUSY");
   };
   return { start: serialized(start), stop: serialized(stop), restart: serialized(restart),
     status, rollback: serialized(rollback), supervise, verifyDeployment,

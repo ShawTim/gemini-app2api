@@ -33,8 +33,30 @@ function fixture(t) {
     key: "synthetic-private-key",
   };
   const control = path.join(privateRoot, "control.private.json");
-  const save = () =>
-    fs.writeFileSync(control, JSON.stringify(c), { mode: 0o600 });
+  const save = (value = c) => {
+    const temp = `${control}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+    let renamed = false;
+    const fd = fs.openSync(
+      temp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      try {
+        fs.fchmodSync(fd, 0o600);
+        fs.writeFileSync(fd, JSON.stringify(value));
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temp, control);
+      renamed = true;
+    } finally {
+      if (!renamed) {
+        try { fs.unlinkSync(temp); } catch {}
+      }
+    }
+  };
   save();
   fs.writeFileSync(path.join(directory, "state.json"), '{"synthetic":true}', {
     mode: 0o600,
@@ -194,7 +216,7 @@ test("synthetic real process supports start, restart, guarded rollback and norma
     "artifacts/internal-server/source-missing",
   );
   live.previousRuntimeSha256 = syntheticHash;
-  fs.writeFileSync(f.control, JSON.stringify(live), { mode: 0o600 });
+  f.save(live);
   await assert.rejects(f.controller.rollback());
   assert.equal((await f.controller.status()).running, true);
   const restarted = await f.controller.restart();
@@ -215,7 +237,7 @@ test("synthetic real process supports start, restart, guarded rollback and norma
     previousRuntimeSha256: syntheticHash,
     previousSourceCommit: "synthetic-previous",
   });
-  fs.writeFileSync(f.control, JSON.stringify(rollbackControl), { mode: 0o600 });
+  f.save(rollbackControl);
   assert.equal(
     (await f.controller.rollback()).sourceCommit,
     "synthetic-previous",
@@ -281,7 +303,7 @@ test("foreground supervisor recovers SIGKILL, serializes ownership, and preserve
   fs.cpSync(f.source, previous, { recursive: true });
   const c = controlOf(f);
   Object.assign(c, { previousSource: previous, previousRuntimeSha256: syntheticHash, previousSourceCommit: "previous" });
-  fs.writeFileSync(f.control, JSON.stringify(c), { mode: 0o600 });
+  f.save(c);
   assert.equal((await f.controller.rollback()).sourceCommit, "previous");
   assert.equal((await f.controller.rollback()).sourceCommit, "synthetic");
   assert.equal(supervisor.exitCode, null);
@@ -325,7 +347,7 @@ test("source mismatch after gateway crash fails closed without reclaim or launch
   await until(async () => (await f.controller.status()).running);
   const c = controlOf(f), pid = c.serverPid;
   c.runtimeSha256 = "b".repeat(64);
-  fs.writeFileSync(f.control, JSON.stringify(c), { mode: 0o600 });
+  f.save(c);
   process.kill(pid, "SIGKILL");
   await until(() => supervisor.exitCode !== null);
   assert.equal(supervisor.exitCode, 0);
@@ -409,7 +431,7 @@ test('routing policy rejects malformed private control, forwards pinned IDs and 
   const previous = path.join(f.root, 'artifacts/internal-server/source-without-policy');
   fs.cpSync(f.source, previous, { recursive: true }); fs.unlinkSync(path.join(previous, 'src/gateway/routing-policy.mjs'));
   const current = controlOf(f); Object.assign(current, { previousSource: previous, previousRuntimeSha256: syntheticHash });
-  fs.writeFileSync(f.control, JSON.stringify(current), { mode: 0o600 });
+  f.save(current);
   await assert.rejects(f.controller.rollback(), { code: 'ROUTING_POLICY_UNSUPPORTED_BY_SOURCE' });
   assert.equal((await f.controller.status()).running, true);
   await f.controller.restart();
@@ -431,7 +453,7 @@ test("managed quota-only flag reaches server and guarded rollback preserves the 
   fs.cpSync(f.source, previous, { recursive: true }); fs.unlinkSync(path.join(previous, "src/gateway/quota-failover.mjs"));
   const control = JSON.parse(fs.readFileSync(f.control));
   Object.assign(control, { previousSource: previous, previousRuntimeSha256: syntheticHash, previousSourceCommit: "previous" });
-  fs.writeFileSync(f.control, JSON.stringify(control), { mode: 0o600 });
+  f.save(control);
   await assert.rejects(f.controller.rollback(), { code: "QUOTA_FAILOVER_UNSUPPORTED_BY_SOURCE" });
   assert.equal((await f.controller.status()).quotaFailoverEnabled, true);
   assert.deepEqual(fs.readFileSync(path.join(f.directory, "state.json")), before);
@@ -448,7 +470,7 @@ test('managed verified-empty recovery flag is forwarded and unsupported rollback
   const previous = path.join(f.root, 'artifacts/internal-server/source-no-empty'); fs.cpSync(f.source, previous, { recursive: true });
   fs.unlinkSync(path.join(previous, 'src/gateway/output-recovery.mjs'));
   const control = controlOf(f); Object.assign(control, { previousSource: previous, previousRuntimeSha256: syntheticHash, previousSourceCommit: 'previous' });
-  fs.writeFileSync(f.control, JSON.stringify(control), { mode: 0o600 });
+  f.save(control);
   await assert.rejects(f.controller.rollback(), { code: 'EMPTY_RESPONSE_FAILOVER_UNSUPPORTED_BY_SOURCE' });
   assert.equal((await f.controller.status()).emptyResponseFailoverEnabled, true);
   assert.deepEqual(fs.readFileSync(path.join(f.directory, 'state.json')), state);
@@ -464,8 +486,125 @@ test('automatic recovery is explicitly forwarded and cannot silently roll back t
   const previous = path.join(f.root, 'artifacts/internal-server/source-no-automatic'); fs.cpSync(f.source, previous, { recursive: true });
   fs.unlinkSync(path.join(previous, 'src/gateway/automatic-recovery.mjs'));
   const control = controlOf(f); Object.assign(control, { previousSource: previous, previousRuntimeSha256: syntheticHash, previousSourceCommit: 'previous' });
-  fs.writeFileSync(f.control, JSON.stringify(control), { mode: 0o600 });
+  f.save(control);
   await assert.rejects(f.controller.rollback(), { code: 'AUTOMATIC_RECOVERY_UNSUPPORTED_BY_SOURCE' });
   assert.equal((await f.controller.status()).automaticRecoveryEnabled, true);
   assert.deepEqual(fs.readFileSync(path.join(f.directory, 'state.json')), before);
+});
+
+test("concurrent start/stop/status stress against live supervisor stays race-free and fails closed on unsafe files", async (t) => {
+  const f = fixture(t);
+  await provision(f);
+  const supervisor = runSupervisor(f);
+  await until(async () => (await f.controller.status()).running);
+
+  const reader = createLocalController({ root: f.root });
+  let polling = true;
+  let pollCount = 0;
+  const pollLoop = (async () => {
+    while (polling) {
+      const checks = await Promise.allSettled([
+        reader.status(),
+        reader.verifyDeployment(),
+      ]);
+      for (const outcome of checks) {
+        if (outcome.status === "fulfilled") {
+          pollCount++;
+          continue;
+        }
+        const err = outcome.reason;
+        const code = err?.code || "";
+        // Only transient mid-transition socket/exit states are permissible while child restarts;
+        // UNSAFE_PRIVATE_FILE, ENOENT, INVALID_DEPLOYMENT_CONTROL, and LOCK_IDENTITY_CHANGED must never occur.
+        const transientTransition =
+          code === "STALE_LOCK_REQUIRES_INSPECTION" ||
+          err?.name === "TypeError" ||
+          /fetch failed|ECONNREFUSED|UND_ERR_SOCKET/i.test(String(err?.message || ""));
+        assert.ok(
+          transientTransition,
+          `unexpected concurrent reader failure (${code || err?.name}): ${err?.message}`,
+        );
+      }
+      await pause(5);
+    }
+  })();
+
+  try {
+    for (let i = 0; i < 5; i++) {
+      assert.deepEqual(await f.controller.stop(), {
+        stopped: true,
+        normalShutdown: true,
+      });
+      assert.equal((await f.controller.status()).running, false);
+      assert.equal((await f.controller.start()).running, true);
+    }
+
+    const contended = await Promise.allSettled([
+      f.controller.stop(),
+      f.controller.start(),
+    ]);
+    assert.ok(contended.some((r) => r.status === "fulfilled"));
+    for (const r of contended) {
+      if (r.status === "rejected") {
+        assert.equal(r.reason?.code, "CONTROLLER_BUSY");
+      }
+    }
+    if (!(await f.controller.status()).running) {
+      assert.equal((await f.controller.start()).running, true);
+    }
+  } finally {
+    polling = false;
+    await pollLoop;
+  }
+
+  assert.ok(pollCount >= 10, `expected concurrent reader polls, got ${pollCount}`);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(f.control)).filter((name) => name.endsWith(".tmp")),
+    [],
+  );
+
+  await f.controller.stop();
+  supervisor.kill("SIGTERM");
+  await until(() => supervisor.exitCode !== null);
+  assert.equal(supervisor.exitCode, 0, supervisor.output);
+
+  // Security invariants: hardlinks, symlinks, and permissive modes still fail closed immediately.
+  const controlHardlink = path.join(path.dirname(f.control), "control-hardlink.json");
+  fs.linkSync(f.control, controlHardlink);
+  try {
+    await assert.rejects(f.controller.status(), { code: "UNSAFE_PRIVATE_FILE" });
+  } finally {
+    fs.unlinkSync(controlHardlink);
+  }
+
+  const ackFile = path.join(path.dirname(f.control), "supervisor-ack.private.json");
+  const lockFile = path.join(path.dirname(f.control), "supervisor.private.lock");
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, token: "synthetic-lock" }), { mode: 0o600 });
+  try {
+    fs.chmodSync(ackFile, 0o644);
+    await assert.rejects(f.controller.start(), { code: "UNSAFE_PRIVATE_FILE" });
+    fs.unlinkSync(ackFile);
+
+    const symTarget = path.join(path.dirname(f.control), "ack-target.json");
+    fs.writeFileSync(symTarget, '{"revision":"bad"}', { mode: 0o600 });
+    fs.symlinkSync(symTarget, ackFile);
+    try {
+      await assert.rejects(f.controller.start(), { code: "UNSAFE_PRIVATE_FILE" });
+    } finally {
+      fs.unlinkSync(ackFile);
+      fs.unlinkSync(symTarget);
+    }
+
+    const ackHardlink = path.join(path.dirname(f.control), "ack-hardlink.json");
+    fs.writeFileSync(ackHardlink, '{"revision":"bad"}', { mode: 0o600 });
+    fs.linkSync(ackHardlink, ackFile);
+    try {
+      await assert.rejects(f.controller.start(), { code: "UNSAFE_PRIVATE_FILE" });
+    } finally {
+      fs.unlinkSync(ackFile);
+      fs.unlinkSync(ackHardlink);
+    }
+  } finally {
+    try { fs.unlinkSync(lockFile); } catch {}
+  }
 });

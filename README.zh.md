@@ -53,10 +53,10 @@
 
 ## 核心特色
 
-- **精確定義的 OpenAI 相容介面（`Chat` 與 `Responses`）：** 支援 `GET /v1/models`、`POST /v1/chat/completions` 與 `POST /v1/responses`，涵蓋 JSON 與增量 SSE 串流、`reasoning_effort` / `reasoning.effort` 思考強度對應，以及靜態 PNG/JPEG/WebP 圖片輸入。
+- **精確定義的 OpenAI 相容介面（`Chat` 與 `Responses`）：** 支援 `GET /v1/models`、`POST /v1/chat/completions` 與 `POST /v1/responses`，涵蓋 JSON 與增量 SSE 串流、結構化輸出（Structured Outputs：透過 Chat `response_format` 與 Responses `text.format` 支援 `json_schema` 及 `json_object`，送出前通過有界 JSON Schema 驗證）、`native_search` 公開網頁 `url_citation` 引用標註、`reasoning_effort` / `reasoning.effort` 思考強度對應，以及靜態 PNG/JPEG/WebP 圖片輸入。
 - **客戶端自主工具權限（Caller-Owned Tools）：** 由客戶端宣告函數與 JSON Schema（含 Responses `type: "namespace"` 工具分組）、在本機執行獲准呼叫並回傳結果；閘道嚴格驗證工具名稱與參數結構，絕不代為執行 Shell 指令或存取你的專案目錄。
 - **零第三方 Runtime 依賴與嚴密安全邊界：** 零外部生產套件；強制檢查 `0700`/`0600` 私密目錄與檔案權限、採用 `scrypt` 管理密碼雜湊、以 SHA-256 驗證雜湊搭配 `0600` 本機私密金鑰保存（僅於建立當下或通過驗證與 CSRF 保護後按需回傳）、嚴格 `Origin`/`Host`/`X-CSRF-Token` 後台寫入保護，以及預設關閉且具 SSRF 防護的公開圖片下載。
-- **中英雙語現代化維運後台（`English` / `繁體中文`）：** 支援桌面與手機響應式檢視及深淺色主題；內建帳戶池狀態脈搏與請求延遲快照圖、側欄帳戶檢視器（Inspector Drawer）、一鍵批量唯讀更新 **目前用量（Current usage）** 與 **每週限額（Weekly limit）**、客戶端快速連接設定範本（`Codex CLI`、`Cline`、`cURL`）、可隨時複製或撤銷的 API 金鑰管理、明確記錄或確認接受 Gemini 服務條款，以及遮罩後的上游 HTTP/gRPC 診斷資訊。
+- **中英雙語現代化維運後台（`English` / `繁體中文`）：** 支援桌面與手機響應式檢視及深淺色主題；在 `/admin` **Overview（總覽）** 與側欄帳戶檢視器（Account Inspector Drawer）內提供帳戶池狀態脈搏、請求延遲快照圖，以及僅統計中繼資料、零提示詞日誌的各帳戶 × 各模型觀測遙測（`gemini-hydrogen`、`gemini-argon`、`gemini-flash-lite` 請求數、輸出位元組、重試、軟錯誤與錯誤分類）；支援一鍵批量唯讀更新 **目前用量（Current usage）** 與 **每週限額（Weekly limit）**、快速連接設定範本（`Codex CLI`、`Cline`、`cURL`）、可隨時複製或撤銷的 API 金鑰管理、明確記錄或確認接受 Gemini 服務條款，以及遮罩後的上游 HTTP/gRPC 診斷資訊。
 
 | 淺色主題 —— 帳戶側欄檢視與狀態脈搏 | 手機版後台 —— 繁體中文介面 |
 |---|---|
@@ -215,8 +215,10 @@ wire_api = "responses"
 |---|---|
 | **API 端點** | `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses` |
 | **函數工具** | 支援有界 JSON Schema 驗證、`auto`/`none`/`required`/指定函數 `tool_choice` 及 Responses 純函數 `namespace` 分組；工具一律由客戶端執行 |
+| **結構化輸出** | 支援 Chat `response_format` 與 Responses `text.format`（`json_schema` 與 `json_object`），於回應送出前通過有界 JSON Schema 驗證器校驗（不可與 `native_search: true` 同時使用） |
 | **圖片輸入** | 單次請求最多 `4` 張靜態 PNG / JPEG / WebP（合計 `<= 2 MiB`），支援 `data:` URL 及預設關閉、具 SSRF 防護的公開 HTTP(S) 圖片網址 |
-| **Google 搜尋** | 明確傳入 `"native_search": true`（限 `gemini-argon`、thinking `2`、純文字 `<= 16 KiB`，且不可同輪混用客戶端工具或圖片） |
+| **Google 搜尋** | 明確傳入 `"native_search": true`（限 `gemini-argon`、thinking `2`、純文字 `<= 16 KiB`，且不可同輪混用客戶端工具或圖片）；於取得已驗證公開網頁來源時對應為 OpenAI `url_citation` 引用標註 |
+| **觀測遙測統計** | 於 `/admin` **總覽（Overview）** 與帳戶檢視器抽屜（Account Inspector Drawer）提供記憶體內各帳戶 × 各模型統計（`gemini-hydrogen`、`gemini-argon`、`gemini-flash-lite` 請求數、輸出位元組、重試、軟錯誤及錯誤分類，零提示詞日誌） |
 | **思考控制** | 支援同步 `thinking_level`（`0`、`1`、`2`、`4`，預設 `2`）與 OpenAI `reasoning_effort`（`none`/`minimal`→`0`、`low`→`1`、`medium`/`high`/`xhigh`→`2`）；非同步 Deep Think（`3`）會於本機直接拒絕 |
 | **用量統計** | 回傳標示 `estimated: true` 的啟發式 token 估算值，並非 Google 官方精確計費數據 |
 
@@ -235,7 +237,7 @@ wire_api = "responses"
 
 | 文件 | 說明 |
 |---|---|
-| [API 支援契約（`docs/API_SUPPORT.md`）](docs/API_SUPPORT.md) | 端點規格、事件順序、工具驗證、圖片上傳、原生搜尋與錯誤碼對照 |
+| [API 支援契約（`docs/API_SUPPORT.md`）](docs/API_SUPPORT.md) | 端點規格、事件順序、結構化輸出、工具驗證、圖片上傳、原生搜尋引用標註與錯誤碼對照 |
 | [維運指南（`docs/OPERATIONS.md`）](docs/OPERATIONS.md) | 私密初始化、`.env` 設定、Docker Compose、遠端 TLS、`launchd` 常駐與排錯 |
 | [帳戶生命週期（`docs/ACCOUNT_LIFECYCLE.md`）](docs/ACCOUNT_LIFECYCLE.md) | Google OAuth 登入、明確條款同意、唯讀訂閱層級與官方配額讀取語義 |
 | [完成與失敗語義（`docs/COMPLETION_CONTRACT.md`）](docs/COMPLETION_CONTRACT.md) | 部分輸出保留原則、`GENERATION_FAILED` 零輸出終局合約與責任分類 |
