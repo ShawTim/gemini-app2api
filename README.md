@@ -53,10 +53,10 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 
 ## Key Features
 
-- **Scoped OpenAI Compatibility (`Chat` & `Responses`):** Supports `GET /v1/models`, `POST /v1/chat/completions`, and `POST /v1/responses` with JSON or incremental SSE streaming, `reasoning_effort` / `reasoning.effort` mapping, and static PNG/JPEG/WebP image input.
+- **Scoped OpenAI Compatibility (`Chat` & `Responses`):** Supports `GET /v1/models`, `POST /v1/chat/completions`, and `POST /v1/responses` with JSON or incremental SSE streaming, Structured Outputs (`json_schema` and `json_object` via Chat `response_format` and Responses `text.format`, schema-validated before delivery), `native_search` public-web `url_citation` annotations, `reasoning_effort` / `reasoning.effort` mapping, and static PNG/JPEG/WebP image input.
 - **Caller-Owned Function Tools:** Clients declare JSON Schema functions (including Responses `type: "namespace"` groups), execute approved calls locally, and replay results. The gateway validates every tool name and argument schema before emission—never executing shell commands or touching your workspace.
 - **Zero-Dependency, Security-First Runtime:** Zero third-party production npm packages. Enforces `0700`/`0600` private state permissions, `scrypt` admin password hashing, SHA-256 API key lookup digests with `0600` private-state key storage (returned only at creation or via authenticated CSRF-protected reveal requests), strict `Origin`/`Host`/`X-CSRF-Token` admin protections, and SSRF-guarded opt-in remote image fetching.
-- **Bilingual Operations Console (`English` / `繁體中文`):** Inspect pool pulse and request-latency snapshot sparklines, review per-account **Current usage** / **Weekly limit** bars and model states in a slide-over inspector drawer, copy ready-to-paste client configs (`Codex CLI`, `Cline`, `cURL`), manage copyable client API keys, explicitly review or accept Gemini Terms of Service, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
+- **Bilingual Operations Console (`English` / `繁體中文`):** Inspect pool pulse, request-latency snapshot sparklines, and metadata-only per-account × per-model telemetry (`gemini-hydrogen`, `gemini-argon`, `gemini-flash-lite` requests, output bytes, retries, soft-errors, and error categories—with zero prompt logging) across `/admin` **Overview** and the slide-over account inspector drawer; review per-account **Current usage** / **Weekly limit** bars and model states, copy ready-to-paste client configs (`Codex CLI`, `Cline`, `cURL`), manage copyable client API keys, explicitly review or accept Gemini Terms of Service, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
 
 | Light Theme — Account Inspector & Pool Pulse | Mobile Console — Traditional Chinese (`繁體中文`) |
 |---|---|
@@ -215,8 +215,10 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 |---|---|
 | **Endpoints** | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses` |
 | **Function Tools** | Bounded JSON Schema validation, `auto`/`none`/`required`/named `tool_choice`, and Responses function-only `namespace` groups; executed strictly by the caller |
+| **Structured Outputs** | Chat `response_format` and Responses `text.format` (`json_schema` and `json_object`), validated against the bounded JSON Schema validator before response delivery (not combined with `native_search: true`) |
 | **Image Input** | Up to `4` static PNG/JPEG/WebP images (`<= 2 MiB` combined) via `data:` URLs or opt-in SSRF-guarded public HTTP(S) URLs |
-| **Google Search** | Opt-in `"native_search": true` (`gemini-argon`, thinking `2`, text-only `<= 16 KiB`, no caller tools/images in the same turn) |
+| **Google Search** | Opt-in `"native_search": true` (`gemini-argon`, thinking `2`, text-only `<= 16 KiB`, no caller tools/images in the same turn); maps verified public-web sources to OpenAI `url_citation` annotations when present |
+| **Observability Telemetry** | In-memory per-account × per-model counters (`gemini-hydrogen`, `gemini-argon`, `gemini-flash-lite` requests, output bytes, retries, soft-errors, and error categories) in `/admin` **Overview** and the Account Inspector Drawer (zero prompt logging) |
 | **Thinking Control** | Synchronous `thinking_level` (`0`, `1`, `2`, `4`; default `2`) and OpenAI `reasoning_effort` (`none`/`minimal`→`0`, `low`→`1`, `medium`/`high`/`xhigh`→`2`); async Deep Think (`3`) rejected locally |
 | **Usage Accounting** | Heuristic token estimates (`estimated: true`)—not official Google token counts or billing figures |
 
@@ -235,7 +237,7 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 
 | Document | Contents |
 |---|---|
-| [API Support & Contract (`docs/API_SUPPORT.md`)](docs/API_SUPPORT.md) | Endpoints, request/event schemas, tools, images, native search, and error codes |
+| [API Support & Contract (`docs/API_SUPPORT.md`)](docs/API_SUPPORT.md) | Endpoints, request/event schemas, structured outputs, tools, images, native search citations, and error codes |
 | [Operations Guide (`docs/OPERATIONS.md`)](docs/OPERATIONS.md) | Setup, `.env` config, Docker Compose, reverse-proxy TLS, `launchd` supervision, and troubleshooting |
 | [Account Lifecycle (`docs/ACCOUNT_LIFECYCLE.md`)](docs/ACCOUNT_LIFECYCLE.md) | Google OAuth sign-in, explicit Gemini ToS consent, subscription snapshots, and quota semantics |
 | [Completion Contract (`docs/COMPLETION_CONTRACT.md`)](docs/COMPLETION_CONTRACT.md) | Partial-output preservation, `GENERATION_FAILED` zero-output handling, and caller dispositions |
