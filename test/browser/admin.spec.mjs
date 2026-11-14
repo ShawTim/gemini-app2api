@@ -1671,3 +1671,140 @@ test("drawer distinguishes capacity-saturated signed-in accounts from sign-in er
 
   expect(f.seen).toHaveLength(0);
 });
+
+test("overview and account drawer render bilingual metadata-only model telemetry without prompt leakage or overflow", async ({ page }) => {
+  f.app.provider.runTurn = async (_acc, canonical, emit) => {
+    if (canonical.model === "gemini-argon") {
+      throw Object.assign(new Error("SOFT_ERR_SECRET"), {
+        code: "NATIVE_SOFT_ERROR_RESPONSE",
+        status: 502,
+      });
+    }
+    const content = "SECRET_BROWSER_OUTPUT";
+    const calls = [{ id: "c1", name: "lookup", arguments: "{\"k\":\"SECRET_BROWSER_ARG\"}" }];
+    emit({ type: "delta", text: content });
+    return { content, calls, nativeEvidence: { modelCompleted: true } };
+  };
+
+  const okRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: {
+      model: "gemini-hydrogen",
+      messages: [{ role: "user", content: "SECRET_BROWSER_PROMPT_1" }],
+    },
+  });
+  expect(okRes.status).toBe(200);
+  await okRes.text();
+
+  const errRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: {
+      model: "gemini-argon",
+      messages: [{ role: "user", content: "SECRET_BROWSER_PROMPT_2" }],
+    },
+  });
+  expect(errRes.status).toBe(502);
+  await errRes.text();
+
+  await login(page);
+  await route(page, "overview");
+
+  const panel = page.locator("#overview-model-telemetry");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("Model Traffic & Reliability");
+  await expect(panel).toContainText("Metadata only · Zero prompt logging");
+  const hydrogenCard = panel.locator('[data-telemetry-model="gemini-hydrogen"]');
+  await expect(hydrogenCard).toContainText("1/1 ok");
+  const argonCard = panel.locator('[data-telemetry-model="gemini-argon"]');
+  await expect(argonCard).toContainText("Soft error");
+  await expect(argonCard).toContainText("1");
+  const panelText = await panel.textContent();
+  expect(panelText).not.toMatch(/SECRET_BROWSER_PROMPT|SECRET_BROWSER_OUTPUT|SECRET_BROWSER_ARG|SOFT_ERR_SECRET/);
+
+  // Verify light + dark theme desktop & mobile zero overflow.
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 860 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.locator("#theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  await page.locator("#language-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-HK");
+  await expect(panel).toContainText("模型流量與穩定性分佈");
+  await expect(panel).toContainText("僅統計中繼資料 · 零提示詞日誌");
+  await expect(panel).toContainText("軟錯誤");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await route(page, "accounts");
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  const drawer = page.locator("#account-drawer");
+  const drawerTelemetry = drawer.locator('[data-account-model-telemetry="acc-0"]');
+  await expect(drawerTelemetry).toBeVisible();
+  await expect(drawerTelemetry).toContainText("各模型流量與錯誤分佈");
+  await expect(drawerTelemetry).toContainText("gemini-hydrogen");
+  await expect(drawerTelemetry).toContainText("軟錯誤");
+  expect(await drawerTelemetry.textContent()).not.toMatch(/SECRET_BROWSER/);
+
+  // Scroll drawer body and confirm re-render on in-drawer action preserves scrollTop and focus.
+  const drawerTestBtn = drawer.locator('[data-action="test-model"][data-id="acc-0"][data-model="gemini-hydrogen"]');
+  await drawerTestBtn.focus();
+  await page.evaluate(() => {
+    const body = document.getElementById("drawer-body");
+    body.scrollTop = body.scrollHeight;
+  });
+  const scrollBefore = await page.evaluate(() => document.getElementById("drawer-body").scrollTop);
+  expect(scrollBefore).toBeGreaterThan(60);
+  await page.keyboard.press("Enter");
+  await expect(drawerTestBtn).toBeEnabled();
+  await expect(drawerTestBtn).toBeFocused();
+  expect(await page.evaluate(() => document.getElementById("drawer-body").scrollTop)).toBe(scrollBefore);
+
+  await page.locator("#drawer-close").click();
+  await expect(drawer).toBeHidden();
+  await page.locator("#language-toggle").click();
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(drawerTelemetry).toContainText("Per-Model Traffic & Errors");
+  await page.locator("#drawer-close").click();
+  await expect(drawer).toBeHidden();
+});
+
+test("demo mode computes ready dynamically across mutations and scenarios while displaying hydrogen telemetry", async ({ page }) => {
+  await page.goto(f.base + "/admin/?demo=1");
+  await expect(page.locator('[data-page="accounts"]')).toBeVisible();
+
+  await page.locator('[data-account-card="acct_primary"] [data-action="open-drawer"]').click();
+  const drawerTelemetry = page.locator('#account-drawer [data-account-model-telemetry="acct_primary"]');
+  await expect(drawerTelemetry).toBeVisible();
+  await expect(drawerTelemetry).toContainText("gemini-hydrogen");
+  await page.locator("#drawer-close").click();
+
+  await route(page, "overview");
+  await expect(page.locator("#overview-status")).toContainText("Local routing available");
+  await expect(page.locator("#overview-status")).toContainText("2 routable accounts");
+  await expect(page.locator('#overview-model-telemetry [data-telemetry-model="gemini-hydrogen"]')).toContainText("1,893/1,904 ok");
+
+  // Disabling remaining eligible accounts updates demo.ready dynamically to false.
+  await route(page, "accounts");
+  await page.locator('[data-action="toggle-account"][data-id="acct_secondary"]').click();
+  await expect(page.locator('[data-action="toggle-account"][data-id="acct_secondary"]')).toHaveAttribute("aria-checked", "false");
+  await page.locator('[data-action="toggle-account"][data-id="acct_reserve"]').click();
+  await expect(page.locator('[data-action="toggle-account"][data-id="acct_reserve"]')).toHaveAttribute("aria-checked", "false");
+
+  await route(page, "overview");
+  await expect(page.locator("#overview-status")).toContainText("Local routing unavailable");
+  await expect(page.locator("#overview-status")).toContainText("0 routable accounts");
+
+  // Scenario switching derives ready truthfully for both empty and auth fixtures.
+  await page.locator("#demo-scenario").selectOption("empty");
+  await expect(page.locator("#overview-status")).toContainText("Local routing unavailable");
+  await expect(page.locator('#overview-model-telemetry [data-telemetry-model="gemini-hydrogen"]')).toContainText("Idle");
+
+  await page.locator("#demo-scenario").selectOption("auth");
+  await expect(page.locator("#overview-status")).toContainText("Local routing available");
+  await expect(page.locator("#overview-status")).toContainText("1 routable accounts");
+
+  expect(f.seen).toHaveLength(0);
+});

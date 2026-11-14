@@ -39,7 +39,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -773,4 +773,92 @@ test('accountRoutingLabel distinguishes concurrency saturation, sign-in required
   assert.equal(demoOverview.accounts[1].routingEligible, true);
   assert.equal(demoOverview.accounts[2].routingEligible, true);
   assert.equal(demoOverview.accounts[3].routingEligible, false);
+});
+
+test('demo.ready derives dynamically from eligible accounts across makeDemo, setDemoScenario and demoApi mutations', async (t) => {
+  const f = fixture(true);
+  f.S.authenticated = true;
+  t.after(() => {
+    f.S.authenticated = false;
+    clearInterval(f.S.timer);
+  });
+
+  // Initial overview/diagnostics reflect eligible accounts (secondary + reserve).
+  let overview = await f.demoApi('/overview', 'GET');
+  let diag = await f.demoApi('/diagnostics', 'GET');
+  assert.equal(overview.ready, true);
+  assert.equal(diag.ready, true);
+  assert.equal(overview.modelTelemetry.zeroPromptLogging, true);
+  assert.ok(overview.modelTelemetry.byModel['gemini-hydrogen'].requests > 0);
+  assert.ok(overview.accounts[0].modelTelemetry['gemini-hydrogen'].requests > 0);
+  assert.equal(diag.modelTelemetry.byModel['gemini-hydrogen'].requests, overview.modelTelemetry.byModel['gemini-hydrogen'].requests);
+
+  // Disabling the two routing-eligible accounts flips ready to false on both overview & diagnostics.
+  await f.demoApi('/accounts/acct_secondary', 'PATCH', { enabled: false });
+  assert.equal((await f.demoApi('/overview', 'GET')).ready, true);
+  await f.demoApi('/accounts/acct_reserve', 'PATCH', { enabled: false });
+  overview = await f.demoApi('/overview', 'GET');
+  diag = await f.demoApi('/diagnostics', 'GET');
+  assert.equal(overview.ready, false);
+  assert.equal(diag.ready, false);
+
+  // Re-enabling an eligible account flips ready back to true; deleting it flips ready to false.
+  await f.demoApi('/accounts/acct_reserve', 'PATCH', { enabled: true });
+  assert.equal((await f.demoApi('/diagnostics', 'GET')).ready, true);
+  await f.demoApi('/accounts/acct_reserve', 'DELETE');
+  assert.equal((await f.demoApi('/overview', 'GET')).ready, false);
+  assert.equal((await f.demoApi('/diagnostics', 'GET')).ready, false);
+
+  // Empty scenario zeroes telemetry and derives ready = false.
+  f.setDemoScenario('empty');
+  const emptyOverview = await f.demoApi('/overview', 'GET');
+  const emptyDiag = await f.demoApi('/diagnostics', 'GET');
+  assert.equal(emptyOverview.ready, false);
+  assert.equal(emptyDiag.ready, false);
+  assert.equal(emptyOverview.modelTelemetry.byModel['gemini-hydrogen'].requests, 0);
+
+  // Auth scenario derives ready from remaining eligible reserve account, then flips to false when disabled.
+  f.setDemoScenario('auth');
+  let authOverview = await f.demoApi('/overview', 'GET');
+  assert.equal(authOverview.ready, authOverview.accounts.some(f.accountRoutingEligible));
+  assert.equal(authOverview.ready, true);
+  await f.demoApi('/accounts/acct_reserve', 'PATCH', { enabled: false });
+  f.S.authenticated = false;
+  authOverview = await f.demoApi('/overview', 'GET');
+  assert.equal(authOverview.ready, false);
+  assert.equal((await f.demoApi('/diagnostics', 'GET')).ready, false);
+  clearInterval(f.S.timer);
+});
+
+test('overviewModelTelemetry and accountModelTelemetryView render bilingual metadata-only telemetry', () => {
+  const f = fixture(true);
+  f.S.overview = f.makeDemo();
+  f.S.accounts = f.S.overview.accounts;
+
+  assert.equal(f.formatBytes(0), '0 B');
+  assert.equal(f.formatBytes(512), '512 B');
+  assert.equal(f.formatBytes(1536), '1.5 KB');
+  assert.equal(f.formatBytes(1048576), '1 MB');
+  assert.equal(f.formatBytes(null), '—');
+
+  f.S.lang = 'en';
+  f.createdTexts.length = 0;
+  f.overviewModelTelemetry();
+  f.accountModelTelemetryView(f.S.accounts[0]);
+  const enJoined = f.createdTexts.join('\n');
+  assert.match(enJoined, /Model Traffic & Reliability/);
+  assert.match(enJoined, /Metadata only · Zero prompt logging/);
+  assert.match(enJoined, /Per-Model Traffic & Errors/);
+  assert.match(enJoined, /gemini-hydrogen/);
+  assert.match(enJoined, /Soft error/);
+
+  f.S.lang = 'zh-HK';
+  f.createdTexts.length = 0;
+  f.overviewModelTelemetry();
+  f.accountModelTelemetryView(f.S.accounts[0]);
+  const zhJoined = f.createdTexts.join('\n');
+  assert.match(zhJoined, /模型流量與穩定性分佈/);
+  assert.match(zhJoined, /僅統計中繼資料 · 零提示詞日誌/);
+  assert.match(zhJoined, /各模型流量與錯誤分佈/);
+  assert.match(zhJoined, /軟錯誤/);
 });

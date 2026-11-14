@@ -769,6 +769,99 @@ function setupJourney() {
   else { title = L('Your next operation, without the noise', '專注下一項操作'); note = L('Review current routing and failures below. Observations are historical evidence, not a live upstream health probe.', '在下方檢查目前路由及失敗紀錄。觀察屬歷史證據，並非即時上游健康探測。'); action = link('requests', L('Explore requests', '檢視請求紀錄'), { class: 'button primary' }); }
   return el('section', { class: 'panel setup-journey', id: 'setup-journey' }, el('div', { class: 'journey-main' }, el('div', {}, el('p', { class: 'eyebrow' }, L('NEXT SAFE STEP', '下一步')), el('h2', {}, title), el('p', {}, note)), action), fold('setup-progress', L('Connection journey & evidence', '接入流程與證據'), el('ol', { class: 'journey-steps' }, steps.map(([label, done, detail]) => el('li', { 'data-observed': String(done) }, el('span', { class: 'journey-marker', 'aria-hidden': 'true' }, done ? '✓' : '—'), el('div', {}, el('strong', {}, label), el('p', {}, detail)), badge(done ? L('Observed', '已觀察') : L('Not observed here', '本畫面未觀察'), done ? 'teal' : ''))))));
 }
+const TELEMETRY_ERROR_CATEGORIES = ['quota', 'auth', 'precondition', 'transient', 'soft_error', 'protocol', 'other'];
+function formatBytes(bytes) {
+  if (!finite(bytes) || bytes < 0) return '—';
+  if (bytes === 0) return '0 B';
+  if (bytes < 1024) return `${num(bytes)} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) { value /= 1024; idx++; }
+  return `${num(Math.round(value * 10) / 10)} ${units[idx]}`;
+}
+function telemetryErrorLabel(category) {
+  return ({
+    quota: L('Quota', '配額'),
+    auth: L('Auth', '驗證'),
+    precondition: L('Precondition', '前置條件'),
+    transient: L('Transient', '暫時性'),
+    soft_error: L('Soft error', '軟錯誤'),
+    protocol: L('Protocol', '協議'),
+    other: L('Other', '其他'),
+  })[category] || category;
+}
+function telemetryErrorChips(stats = {}) {
+  const ec = stats.errorCounts || {};
+  const nonzero = TELEMETRY_ERROR_CATEGORIES.filter(cat => (ec[cat] || 0) > 0);
+  if (!nonzero.length) {
+    return el('div', { class: 'telemetry-errors' },
+      el('span', { class: 'telemetry-error-none' }, L('0 recorded errors', '0 個錯誤紀錄')));
+  }
+  return el('div', { class: 'telemetry-errors', 'aria-label': L('Error breakdown', '錯誤分類統計') },
+    nonzero.map(cat => el('span', { class: `telemetry-error-chip ${cat === 'quota' || cat === 'soft_error' ? 'warn' : cat === 'auth' || cat === 'protocol' ? 'err' : ''}`.trim(), 'data-error-category': cat },
+      el('span', {}, telemetryErrorLabel(cat)),
+      el('strong', { class: 'number' }, num(ec[cat])))));
+}
+function overviewModelTelemetry() {
+  const o = S.overview || {};
+  const models = o.models || ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'];
+  const byModel = o.modelTelemetry?.byModel || {};
+  return panel(
+    L('Model Traffic & Reliability', '模型流量與穩定性分佈'),
+    L('Metadata only · Zero prompt logging', '僅統計中繼資料 · 零提示詞日誌'),
+    body(el('div', { class: 'telemetry-grid' }, models.map(model => {
+      const s = byModel[model] || {};
+      const reqs = s.requests ?? 0;
+      const ok = s.successes ?? 0;
+      const fail = s.failures ?? 0;
+      const inFlight = s.inFlight ?? 0;
+      const tone = fail > 0 && ok === 0 ? 'rose' : reqs > 0 ? 'teal' : '';
+      const statusText = reqs > 0 ? L(`${num(ok)}/${num(reqs)} ok`, `${num(ok)}/${num(reqs)} 成功`) : L('Idle', '尚無流量');
+      return el('article', { class: 'telemetry-card', 'data-telemetry-model': model },
+        el('div', { class: 'telemetry-card-head' },
+          el('div', { class: 'telemetry-model-title' },
+            mono(model),
+            inFlight > 0 && badge(L(`${num(inFlight)} active`, `${num(inFlight)} 執行中`), 'amber')),
+          badge(statusText, tone)),
+        el('dl', { class: 'telemetry-stats' },
+          el('div', { class: 'telemetry-stat' }, el('dt', {}, L('Requests', '請求')), el('dd', { class: 'number' }, num(reqs))),
+          el('div', { class: 'telemetry-stat' }, el('dt', {}, L('Output bytes', '輸出大小')), el('dd', { class: 'number mono' }, formatBytes(s.outputBytes ?? 0))),
+          el('div', { class: 'telemetry-stat' }, el('dt', {}, L('Retries', '重試')), el('dd', { class: 'number' }, num(s.retries ?? 0))),
+          el('div', { class: 'telemetry-stat' }, el('dt', {}, L('Soft errors', '軟錯誤')), el('dd', { class: 'number' }, num(s.softErrors ?? 0))),
+          el('div', { class: 'telemetry-stat' }, el('dt', {}, L('Quota errors', '配額錯誤')), el('dd', { class: 'number' }, num(s.quotaErrors ?? 0))),
+          el('div', { class: 'telemetry-stat' }, el('dt', {}, L('Failures', '失敗')), el('dd', { class: 'number' }, num(fail)))),
+        telemetryErrorChips(s));
+    }))),
+    badge(L('Zero prompt logging', '零提示詞日誌'), 'teal'),
+    { id: 'overview-model-telemetry' },
+  );
+}
+function accountModelTelemetryView(a) {
+  const models = S.overview?.models || Object.keys(a.modelTelemetry || {}) || ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'];
+  const matrix = a.modelTelemetry || {};
+  return el('section', { class: 'drawer-section drawer-model-telemetry', 'data-account-model-telemetry': a.id },
+    el('h3', { class: 'drawer-section-title' },
+      el('span', {}, L('Per-Model Traffic & Errors', '各模型流量與錯誤分佈')),
+      el('span', { class: 'telemetry-privacy-tag' }, L('Zero prompt logging', '零提示詞日誌'))),
+    el('div', { class: 'drawer-telemetry-list' }, models.map(model => {
+      const s = matrix[model] || {};
+      return el('article', { class: 'drawer-telemetry-item', 'data-account-telemetry-model': model },
+        el('div', { class: 'drawer-telemetry-head' },
+          el('div', { class: 'telemetry-model-title' },
+            mono(model),
+            (s.inFlight ?? 0) > 0 && badge(L(`${num(s.inFlight)} active`, `${num(s.inFlight)} 執行中`), 'amber')),
+          el('span', { class: 'telemetry-last-used' },
+            s.lastUsedAt ? relativeTime(s.lastUsedAt) : L('Not used yet', '尚未呼叫'))),
+        el('div', { class: 'drawer-telemetry-metrics number' },
+          el('span', {}, L(`${num(s.requests ?? 0)} reqs`, `${num(s.requests ?? 0)} 請求`)),
+          el('span', { class: 'mono' }, formatBytes(s.outputBytes ?? 0)),
+          el('span', {}, L(`${num(s.retries ?? 0)} retries`, `${num(s.retries ?? 0)} 重試`)),
+          el('span', {}, L(`${num(s.softErrors ?? 0)} soft`, `${num(s.softErrors ?? 0)} 軟錯誤`)),
+          el('span', {}, L(`${num(s.failures ?? 0)} fail`, `${num(s.failures ?? 0)} 失敗`))),
+        telemetryErrorChips(s));
+    })));
+}
 function overviewPage() {
   const o = S.overview, m = o.metrics, accounts = S.accounts || o.accounts, routing = localRoutingState(), evidence = modelEvidence(accounts);
   const samples = o.requests.some(r => finite(r.durationMs));
@@ -777,6 +870,7 @@ function overviewPage() {
   const setupNeeded = !accounts.some(a => a.enabled && (a.authenticationStatus === 'signed_in' || a.status === 'ready')) || !o.keyCount;
   return [
     panel(L('Gateway', '閘道'), null, body(el('div', { class: 'overview-status', id: 'overview-status' }, badge(routing.label, routing.ready ? 'teal' : 'amber'), el('span', {}, L(`${accounts.filter(accountRoutingEligible).length} routable accounts`, `${accounts.filter(accountRoutingEligible).length} 個可路由帳戶`)), el('span', {}, L(`${m.requests} requests · ${m.errors} errors since restart`, `重啟後 ${m.requests} 個請求 · ${m.errors} 個錯誤`))), el('div', { class: 'actions overview-shortcuts' }, link('playground', [icon('playground'), L('Test request', '測試請求')], { id: 'open-test-request', class: 'button primary' }), link('models', L('Client setup', '客戶端設定'), { class: 'button' }))), null, { id: 'overview-quickstart' }),
+    overviewModelTelemetry(),
     setupNeeded ? setupJourney() : fold('overview-setup', L('Client connection guide', '客戶端接入指引'), setupJourney(), false, { class: 'panel section-fold' }),
     panel(L('Recent requests', '最近請求'), null, o.requests.length ? requestsTable(o.requests.slice(0, 5)) : empty(L('No requests yet', '尚未有請求'), L('Send a test request to check the gateway.', '發送測試請求以檢查閘道。')), link('requests', L('All requests →', '全部請求 →'), { class: 'button quiet' })),
     fold('overview-accounts', L('Account usage snapshots', '帳戶用量快照'), body(table([t('account'), t('status'), L('Google quota snapshot', 'Google 配額快照')], accounts.slice(0, 5).map(a => [accountIdentity(a), accountStatus(a), quotaView(a)]), L('Account routing snapshots', '帳戶路由快照')), link('accounts', L('Manage accounts →', '管理帳戶 →'), { class: 'button quiet' })), false, { class: 'panel section-fold' }),
@@ -1173,6 +1267,7 @@ function renderAccountDrawer() {
     accountQuotaView(a),
     accountSubscriptionView(a),
     el('section', { class: 'account-models', id: `account-models-${a.id}`, tabindex: '-1' }, el('h3', {}, L('Model Access & Verification', '模型存取與驗證')), accountModelStates(a)),
+    accountModelTelemetryView(a),
     el('section', { class: 'drawer-section' },
       el('h3', { class: 'drawer-section-title' }, L('Gemini Main-Service Terms', 'Gemini 主服務條款')),
       accountTermsView(a)),
@@ -1717,18 +1812,106 @@ function syncDemoAccountRouting(a) {
   a.routingEligible = Boolean(a.routingAllowed && a.enabled && a.status === 'ready' && !accountCoolingDown(a) && !accountNeedsSignIn(a) && (!finite(a.inFlight) || a.inFlight < 2));
   return a;
 }
+function emptyDemoTelemetryEntry() {
+  return {
+    requests: 0, successes: 0, failures: 0, inFlight: 0, outputBytes: 0, retries: 0, softErrors: 0, quotaErrors: 0,
+    errorCounts: { quota: 0, auth: 0, precondition: 0, transient: 0, soft_error: 0, protocol: 0, other: 0 },
+    lastUsedAt: null,
+  };
+}
+function emptyDemoModelTelemetry(models = ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']) {
+  return { zeroPromptLogging: true, models: [...models], byModel: Object.fromEntries(models.map(m => [m, emptyDemoTelemetryEntry()])) };
+}
+function summarizeDemoModelTelemetry(accounts = [], models = ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']) {
+  const byModel = Object.fromEntries(models.map(m => [m, emptyDemoTelemetryEntry()]));
+  for (const a of accounts) {
+    for (const m of models) {
+      const src = a.modelTelemetry?.[m];
+      if (!src) continue;
+      const dst = byModel[m];
+      dst.requests += src.requests || 0;
+      dst.successes += src.successes || 0;
+      dst.failures += src.failures || 0;
+      dst.inFlight += src.inFlight || 0;
+      dst.outputBytes += src.outputBytes || 0;
+      dst.retries += src.retries || 0;
+      dst.softErrors += src.softErrors || 0;
+      dst.quotaErrors += src.quotaErrors || 0;
+      for (const cat of TELEMETRY_ERROR_CATEGORIES) dst.errorCounts[cat] += src.errorCounts?.[cat] || 0;
+      if (src.lastUsedAt && (!dst.lastUsedAt || Date.parse(src.lastUsedAt) > Date.parse(dst.lastUsedAt))) dst.lastUsedAt = src.lastUsedAt;
+    }
+  }
+  return { zeroPromptLogging: true, models: [...models], byModel };
+}
+function syncDemoState(target = demo) {
+  if (!target) return target;
+  target.accounts.forEach(syncDemoAccountRouting);
+  target.ready = target.accounts.some(accountRoutingEligible);
+  return target;
+}
 function makeDemo() {
   const now = Date.now(), ago = seconds => new Date(now - seconds * 1000).toISOString();
+  const models = ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'];
+  const entry = (requests, successes, failures, inFlight, outputBytes, retries, softErrors, quotaErrors, errorCounts, lastUsedAt) => ({
+    requests, successes, failures, inFlight, outputBytes, retries, softErrors, quotaErrors,
+    errorCounts: { quota: 0, auth: 0, precondition: 0, transient: 0, soft_error: 0, protocol: 0, other: 0, ...errorCounts },
+    lastUsedAt,
+  });
   const accounts = [
-    { id: 'acct_primary', label: 'Primary workspace', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(12), inFlight: 2, requests: 1842, failures: 8, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'official', status: 'ok', tier: 'pro', updatedAt: ago(600) } },
-    { id: 'acct_secondary', label: 'Secondary workspace', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(38), inFlight: 1, requests: 946, failures: 4, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null } },
-    { id: 'acct_reserve', label: 'Reserve account', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(280), inFlight: 0, requests: 218, failures: 6, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null } },
-    { id: 'acct_reconnect', label: 'Reconnect needed', enabled: false, status: 'login_required', authenticationStatus: 'login_required', cooldownUntil: null, lastUsedAt: ago(86400), inFlight: 0, requests: 126, failures: 2, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null } },
-  ].map(syncDemoAccountRouting);
-  const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: i % 3 ? 'gemini-argon' : 'gemini-flash-lite', accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
+    {
+      id: 'acct_primary', label: 'Primary workspace', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(12), inFlight: 2, requests: 1842, failures: 8,
+      quota: { source: 'unknown', remainingPercent: null, updatedAt: null },
+      subscription: { source: 'official', status: 'ok', tier: 'pro', updatedAt: ago(600) },
+      modelTelemetry: {
+        'gemini-hydrogen': entry(1120, 1115, 5, 1, 4820480, 4, 1, 2, { quota: 2, transient: 1, soft_error: 1, protocol: 1 }, ago(12)),
+        'gemini-argon': entry(540, 538, 2, 1, 2359296, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(45)),
+        'gemini-flash-lite': entry(182, 181, 1, 0, 421888, 1, 0, 0, { transient: 1 }, ago(140)),
+      },
+    },
+    {
+      id: 'acct_secondary', label: 'Secondary workspace', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(38), inFlight: 1, requests: 946, failures: 4,
+      quota: { source: 'unknown', remainingPercent: null, updatedAt: null },
+      subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
+      modelTelemetry: {
+        'gemini-hydrogen': entry(580, 578, 2, 1, 2146304, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(38)),
+        'gemini-argon': entry(266, 265, 1, 0, 983040, 1, 0, 0, { precondition: 1 }, ago(120)),
+        'gemini-flash-lite': entry(100, 99, 1, 0, 245760, 1, 0, 0, { protocol: 1 }, ago(310)),
+      },
+    },
+    {
+      id: 'acct_reserve', label: 'Reserve account', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(280), inFlight: 0, requests: 218, failures: 6,
+      quota: { source: 'unknown', remainingPercent: null, updatedAt: null },
+      subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
+      modelTelemetry: {
+        'gemini-hydrogen': entry(132, 129, 3, 0, 512000, 3, 1, 1, { quota: 1, transient: 1, soft_error: 1 }, ago(280)),
+        'gemini-argon': entry(62, 60, 2, 0, 229376, 1, 0, 1, { quota: 1, transient: 1 }, ago(640)),
+        'gemini-flash-lite': entry(24, 23, 1, 0, 61440, 0, 0, 0, { other: 1 }, ago(1420)),
+      },
+    },
+    {
+      id: 'acct_reconnect', label: 'Reconnect needed', enabled: false, status: 'login_required', authenticationStatus: 'login_required', cooldownUntil: null, lastUsedAt: ago(86400), inFlight: 0, requests: 126, failures: 2,
+      quota: { source: 'unknown', remainingPercent: null, updatedAt: null },
+      subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
+      modelTelemetry: {
+        'gemini-hydrogen': entry(72, 71, 1, 0, 262144, 0, 0, 0, { auth: 1 }, ago(86400)),
+        'gemini-argon': entry(38, 37, 1, 0, 131072, 0, 0, 0, { auth: 1 }, ago(90200)),
+        'gemini-flash-lite': entry(16, 16, 0, 0, 36864, 0, 0, 0, {}, ago(94800)),
+      },
+    },
+  ];
+  const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: ['gemini-hydrogen', 'gemini-argon', 'gemini-flash-lite'][i % 3], accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
   const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `sess_demo_${String(i + 1).padStart(3, '0')}`, accountId: i % 2 ? 'acct_secondary' : 'acct_primary', turns: [12, 6, 3, 8, 2, 17, 4, 1][i], lastUsedAt: ago(i * 58 + 12), inFlight: i < 3 ? 1 : 0 }));
   const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, sessionTtlMs: 1800000, maxSessions: 256 };
-  return { version: '1.2.0-demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true, metrics: { requests: 3132, errors: 20, active: 3, successRate: 99.36, p50Ms: 1248, p95Ms: 2840 }, accounts, sessions, failovers: [{ at: ago(285), sessionId: 'sess_demo_003', from: 'acct_reserve', to: 'acct_primary', reason: 'rate_limit' }, { at: ago(2140), sessionId: 'sess_demo_006', from: 'acct_primary', to: 'acct_secondary', reason: 'network_error' }], requests, audit: [{ id: 'audit_demo_4', at: ago(340), action: 'account.disabled', target: 'acct_reconnect' }, { id: 'audit_demo_3', at: ago(1250), action: 'key.created', target: 'Development client' }, { id: 'audit_demo_2', at: ago(5400), action: 'settings.updated', target: 'runtime' }, { id: 'audit_demo_1', at: ago(7200), action: 'admin.login', target: 'admin-session' }], models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'], settings, keyCount: 2, keys: [{ id: 'key_demo_client', label: 'Development client', secret: 'DEMO_ONLY_CLIENT_KEY_9f2b', preview: 'DEMO_O••••••9f2b', copyable: true, createdAt: ago(1250), lastUsedAt: ago(12), revokedAt: null }, { id: 'key_demo_automation', label: 'Local automation', secret: 'DEMO_ONLY_AUTOMATION_KEY_4c8a', preview: 'DEMO_O••••••4c8a', copyable: true, createdAt: ago(86400), lastUsedAt: ago(76), revokedAt: null }, { id: 'key_demo_retired', label: 'Retired test client', preview: null, copyable: false, createdAt: ago(172800), lastUsedAt: ago(86400), revokedAt: ago(7200) }] };
+  return syncDemoState({
+    version: '1.2.0-demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true,
+    metrics: { requests: 3132, errors: 20, active: 3, successRate: 99.36, p50Ms: 1248, p95Ms: 2840 },
+    accounts, sessions,
+    failovers: [{ at: ago(285), sessionId: 'sess_demo_003', from: 'acct_reserve', to: 'acct_primary', reason: 'rate_limit' }, { at: ago(2140), sessionId: 'sess_demo_006', from: 'acct_primary', to: 'acct_secondary', reason: 'network_error' }],
+    requests,
+    audit: [{ id: 'audit_demo_4', at: ago(340), action: 'account.disabled', target: 'acct_reconnect' }, { id: 'audit_demo_3', at: ago(1250), action: 'key.created', target: 'Development client' }, { id: 'audit_demo_2', at: ago(5400), action: 'settings.updated', target: 'runtime' }, { id: 'audit_demo_1', at: ago(7200), action: 'admin.login', target: 'admin-session' }],
+    models, modelTelemetry: summarizeDemoModelTelemetry(accounts, models), settings, keyCount: 2,
+    keys: [{ id: 'key_demo_client', label: 'Development client', secret: 'DEMO_ONLY_CLIENT_KEY_9f2b', preview: 'DEMO_O••••••9f2b', copyable: true, createdAt: ago(1250), lastUsedAt: ago(12), revokedAt: null }, { id: 'key_demo_automation', label: 'Local automation', secret: 'DEMO_ONLY_AUTOMATION_KEY_4c8a', preview: 'DEMO_O••••••4c8a', copyable: true, createdAt: ago(86400), lastUsedAt: ago(76), revokedAt: null }, { id: 'key_demo_retired', label: 'Retired test client', preview: null, copyable: false, createdAt: ago(172800), lastUsedAt: ago(86400), revokedAt: ago(7200) }],
+  });
 }
 const demo = DEMO ? makeDemo() : null;
 let demoBulkJob = null;
@@ -1743,10 +1926,10 @@ function setDemoScenario(value) {
   closeDialog(); S.demoScenario = value; S.demoFault = value === 'failure';
   if (S.demoFault) { refresh(); return; }
   const fixture = makeDemo();
-  if (value === 'empty') { fixture.accounts = []; fixture.sessions = []; fixture.failovers = []; fixture.requests = []; fixture.audit = []; fixture.keys = []; fixture.keyCount = 0; fixture.ready = false; fixture.metrics = { requests: 0, errors: 0, active: 0, successRate: null, p50Ms: null, p95Ms: null }; }
-  if (value === 'auth') { fixture.accounts[0].status = 'auth_error'; fixture.accounts[0].authenticationStatus = 'auth_error'; fixture.accounts[1].status = 'login_required'; fixture.accounts[1].authenticationStatus = 'login_required'; fixture.ready = false; }
+  if (value === 'empty') { fixture.accounts = []; fixture.sessions = []; fixture.failovers = []; fixture.requests = []; fixture.audit = []; fixture.keys = []; fixture.keyCount = 0; fixture.metrics = { requests: 0, errors: 0, active: 0, successRate: null, p50Ms: null, p95Ms: null }; fixture.modelTelemetry = emptyDemoModelTelemetry(fixture.models); }
+  if (value === 'auth') { fixture.accounts[0].status = 'auth_error'; fixture.accounts[0].authenticationStatus = 'auth_error'; fixture.accounts[1].status = 'login_required'; fixture.accounts[1].authenticationStatus = 'login_required'; }
   if (value === 'quota') fixture.accounts.forEach((a, i) => { a.quota = demoUsage(i); });
-  fixture.accounts.forEach(syncDemoAccountRouting);
+  syncDemoState(fixture);
   Object.keys(demo).forEach(key => delete demo[key]); Object.assign(demo, fixture);
   S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.settingsError = ''; S.settingsSaved = false; S.output = ''; S.testError = ''; refresh();
 }
@@ -1768,11 +1951,11 @@ async function demoApi(path, method, data) {
   }
   if (method === 'GET') {
     if (path === '/session') return { authenticated: true, csrf: 'demo-csrf-not-a-real-session' };
-    if (path === '/overview') { demo.accounts.forEach(syncDemoAccountRouting); const { keys, ...overview } = demo; return clone(overview); }
-    if (path === '/accounts') { demo.accounts.forEach(syncDemoAccountRouting); return { accounts: clone(demo.accounts) }; }
+    if (path === '/overview') { syncDemoState(); const { keys, ...overview } = demo; return clone(overview); }
+    if (path === '/accounts') { syncDemoState(); return { accounts: clone(demo.accounts) }; }
     if (path === '/keys') return { keys: demo.keys.filter(k => !k.revokedAt).map(({ secret: _secret, ...rest }) => clone(rest)) };
     if (path === '/settings') return clone(demo.settings);
-    if (path === '/diagnostics') return { demo: true, version: demo.version, mode: demo.mode, toolProtocol: demo.toolProtocol, ready: demo.ready, metrics: clone(demo.metrics), accountCounts: { total: demo.accounts.length, ready: demo.accounts.map(syncDemoAccountRouting).filter(accountRoutingEligible).length }, settings: clone(demo.settings) };
+    if (path === '/diagnostics') { syncDemoState(); return { demo: true, version: demo.version, mode: demo.mode, toolProtocol: demo.toolProtocol, ready: demo.ready, metrics: clone(demo.metrics), modelTelemetry: clone(demo.modelTelemetry), accountCounts: { total: demo.accounts.length, ready: demo.accounts.filter(accountRoutingEligible).length }, settings: clone(demo.settings) }; }
   }
   const audit = (action, target) => demo.audit.unshift({ id: `audit_demo_${demo.audit.length + 1}`, at: new Date().toISOString(), action, target });
   if (path === '/logout') return {};
@@ -1792,10 +1975,11 @@ async function demoApi(path, method, data) {
     if (method === 'PATCH') {
       Object.assign(a, data);
       if (typeof data?.enabled === 'boolean') a.status = data.enabled ? (a.authenticationStatus === 'auth_error' ? 'auth_error' : a.authenticationStatus === 'signed_in' ? 'ready' : 'login_required') : 'disabled';
-      syncDemoAccountRouting(a);
+      syncDemoState();
       audit('account.updated', id);
     } else if (method === 'DELETE') {
       demo.accounts = demo.accounts.filter(a => a.id !== id);
+      syncDemoState();
       audit('account.removed', id);
     }
     return {};
