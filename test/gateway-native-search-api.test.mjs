@@ -515,3 +515,112 @@ test("native search with only forceAccount webSource emits empty public annotati
   assert.deepEqual(data.native_search.sources, []);
   assert.equal(data.native_search.sourceFormat, "answer_text; no_public_web_annotations");
 });
+
+test("duplicate webSources and metadata frames apply deny-wins for forceAccount URLs across citations, sources, and titles", async (t) => {
+  const secretUrl = "https://private-dup.example.org/item";
+  const secretTitle = "Account Bound Title";
+
+  // Unit cases: both source orders and earlier-frame vs trailing-frame duplicates.
+  const unitCases = [
+    {
+      lastTextFrameIndex: 2,
+      citations: [{ frameIndex: 2, link: secretUrl, startIndex: 0, endIndex: 5, title: secretTitle }],
+      webSources: [
+        { frameIndex: 2, url: secretUrl, sourceTitle: secretTitle, forceAccount: false },
+        { frameIndex: 2, url: secretUrl, sourceTitle: secretTitle, forceAccount: true },
+      ],
+    },
+    {
+      lastTextFrameIndex: 2,
+      citations: [{ frameIndex: 2, link: secretUrl, startIndex: 0, endIndex: 5, untrustedHtmlTitle: `<b>${secretTitle}</b>` }],
+      webSources: [
+        { frameIndex: 2, url: secretUrl, sourceTitle: secretTitle, forceAccount: true },
+        { frameIndex: 2, url: secretUrl, sourceTitle: secretTitle },
+      ],
+    },
+    {
+      lastTextFrameIndex: 2,
+      citations: [{ frameIndex: 2, link: secretUrl, startIndex: 0, endIndex: 5 }],
+      webSources: [
+        { frameIndex: 1, url: secretUrl, sourceTitle: secretTitle, forceAccount: true },
+        { frameIndex: 2, url: secretUrl, sourceTitle: secretTitle, forceAccount: false },
+      ],
+    },
+  ];
+  for (const report of unitCases) {
+    assert.deepEqual(mapNativeSearchAnnotations("Hello world", report), []);
+    assert.deepEqual(extractNativeSearchSources(report), []);
+  }
+
+  // HTTP cases: duplicate same-frame sources in both orders + trailing duplicate metadata frame across Chat & Responses.
+  const eventSets = [
+    [
+      frame({
+        text: "Answer text",
+        complete: true,
+        modelExtra: [
+          citationMsg({ url: secretUrl, start: 0, end: 6, title: secretTitle }),
+          webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: false }),
+          webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: true }),
+        ],
+      }),
+      end,
+    ],
+    [
+      frame({
+        text: "Answer text",
+        complete: true,
+        modelExtra: [
+          citationMsg({ url: secretUrl, start: 0, end: 6, title: secretTitle }),
+          webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: true }),
+          webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: false }),
+        ],
+      }),
+      end,
+    ],
+    [
+      frame({
+        text: "Answer text",
+        complete: false,
+        modelExtra: [
+          citationMsg({ url: secretUrl, start: 0, end: 6, title: secretTitle }),
+          webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: false }),
+        ],
+      }),
+      {
+        type: "frame",
+        bytes: m(
+          1003,
+          m(
+            1,
+            Buffer.concat([
+              m(1, Buffer.concat([str(1, "synthetic-response"), webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: true })])),
+              v(9, 1),
+              v(41, 8),
+              v(42, 2),
+            ]),
+          ),
+        ),
+      },
+      end,
+    ],
+  ];
+
+  for (const events of eventSets) {
+    for (const kind of ["chat", "responses"]) {
+      const f = await setup(t, events);
+      const r = await f.request(kind, body(kind, false));
+      assert.equal(r.status, 200);
+      const data = await r.json();
+      assert.equal(data.native_search.mappedAnnotationCount, 0);
+      assert.deepEqual(data.native_search.sources, []);
+      assert.equal(data.native_search.sourceFormat, "answer_text; no_public_web_annotations");
+      if (kind === "chat") {
+        assert.equal(data.choices[0].message.annotations, undefined);
+      } else {
+        assert.deepEqual(data.output[0].content[0].annotations, []);
+      }
+      assert.doesNotMatch(JSON.stringify(data), /private-dup\.example\.org|Account Bound Title/);
+    }
+  }
+});

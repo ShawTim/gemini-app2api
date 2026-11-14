@@ -1,4 +1,5 @@
 import { ACCOUNT_MODELS, isProviderRejection } from "./provider-state.mjs";
+import { METADATA_ERROR_CODES } from "./native-search-metadata.mjs";
 import { isExplicitQuotaFailure } from "./quota-failover.mjs";
 
 export const TELEMETRY_ERROR_CATEGORIES = Object.freeze([
@@ -79,6 +80,13 @@ const PROTOCOL_CODES = new Set([
   "NATIVE_RESPONSE_REFUSED",
   "NATIVE_RESPONSE_LIMIT",
   "RESPONSE_TOO_LARGE",
+  "NATIVE_METADATA_LIMIT",
+  "NATIVE_TOOL_STATUS_LIMIT",
+  "NATIVE_THINKING_MISMATCH",
+  "NATIVE_ASYNC_RESPONSE_UNSUPPORTED",
+  "INVALID_NATIVE_IMAGE_UPLOAD",
+  "NATIVE_IMAGE_UPLOAD_INVALID_RESPONSE",
+  ...Object.values(METADATA_ERROR_CODES),
 ]);
 
 function createEmptyEntry() {
@@ -160,7 +168,8 @@ export function classifyTelemetryError(error) {
   if (
     PROTOCOL_CODES.has(code) ||
     code.startsWith("STRUCTURED_OUTPUT_") ||
-    code.endsWith("_STRUCTURED_OUTPUT")
+    code.endsWith("_STRUCTURED_OUTPUT") ||
+    code.startsWith("METADATA_")
   ) {
     return "protocol";
   }

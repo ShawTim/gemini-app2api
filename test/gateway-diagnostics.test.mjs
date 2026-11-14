@@ -583,3 +583,93 @@ test("cross-branch HTTP native_search citations and NATIVE_SEARCH_NOT_OBSERVED r
   assert.equal(argon.outputBytes, Buffer.byteLength(groundedText));
   assert.equal(overview.accounts[0].modelTelemetry["gemini-argon"].errorCounts.protocol, 1);
 });
+
+test("ModelTelemetry classifies native-search metadata, decoder, limit, and thinking mismatch codes as protocol regardless of message text", async t => {
+  const protocolCodes = [
+    "MALFORMED_SEARCH_METADATA",
+    "METADATA_INPUT_TOO_LARGE",
+    "METADATA_INVALID_WIRE_TYPE",
+    "METADATA_DUPLICATE_FIELD",
+    "METADATA_INVALID_UTF8",
+    "METADATA_INVALID_RANGE",
+    "METADATA_COUNT_EXCEEDED",
+    "METADATA_STRING_TOO_LONG",
+    "NATIVE_METADATA_LIMIT",
+    "NATIVE_TOOL_STATUS_LIMIT",
+    "NATIVE_THINKING_MISMATCH",
+    "NATIVE_ASYNC_RESPONSE_UNSUPPORTED",
+    "INVALID_NATIVE_IMAGE_UPLOAD",
+    "NATIVE_IMAGE_UPLOAD_INVALID_RESPONSE",
+  ];
+  for (const code of protocolCodes) {
+    // Message text intentionally mentions quota/timeout/auth to guarantee message-independent classification.
+    assert.equal(classifyTelemetryError({ code, status: 502, message: "quota timeout 429 auth failure" }), "protocol", code);
+  }
+
+  const f = await fixture({ allowFailover: false, accountCount: 1 });
+  t.after(f.close);
+  const s = (n, value) => m(n, Buffer.from(value));
+  const thinkingMismatchFrame = m(
+    1003,
+    m(1, Buffer.concat([m(1, Buffer.concat([s(1, "resp-1"), m(2, s(1, "answer"))])), v(9, 1), v(41, 8), v(42, 1)])),
+  );
+  const invalidUtf8MetadataFrame = m(
+    1003,
+    m(
+      1,
+      Buffer.concat([
+        m(1, Buffer.concat([s(1, "resp-2"), m(2, s(1, "answer")), m(6, m(6, Buffer.from([0xff])))])),
+        m(8, m(2, Buffer.concat([s(1, "google"), v(3, 4)]))),
+        v(9, 1),
+        v(41, 8),
+        v(42, 2),
+      ]),
+    ),
+  );
+  const tooManyToolStatusFrame = m(
+    1003,
+    m(
+      1,
+      Buffer.concat([
+        m(1, Buffer.concat([s(1, "resp-3"), m(2, s(1, "answer"))])),
+        ...Array.from({ length: 257 }, () => m(8, m(2, Buffer.concat([s(1, "google"), v(3, 1)])))),
+        v(9, 1),
+        v(41, 8),
+        v(42, 2),
+      ]),
+    ),
+  );
+  const frames = [thinkingMismatchFrame, invalidUtf8MetadataFrame, tooManyToolStatusFrame];
+  let idx = 0;
+  f.app.provider.openTurn = () => {
+    const bytes = frames[idx++];
+    return {
+      cancel() {},
+      events: (async function* () {
+        yield { type: "frame", bytes };
+        yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+      })(),
+    };
+  };
+
+  for (const expectedCode of ["NATIVE_THINKING_MISMATCH", "METADATA_INVALID_UTF8", "NATIVE_TOOL_STATUS_LIMIT"]) {
+    const res = await f.api("/v1/chat/completions", {
+      method: "POST",
+      body: {
+        model: "gemini-argon",
+        native_search: true,
+        messages: [{ role: "user", content: "q" }],
+      },
+    });
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.equal(body.error.upstream_code || body.error.code, expectedCode);
+  }
+
+  const overview = await (await f.admin("overview")).json();
+  const argon = overview.modelTelemetry.byModel["gemini-argon"];
+  assert.equal(argon.requests, 3);
+  assert.equal(argon.failures, 3);
+  assert.equal(argon.errorCounts.protocol, 3);
+  assert.equal(argon.errorCounts.other, 0);
+});

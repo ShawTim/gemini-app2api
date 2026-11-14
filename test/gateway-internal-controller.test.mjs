@@ -617,3 +617,42 @@ test("concurrent start/stop/status stress against live supervisor stays race-fre
     fs.unlinkSync(runtimeLock);
   }
 });
+
+test("malformed service-intent.private.json primitives and invalid shapes fail closed with INVALID_SERVICE_INTENT before startup", async (t) => {
+  const f = fixture(t);
+  const privateRoot = path.dirname(f.control);
+  const intentFile = path.join(privateRoot, "service-intent.private.json");
+  // Point control at a valid-scoped nonexistent source so any fallthrough past intent() fails verifySource.
+  f.save({
+    ...f.c,
+    source: path.join(f.root, "artifacts/internal-server/source-missing"),
+    runtimeSha256: "b".repeat(64),
+  });
+
+  const invalidIntents = [
+    "null",
+    "false",
+    "0",
+    '""',
+    "true",
+    "123",
+    '"initial"',
+    "[]",
+    "{}",
+    '{"enabled":"true","revision":"1"}',
+    '{"enabled":true,"revision":1}',
+    "{not valid json",
+  ];
+  for (const raw of invalidIntents) {
+    fs.writeFileSync(intentFile, raw, { mode: 0o600 });
+    fs.chmodSync(intentFile, 0o600);
+    const result = await f.controller.supervise();
+    assert.equal(result.stopped, true);
+    assert.equal(result.errorCode, "INVALID_SERVICE_INTENT", `expected INVALID_SERVICE_INTENT for ${raw}`);
+  }
+
+  fs.unlinkSync(intentFile);
+  const absentResult = await f.controller.supervise();
+  assert.equal(absentResult.stopped, true);
+  assert.notEqual(absentResult.errorCode, "INVALID_SERVICE_INTENT");
+});

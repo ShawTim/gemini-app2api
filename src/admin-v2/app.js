@@ -1863,8 +1863,8 @@ function makeDemo() {
       quota: { source: 'unknown', remainingPercent: null, updatedAt: null },
       subscription: { source: 'official', status: 'ok', tier: 'pro', updatedAt: ago(600) },
       modelTelemetry: {
-        'gemini-hydrogen': entry(1120, 1115, 5, 1, 4820480, 4, 1, 2, { quota: 2, transient: 1, soft_error: 1, protocol: 1 }, ago(12)),
-        'gemini-argon': entry(540, 538, 2, 1, 2359296, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(45)),
+        'gemini-hydrogen': entry(1120, 1114, 5, 1, 4820480, 4, 1, 2, { quota: 2, transient: 1, soft_error: 1, protocol: 1 }, ago(12)),
+        'gemini-argon': entry(540, 537, 2, 1, 2359296, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(45)),
         'gemini-flash-lite': entry(182, 181, 1, 0, 421888, 1, 0, 0, { transient: 1 }, ago(140)),
       },
     },
@@ -1873,7 +1873,7 @@ function makeDemo() {
       quota: { source: 'unknown', remainingPercent: null, updatedAt: null },
       subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
       modelTelemetry: {
-        'gemini-hydrogen': entry(580, 578, 2, 1, 2146304, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(38)),
+        'gemini-hydrogen': entry(580, 577, 2, 1, 2146304, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(38)),
         'gemini-argon': entry(266, 265, 1, 0, 983040, 1, 0, 0, { precondition: 1 }, ago(120)),
         'gemini-flash-lite': entry(100, 99, 1, 0, 245760, 1, 0, 0, { protocol: 1 }, ago(310)),
       },

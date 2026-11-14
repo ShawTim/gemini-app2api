@@ -66,13 +66,39 @@ function definition(root, ref) {
   return target;
 }
 
-function checkSchema(root) {
+const OUTPUT_SCHEMA_KEYWORDS = new Set([
+  '$ref', '$defs', 'definitions',
+  'type', 'nullable', 'const', 'enum',
+  'allOf', 'anyOf', 'oneOf', 'not',
+  'minLength', 'maxLength',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+  'minItems', 'maxItems', 'uniqueItems', 'items', 'prefixItems', 'additionalItems',
+  'minProperties', 'maxProperties', 'required', 'properties', 'additionalProperties', 'patternProperties',
+]);
+const OUTPUT_SCHEMA_METADATA = new Set([
+  ...SCHEMA_ANNOTATIONS,
+  'description',
+  '$comment',
+]);
+
+function checkSchema(root, { rejectUnsupportedKeywords = false } = {}) {
   const defs = new Map();
   function walk(s, depth=0, visited=new Set()) {
     if (depth > LIMITS.depth) throw error('TOOL_SIZE_LIMIT');
     if (typeof s === 'boolean') return;
     if (!s || typeof s !== 'object' || Array.isArray(s)) throw badSchema('Schema must be an object');
     if (visited.has(s)) throw badSchema('Cyclic schema'); visited.add(s);
+    if (rejectUnsupportedKeywords) {
+      for (const k of Object.keys(s)) {
+        if (!OUTPUT_SCHEMA_KEYWORDS.has(k) && !OUTPUT_SCHEMA_METADATA.has(k)) {
+          throw badSchema(`Unsupported output schema keyword: ${/^[A-Za-z0-9_$-]{1,64}$/.test(k) ? k : 'unknown'}`);
+        }
+      }
+      if (own(s, 'description') && typeof s.description !== 'string') throw badSchema('Invalid schema description');
+      if (own(s, '$comment') && typeof s.$comment !== 'string') throw badSchema('Invalid schema $comment');
+      if (own(s, 'additionalItems') && !Array.isArray(s.items)) throw badSchema('additionalItems requires tuple items array');
+      if (own(s, 'prefixItems') && Array.isArray(s.items)) throw badSchema('Cannot combine prefixItems with tuple items array');
+    }
     schemaType(s);
     if (own(s,'nullable') && typeof s.nullable !== 'boolean') throw badSchema('Invalid nullable');
     if (own(s,'const') && !literalValid(s.const)) throw badSchema('Invalid const');
@@ -95,7 +121,7 @@ function checkSchema(root) {
     for (const k of ['items','additionalProperties','additionalItems','not']) if (own(s,k)) { const children = k === 'items' && Array.isArray(s[k]) ? s[k] : [s[k]]; for (const child of children) walk(child,depth+1,visited); }
     if (s.prefixItems) for (const child of s.prefixItems) walk(child,depth+1,visited);
     for (const k of ['anyOf','oneOf','allOf']) if (s[k]) for (const v of s[k]) walk(v,depth+1,visited);
-    if (s.patternProperties && typeof s.patternProperties==='object' && !Array.isArray(s.patternProperties)) for (const [p,v] of Object.entries(s.patternProperties)) { if (p !== '^(.*)$' && p !== '^.*$') continue; walk(v,depth+1,visited); }
+    if (s.patternProperties && typeof s.patternProperties==='object' && !Array.isArray(s.patternProperties)) for (const [p,v] of Object.entries(s.patternProperties)) { if (p !== '^(.*)$' && p !== '^.*$') { if (rejectUnsupportedKeywords) throw badSchema('Unsupported patternProperties pattern'); continue; } walk(v,depth+1,visited); }
     visited.delete(s);
   }
   walk(root);
@@ -158,7 +184,7 @@ export function compileOutputSchema(schema) {
     throw error('OUTPUT_SCHEMA_SIZE_LIMIT', 'Output schema exceeds 256 KiB budget', 400);
   }
   try {
-    checkSchema(schema);
+    checkSchema(schema, { rejectUnsupportedKeywords: true });
   } catch (e) {
     throw error(e?.code === 'TOOL_SIZE_LIMIT' ? 'OUTPUT_SCHEMA_SIZE_LIMIT' : 'UNSUPPORTED_OUTPUT_SCHEMA', e?.message || 'Unsupported output schema', 400);
   }
@@ -233,7 +259,7 @@ export function validatePromptToolArguments(value, schema) {
 export function validateOutputValue(value, schema) {
   try {
     jsonTree(schema, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4);
-    checkSchema(schema);
+    checkSchema(schema, { rejectUnsupportedKeywords: true });
   } catch (e) {
     throw mapOutputSchemaError(e);
   }

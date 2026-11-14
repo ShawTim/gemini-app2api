@@ -252,9 +252,23 @@ export function createLocalController({
     return supervisorActive() || exists(registrationPath);
   }
   function intent() {
-    const value = readJSONIfExists(intentPath);
-    if (!value) return { enabled: true, revision: "initial" };
-    if (typeof value.enabled !== "boolean" || typeof value.revision !== "string") fail("INVALID_SERVICE_INTENT");
+    const snap = snapshotIfExists(intentPath);
+    if (!snap) return { enabled: true, revision: "initial" };
+    let value;
+    try {
+      value = JSON.parse(snap.bytes);
+    } catch {
+      fail("INVALID_SERVICE_INTENT");
+    }
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      typeof value.enabled !== "boolean" ||
+      typeof value.revision !== "string"
+    ) {
+      fail("INVALID_SERVICE_INTENT");
+    }
     return value;
   }
   async function request(enabled) {

@@ -577,3 +577,104 @@ test('cross-branch HTTP structured_output automatic recovery updates ModelTeleme
   );
   assert.equal(perAccountProtocol, 2);
 });
+
+test('unsupported output schema assertion keywords reject upfront with 400 UNSUPPORTED_OUTPUT_SCHEMA across JSON and SSE endpoints', async t => {
+  const unsupportedSchemas = [
+    { type: 'object', required: ['status'], additionalProperties: false, properties: { status: { type: 'string', pattern: '^ok$' } } },
+    { type: 'object', properties: { tags: { type: 'array', contains: { type: 'string' } } } },
+    { type: 'object', properties: { tags: { type: 'array', items: { type: 'string' }, minContains: 1, maxContains: 2 } } },
+    { type: 'object', dependentRequired: { a: ['b'] }, properties: { a: { type: 'string' }, b: { type: 'string' } } },
+    { type: 'object', if: { properties: { kind: { const: 'x' } } }, then: { required: ['y'] }, properties: { kind: { type: 'string' }, y: { type: 'string' } } },
+    { type: 'object', propertyNames: { minLength: 1 } },
+    { type: 'object', unevaluatedProperties: false },
+    { type: 'object', patternProperties: { '^ok_': { type: 'string' } } },
+    { type: 'object', properties: { tuple: { type: 'array', prefixItems: [{ type: 'string' }], additionalItems: false } } },
+    { type: 'object', $defs: { Bad: { type: 'string', pattern: '^[a-z]+$' } }, properties: { bad: { $ref: '#/$defs/Bad' } } },
+  ];
+  for (const schema of unsupportedSchemas) {
+    assert.throws(
+      () => compileOutputSchema(stripSchemaAnnotations(schema)),
+      e => e.code === 'UNSUPPORTED_OUTPUT_SCHEMA' && e.status === 400,
+    );
+  }
+
+  // Supported metadata (`description` / `$comment`) and supported assertions compile cleanly and reject mismatches.
+  const strictSupported = compileOutputSchema(stripSchemaAnnotations({
+    type: 'object',
+    $comment: 'supported strict schema',
+    required: ['status'],
+    additionalProperties: false,
+    properties: {
+      status: { type: 'string', description: 'Outcome status', enum: ['ok'] },
+    },
+  }));
+  assert.equal(strictSupported.properties.status.description, 'Outcome status');
+
+  const f = await fixture({ turns: ['{"status":"bad"}', '{"status":"bad"}', '{"status":"bad"}', '{"status":"bad"}'], allowFailover: false });
+  t.after(f.close);
+
+  for (const route of ['chat/completions', 'responses']) {
+    for (const stream of [false, true]) {
+      const patternSchema = {
+        type: 'object',
+        required: ['status'],
+        additionalProperties: false,
+        properties: { status: { type: 'string', pattern: '^ok$' } },
+      };
+      const baseReq = route === 'chat/completions'
+        ? {
+            model: 'gemini-argon',
+            stream,
+            messages: [{ role: 'user', content: 'hi' }],
+            response_format: { type: 'json_schema', json_schema: { name: 'pat', strict: true, schema: patternSchema } },
+          }
+        : {
+            model: 'gemini-argon',
+            stream,
+            input: 'hi',
+            text: { format: { type: 'json_schema', name: 'pat', strict: true, schema: patternSchema } },
+          };
+      const rejected = await f.api(`/v1/${route}`, { method: 'POST', body: baseReq });
+      assert.equal(rejected.status, 400);
+      assert.equal((await rejected.json()).error.code, 'UNSUPPORTED_OUTPUT_SCHEMA');
+      assert.equal(f.seen.length, 0);
+    }
+  }
+
+  for (const strict of [true, false]) {
+    for (const route of ['chat/completions', 'responses']) {
+      for (const stream of [false, true]) {
+        const enumSchema = {
+          type: 'object',
+          required: ['status'],
+          additionalProperties: false,
+          properties: { status: { type: 'string', enum: ['ok'] } },
+        };
+        const body = route === 'chat/completions'
+          ? {
+              model: 'gemini-argon',
+              stream,
+              messages: [{ role: 'user', content: 'hi' }],
+              response_format: { type: 'json_schema', json_schema: { name: 'enm', strict, schema: enumSchema } },
+            }
+          : {
+              model: 'gemini-argon',
+              stream,
+              input: 'hi',
+              text: { format: { type: 'json_schema', name: 'enm', strict, schema: enumSchema } },
+            };
+        f.app.provider.openTurn = () => ({
+          cancel() {},
+          events: (async function* () {
+            yield { type: 'frame', bytes: textFrame('{"status":"bad"}', 8, 2) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+          })(),
+        });
+        const res = await f.api(`/v1/${route}`, { method: 'POST', body });
+        assert.equal(res.status, 502);
+        const payload = await res.json();
+        assert.equal(payload.error.code, 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH');
+      }
+    }
+  }
+});

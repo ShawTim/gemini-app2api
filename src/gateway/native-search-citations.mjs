@@ -34,14 +34,18 @@ function filterReportMetadata(report) {
     ? (item?.frameIndex === undefined || (Number.isInteger(item.frameIndex) && item.frameIndex >= 0))
     : (Number.isInteger(item?.frameIndex) && item.frameIndex >= minFrame));
 
+  const rawSources = Array.isArray(report?.webSources) ? report.webSources : [];
   const excludedUrls = new Set();
-  const webSources = [];
-  for (const src of Array.isArray(report?.webSources) ? report.webSources : []) {
-    if (!frameOk(src) || typeof src?.url !== 'string') continue;
-    if (src.forceAccount === true) {
+  for (const src of rawSources) {
+    if (typeof src?.url === 'string' && src.forceAccount === true) {
       excludedUrls.add(src.url);
-      continue;
     }
+  }
+
+  const webSources = [];
+  for (const src of rawSources) {
+    if (!frameOk(src) || typeof src?.url !== 'string') continue;
+    if (src.forceAccount === true || excludedUrls.has(src.url)) continue;
     if (isSafeWebUrl(src.url)) webSources.push(src);
   }
 

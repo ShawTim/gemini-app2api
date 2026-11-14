@@ -1784,7 +1784,7 @@ test("demo mode computes ready dynamically across mutations and scenarios while 
   await route(page, "overview");
   await expect(page.locator("#overview-status")).toContainText("Local routing available");
   await expect(page.locator("#overview-status")).toContainText("2 routable accounts");
-  await expect(page.locator('#overview-model-telemetry [data-telemetry-model="gemini-hydrogen"]')).toContainText("1,893/1,904 ok");
+  await expect(page.locator('#overview-model-telemetry [data-telemetry-model="gemini-hydrogen"]')).toContainText("1,891/1,904 ok");
 
   // Disabling remaining eligible accounts updates demo.ready dynamically to false.
   await route(page, "accounts");
