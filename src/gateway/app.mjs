@@ -223,6 +223,7 @@ export function createGateway({
       requests: [...requests],
       audit: [...audit],
       models: protocol.NATIVE_MODELS,
+      modelTelemetry: pool.modelTelemetry(),
       settings: effectiveSettings(),
       keyCount: store.listKeys().filter((k) => !k.revokedAt).length,
     };
@@ -736,6 +737,7 @@ export function createGateway({
             ready: o.ready,
             uptimeSeconds: o.uptimeSeconds,
             metrics: o.metrics,
+            modelTelemetry: o.modelTelemetry,
             counts: {
               accounts: o.accounts.length,
               sessions: o.sessions.length,

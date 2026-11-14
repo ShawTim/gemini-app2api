@@ -5,6 +5,7 @@ import { isExplicitQuotaFailure } from './quota-failover.mjs';
 import { isVerifiedEmptyResponse } from './output-recovery.mjs';
 import { automaticRecoveryKind } from './automatic-recovery.mjs';
 import { ACCOUNT_MODELS, isProviderRejection } from "./provider-state.mjs";
+import { ModelTelemetry } from "./model-telemetry.mjs";
 const keyOf = (owner, id) => crypto.createHash("sha256").update(owner + "\0" + id).digest("hex");
 export function classifyFailure(error) {
   const code = error?.code ?? "";
@@ -16,6 +17,7 @@ export function classifyFailure(error) {
 }
 export class AccountPool {
   #routingAccountIds;
+  #telemetry;
   constructor(accounts, {
     settings = () => ({ maxSessions: 256, sessionTtlMs: 3600000 }),
     now = Date.now, allowFailover = true, allowQuotaFailover = false,
@@ -32,6 +34,7 @@ export class AccountPool {
     this.onFailover = onFailover;
     const ids = normalizeRoutingAccountIds(routingAccountIds);
     this.#routingAccountIds = ids === null ? null : new Set(ids);
+    this.#telemetry = new ModelTelemetry({ now: this.now });
     this.sessions = new Map();
     this.runtime = new Map();
     this.failovers = [];
@@ -40,6 +43,9 @@ export class AccountPool {
   routingAllowed(id) { return this.#routingAccountIds === null || this.#routingAccountIds.has(id); }
   routingPolicy() {
     return { mode: this.#routingAccountIds === null ? 'all_eligible_accounts' : 'account_allowlist', configuredAccountCount: this.#routingAccountIds?.size ?? null };
+  }
+  modelTelemetry() {
+    return this.#telemetry.snapshot();
   }
   stats(id) {
     if (!this.runtime.has(id)) this.runtime.set(id, { inFlight: 0, requests: 0, failures: 0, lastUsedAt: null });
@@ -60,7 +66,7 @@ export class AccountPool {
         routingAllowed: this.routingAllowed(a.id),
         routingExclusionReason: this.routingAllowed(a.id) ? null : 'DEPLOYMENT_ACCOUNT_ALLOWLIST',
         routingEligibilityByModel: Object.fromEntries(ACCOUNT_MODELS.map(model => [model, eligible])),
-        modelStates: states, routingEligible: eligible,
+        modelStates: states, modelTelemetry: this.#telemetry.account(a.id), routingEligible: eligible,
       };
     });
   }
@@ -82,10 +88,14 @@ export class AccountPool {
     // its counter until that request releases it, but remove future affinity.
     for (const session of this.sessions.values()) if (session.accountId === id) { session.accountId = null; session.lastFailure = null; }
     if (!this.runtime.get(id)?.inFlight) this.runtime.delete(id);
+    this.#telemetry.forgetAccount(id);
   }
   #releaseAccount(id, stat) {
     stat.inFlight--;
-    if (!stat.inFlight && this.runtime.get(id) === stat && !this.accounts.list().some(a => a.id === id)) this.runtime.delete(id);
+    if (!stat.inFlight && this.runtime.get(id) === stat && !this.accounts.list().some(a => a.id === id)) {
+      this.runtime.delete(id);
+      this.#telemetry.forgetAccount(id);
+    }
   }
   async runTest(accountId, { model, signal }, execute) {
     if (!ACCOUNT_MODELS.includes(model)) throw fault("UNSUPPORTED_MODEL");
@@ -98,11 +108,14 @@ export class AccountPool {
     if (stat.inFlight >= 2) throw fault("ACCOUNT_BUSY", 409);
     if (signal?.aborted) throw fault("REQUEST_CANCELLED", 499);
     stat.inFlight++; stat.requests++; stat.lastUsedAt = this.now();
+    this.#telemetry.start(accountId, model, { isRetry: false });
     try {
       const result = await execute(accountId, { owner: "admin-account-test", sessionId: null, signal, failover: false, accountTest: true });
+      this.#telemetry.succeed(accountId, model, result);
       return { result, accountId, sessionId: crypto.randomUUID() };
     } catch (error) {
       stat.failures++;
+      this.#telemetry.fail(accountId, model, error);
       // A generation error is not proof that the stored OAuth grant is invalid.
       if (classifyFailure(error) === "auth") this.accounts.invalidate?.(accountId);
       throw error;
@@ -149,6 +162,7 @@ export class AccountPool {
         if (!account) throw fault("NO_AVAILABLE_ACCOUNTS", 503);
         const stat = this.stats(account.id);
         tried.add(account.id); stat.inFlight++; stat.requests++; stat.lastUsedAt = this.now();
+        this.#telemetry.start(account.id, model, { isRetry: attempt > 0 });
         if (!previous && preferredId && preferredId !== account.id) previous = { id: preferredId,
           reason: previousModel && previousModel !== model ? 'requested_model_changed' : carried?.kind ?? 'account_unavailable' };
         if (previous) {
@@ -158,11 +172,13 @@ export class AccountPool {
         try {
           const result = await execute(account.id, { owner, sessionId: sessionId ?? null, responseSessionId: id, signal,
             failover: previous !== null, failoverReason: previous?.reason ?? null, recoveryCode: formatRecoveryCode });
+          this.#telemetry.succeed(account.id, model, result);
           outcome = { accountId: account.id, model, lastFailure: null };
           session.turns++;
           return { result, accountId: account.id, sessionId: id };
         } catch (error) {
           stat.failures++;
+          this.#telemetry.fail(account.id, model, error);
           const kind = classifyFailure(error);
           if (kind === "auth") this.accounts.invalidate?.(account.id);
           const automaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
@@ -182,7 +198,7 @@ export class AccountPool {
           if (!(automaticKind || quotaRetry || emptyRetry || generalRetry || shortOutputRetry) || attempt + 1 >= maxAttempts + quotaFailures) throw error;
           if (emptyRetry) emptyRecoveries++;
           if (shortOutputRetry) shortOutputRecoveries++;
-          if (automaticKind === 'tool_protocol') formatRecoveryCode = error.code;
+          if (automaticKind === 'tool_protocol' || automaticKind === 'structured_output') formatRecoveryCode = error.code;
           previous = { id: account.id, reason: automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind), quotaFailover: quotaRetry,
             emptyRecovery: emptyRetry, shortOutputRecovery: shortOutputRetry, automaticRecovery: !!automaticKind };
           if (!this.available(model).some(a => !tried.has(a.id))) throw error;
