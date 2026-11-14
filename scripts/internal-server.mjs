@@ -229,7 +229,7 @@ export function createLocalController({
   function supervisorActive() {
     let prior = snapshotIfExists(supervisorPath);
     if (!prior) return false;
-    if (prior.bytes === "") {
+    for (let n = 0; n < 5 && prior.bytes === ""; n++) {
       pauseSync(5);
       prior = snapshotIfExists(supervisorPath);
       if (!prior) return false;
@@ -285,8 +285,13 @@ export function createLocalController({
   }
   function ownedPid(c) {
     const lock = path.join(c.directory, "runtime.lock");
-    const snap = snapshotIfExists(lock);
+    let snap = snapshotIfExists(lock);
     if (!snap) return null;
+    for (let n = 0; n < 3 && snap.bytes.trim() === ""; n++) {
+      pauseSync(5);
+      snap = snapshotIfExists(lock);
+      if (!snap) return null;
+    }
     const pid = Number(snap.bytes.trim());
     if (!Number.isSafeInteger(pid) || pid < 2 || pid !== c.serverPid)
       fail("OWNERSHIP_GUARD");
@@ -294,17 +299,22 @@ export function createLocalController({
     const entry = path.join(c.source, "src/gateway-server.mjs");
     try {
       if (process.platform === "linux") {
-        owned = fs
-          .readFileSync(`/proc/${pid}/cmdline`, "utf8")
-          .split("\0")
-          .includes(entry);
+        const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+        if (!cmdline) fail("STALE_LOCK_REQUIRES_INSPECTION");
+        owned = cmdline.split("\0").includes(entry);
       } else {
-        const command = execFileSync(
+        const out = execFileSync(
           "ps",
-          ["-p", String(pid), "-o", "command="],
+          ["-p", String(pid), "-o", "stat=,command="],
           { encoding: "utf8" },
-        );
+        ).trimStart();
+        const space = out.search(/\s/);
+        const stat = space === -1 ? out.trim() : out.slice(0, space);
+        const command = space === -1 ? "" : out.slice(space).trimStart();
         owned = command.includes(entry);
+        // Exiting/zombie processes drop user argv before exit; inspect rather than misclassify as foreign.
+        if (!owned && (!out || /[EZ?]/.test(stat) || !command))
+          fail("STALE_LOCK_REQUIRES_INSPECTION");
       }
     } catch {
       fail("STALE_LOCK_REQUIRES_INSPECTION");
@@ -327,9 +337,29 @@ export function createLocalController({
     if (c.automaticRecovery === true && !exists(path.join(c.source, 'src/gateway/automatic-recovery.mjs')))
       fail('AUTOMATIC_RECOVERY_UNSUPPORTED_BY_SOURCE');
   }
+  async function readOwnedState(onControl) {
+    let c = loadControl();
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if (onControl) {
+        await onControl(c);
+        const refreshed = loadControl();
+        if (JSON.stringify(refreshed) !== JSON.stringify(c)) {
+          c = refreshed;
+          await onControl(c);
+        }
+      }
+      try {
+        return { c, pid: ownedPid(c) };
+      } catch (e) {
+        if (e.code !== "OWNERSHIP_GUARD" || attempt === 29) throw e;
+        if (attempt > 0) await sleep(10);
+        c = loadControl();
+      }
+    }
+  }
   async function status() {
-    const c = loadControl();
-    if (!ownedPid(c))
+    const { c, pid } = await readOwnedState();
+    if (!pid)
       return { running: false, base: c.base, sourceCommit: c.sourceCommit };
     const response = await fetch(c.base + "/health", {
       redirect: "error",
@@ -389,14 +419,21 @@ export function createLocalController({
     return file;
   }
   async function start() {
-    const c = loadControl();
     if (managed()) {
-      try { if (ownedPid(c)) fail("ALREADY_RUNNING"); }
-      catch (e) { if (e.code !== "STALE_LOCK_REQUIRES_INSPECTION") throw e; }
+      let c;
+      try {
+        const state = await readOwnedState();
+        c = state.c;
+        if (state.pid) fail("ALREADY_RUNNING");
+      } catch (e) {
+        if (e.code !== "STALE_LOCK_REQUIRES_INSPECTION") throw e;
+        c = loadControl();
+      }
       await verifySource(c);
       await request(true);
       return { ...await status(), started: true };
     }
+    const c = loadControl();
     await recoverDeadLock(c);
     if (ownedPid(c)) fail("ALREADY_RUNNING");
     await verifySource(c);
@@ -448,8 +485,10 @@ export function createLocalController({
     } finally {
       fs.closeSync(fd);
     }
-    c.serverPid = child.pid;
-    saveControl(c);
+    if (Number.isSafeInteger(child?.pid) && child.pid >= 2) {
+      c.serverPid = child.pid;
+      saveControl(c);
+    }
     if (supervising) { supervisedChild = child; supervisedControl = c; }
     for (let n = 0; n < 150; n++) {
       if (spawnError || child.exitCode !== null || child.signalCode !== null) fail("SERVER_START_FAILED");
@@ -501,10 +540,27 @@ export function createLocalController({
   }
   let supervisedChild, supervisedControl;
   async function verifyDeployment() {
-    const c = loadControl();
-    await verifySource(c);
-    safeFile(path.join(c.directory, "state.json"));
-    return { running: Boolean(ownedPid(c)), supervised: supervisorActive() };
+    let verifiedKey = null;
+    const ensureVerified = async (c) => {
+      const key = JSON.stringify([
+        c.base,
+        c.callbackPort,
+        c.source,
+        c.runtimeSha256,
+        c.directory,
+        c.routingAccountIds,
+        c.quotaFailover,
+        c.emptyResponseFailover,
+        c.automaticRecovery,
+      ]);
+      if (key !== verifiedKey) {
+        await verifySource(c);
+        safeFile(path.join(c.directory, "state.json"));
+        verifiedKey = key;
+      }
+    };
+    const { pid } = await readOwnedState(ensureVerified);
+    return { running: Boolean(pid), supervised: supervisorActive() };
   }
   async function supervise() {
     loadControl();

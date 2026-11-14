@@ -607,4 +607,13 @@ test("concurrent start/stop/status stress against live supervisor stays race-fre
   } finally {
     try { fs.unlinkSync(lockFile); } catch {}
   }
+
+  const runtimeLock = path.join(f.directory, "runtime.lock");
+  fs.writeFileSync(runtimeLock, String(process.pid), { mode: 0o600 });
+  try {
+    await assert.rejects(f.controller.status(), { code: "OWNERSHIP_GUARD" });
+    await assert.rejects(f.controller.verifyDeployment(), { code: "OWNERSHIP_GUARD" });
+  } finally {
+    fs.unlinkSync(runtimeLock);
+  }
 });
