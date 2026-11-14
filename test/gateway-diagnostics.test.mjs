@@ -304,6 +304,10 @@ test("ModelTelemetry measures outputBytes, classifies errors, bounds accounts, a
   assert.equal(classifyTelemetryError({ code: "NATIVE_QUOTA_EXHAUSTED", status: 429 }), "quota");
   assert.equal(classifyTelemetryError({ code: "NATIVE_PERMISSION_OR_AUTH", status: 403 }), "auth");
   assert.equal(classifyTelemetryError({ code: "INVALID_STRUCTURED_OUTPUT", status: 400 }), "protocol");
+  assert.equal(classifyTelemetryError({ code: "INVALID_STRUCTURED_OUTPUT_JSON", status: 502 }), "protocol");
+  assert.equal(classifyTelemetryError({ code: "STRUCTURED_OUTPUT_SCHEMA_MISMATCH", status: 502 }), "protocol");
+  assert.equal(classifyTelemetryError({ code: "NATIVE_SEARCH_NOT_OBSERVED", status: 502 }), "protocol");
+  assert.equal(classifyTelemetryError({ code: "UNSUPPORTED_NATIVE_TOOL_REPORT", status: 502 }), "protocol");
   assert.equal(classifyTelemetryError({ code: "MALFORMED_TOOL_CALL", status: 502 }), "protocol");
   assert.equal(classifyTelemetryError({ code: "NATIVE_PRECONDITION_REQUIRED", status: 412 }), "precondition");
   assert.equal(classifyTelemetryError({ code: "NATIVE_TRANSPORT_TIMEOUT", status: 504 }), "transient");
