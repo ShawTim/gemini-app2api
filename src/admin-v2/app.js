@@ -20,7 +20,7 @@ const S = {
   settingsBusy: false, settingsError: '', settingsSaved: false, loginError: '',
   configCopied: false, lastInspectedRequestId: '', accountNotice: '', loginAcceptTerms: false,
   enterRoute: true, pendingRouteFocus: false, deepLink: {}, diagnosticsOpen: false, capabilitiesOpen: false, folds: {}, accountCategory: '',
-  accountQuickFilter: '', selectedAccountId: '', preset: 'codex', drawerReturnFocus: null,
+  accountQuickFilter: '', selectedAccountId: '', pendingAccountLookup: '', preset: 'codex', drawerReturnFocus: null,
 };
 const revealedKeys = new Map();
 const L = (en, zh) => S.lang === 'zh-HK' ? zh : en;
@@ -122,7 +122,6 @@ function panel(title, sub, body, action = null, attrs = {}) { return el('section
 const body = (...nodes) => el('div', { class: 'panel-body' }, nodes);
 const definition = pairs => el('dl', { class: 'definition' }, pairs.map(([key, value]) => [el('dt', {}, key), el('dd', {}, value ?? '—')]));
 const accountName = id => (S.accounts || S.overview?.accounts || []).find(a => a.id === id)?.label || id || '—';
-const accountRoutingEligible = a => a.routingEligible === true || (a.routingEligible === undefined && a.enabled && a.status === 'ready' && !accountCoolingDown(a));
 const accountDisplayName = a => a.label || a.id || L('Unnamed account', '未命名帳戶');
 function accountCoolingDown(a) {
   if (!a || a.enabled === false) return false;
@@ -131,6 +130,19 @@ function accountCoolingDown(a) {
   return Number.isFinite(until) && until > Date.now();
 }
 const accountNeedsSignIn = a => Boolean(a?.enabled) && (['login_required', 'auth_error'].includes(a.authenticationStatus) || ['login_required', 'auth_error'].includes(a.status));
+const accountAtCapacity = a => Boolean(a?.enabled) && a.routingAllowed !== false && a.status === 'ready' && !accountCoolingDown(a) && !accountNeedsSignIn(a) && finite(a.inFlight) && a.inFlight >= 2;
+const accountRoutingEligible = a => a?.routingEligible === true ? !accountCoolingDown(a) : (a?.routingEligible === undefined && a.routingAllowed !== false && Boolean(a?.enabled) && a.status === 'ready' && !accountCoolingDown(a) && !accountNeedsSignIn(a) && (!finite(a.inFlight) || a.inFlight < 2));
+function accountRoutingLabel(a) {
+  if (!a) return t('unknown');
+  if (a.routingAllowed === false) return L('Excluded by routing policy (not used for requests)', '被路由政策排除（不會用於請求）');
+  if (!a.enabled) return L('Disabled locally', '本機已停用');
+  if (accountCoolingDown(a)) return L('Paused (cooldown)', '暫停（冷卻中）');
+  if (accountNeedsSignIn(a)) return L('Unavailable until signed in', '需登入後方可使用');
+  if (accountRoutingEligible(a)) return L('Eligible for requests', '可用於請求');
+  if (accountAtCapacity(a)) return L('Busy (at per-account in-flight limit)', '忙碌中（已達單一帳戶並行上限）');
+  if (a.routingEligible === false) return L('Not currently eligible for new requests', '目前未能接收新請求');
+  return t('unknown');
+}
 const accountStatus = a => {
   if (!a.enabled) return badge(t('disabled'));
   const status = a.status === 'ready' && accountCoolingDown(a) ? 'cooldown' : (a.status || 'unknown');
@@ -216,7 +228,7 @@ function expireSession() {
   modelTests.clear(); revealedKeys.clear();
   quotaRefreshErrors.clear(); subscriptionRefreshErrors.clear(); accountDisclosures.clear();
   S.epoch++; S.routeEpoch++; S.authenticated = false; S.csrf = ''; S.overview = null; S.accounts = null; S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.configCopied = false; S.lastInspectedRequestId = ''; S.folds = {}; S.deepLink = {}; S.accountNotice = '';
-  S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; S.accountQuickFilter = ''; S.selectedAccountId = ''; closeAccountDrawer(false);
+  S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; S.accountQuickFilter = ''; S.selectedAccountId = ''; S.pendingAccountLookup = ''; closeAccountDrawer(false);
   S.loginAcceptTerms = false;
   S.lastLoaded = null; S.error = ''; S.settingsError = ''; S.settingsSaved = false; S.diagnosticsError = ''; S.testError = '';
   S.prompt = ''; S.output = ''; S.testResult = null; S.loginError = L('Your session has expired. Sign in again.', '登入階段已過期，請重新登入。');
@@ -245,7 +257,7 @@ function renderLogin() {
     try {
       const result = await api('/login', { method: 'POST', data: { password: password.value } });
       if (!result.csrf) throw { code: 'INVALID_RESPONSE' };
-      password.value = ''; S.csrf = result.csrf; S.authRequired = result.authRequired !== false; S.authenticated = true; S.loginError = ''; render(); await refresh();
+      password.value = ''; S.csrf = result.csrf; S.authRequired = result.authRequired !== false; S.authenticated = true; S.loginError = ''; applyRouteFromHash(); render(); await refresh();
     } catch (err) { S.loginError = safeError(err); error.textContent = S.loginError; error.hidden = false; password.focus(); }
     finally { submit.disabled = false; password.readOnly = false; submit.replaceChildren(L('Sign in to workspace', '登入工作區'), icon('arrow')); }
   } }, el('label', { for: 'admin-password' }, L('Admin password', '管理員密碼'), password), submit);
@@ -260,7 +272,7 @@ function renderLogin() {
       el('p', { class: 'eyebrow' }, L('PRIVATE WORKSPACE', '私人工作區')), el('h2', {}, L('Welcome back.', '歡迎回來。')),
       el('p', { class: 'muted' }, L('Sign in with the admin password configured on your gateway. This is not your Google password.', '使用閘道設定的管理員密碼登入，並非 Google 密碼。')),
       DEMO ? badge(L('Demo · no network', '示範 · 不會連線'), 'amber') : null, error,
-      DEMO ? btn(L('Return to demo workspace', '返回示範工作區'), () => { S.authenticated = true; render(); refresh(); }, { id: 'demo-enter', class: 'primary' }) : form,
+      DEMO ? btn(L('Return to demo workspace', '返回示範工作區'), () => { S.authenticated = true; applyRouteFromHash(); render(); refresh(); }, { id: 'demo-enter', class: 'primary' }) : form,
       el('p', { class: 'login-security' }, icon('lock'), L('Protected by an HttpOnly session. Use HTTPS when accessing remotely.', '使用 HttpOnly 登入階段保護。遠端存取時請使用 HTTPS。')),
       el('div', { class: 'login-demo' }, L('Just exploring?', '想先看看？'), el('a', { href: demoUrl.href, id: 'demo-link' }, L('Open isolated demo ↗', '開啟獨立示範 ↗')))))));
 }
@@ -289,6 +301,18 @@ function captureFocus() {
   const selector = node.id ? `#${CSS.escape(node.id)}` : node.dataset?.action && node.dataset?.id ? `[data-action="${CSS.escape(node.dataset.action)}"][data-id="${CSS.escape(node.dataset.id)}"]${node.dataset.model ? `[data-model="${CSS.escape(node.dataset.model)}"]` : ''}` : node.dataset?.snippet ? `[data-snippet="${CSS.escape(node.dataset.snippet)}"]` : node.dataset?.requestId ? `[data-request-id="${CSS.escape(node.dataset.requestId)}"]` : node.dataset?.route ? `[data-route="${CSS.escape(node.dataset.route)}"]` : null;
   return (selector || inAccountsResults) ? { selector, inDrawer, inAccountsResults, accountId, action: node.dataset?.action || '', start: node.selectionStart, end: node.selectionEnd } : null;
 }
+function ensureVisibleInDrawer(target) {
+  const body = $('drawer-body');
+  if (!body || !target || typeof body.contains !== 'function' || !body.contains(target) || typeof body.getBoundingClientRect !== 'function' || typeof target.getBoundingClientRect !== 'function') return;
+  const bodyRect = body.getBoundingClientRect(), targetRect = target.getBoundingClientRect();
+  if (!bodyRect.height || !targetRect.height) return;
+  const pad = 12;
+  if (targetRect.top < bodyRect.top + pad) {
+    body.scrollTop -= (bodyRect.top + pad) - targetRect.top;
+  } else if (targetRect.bottom > bodyRect.bottom - pad) {
+    body.scrollTop += targetRect.bottom - (bodyRect.bottom - pad);
+  }
+}
 function restoreFocus(saved) {
   if (!saved || !saved.selector || $('action-dialog').open) return;
   const drawer = $('account-drawer');
@@ -296,6 +320,7 @@ function restoreFocus(saved) {
   const target = candidates.find(node => node.getClientRects().length);
   if (!target || target.disabled) return;
   target.focus({ preventScroll: true });
+  if (saved.inDrawer) ensureVisibleInDrawer(target);
   if (typeof saved.start === 'number' && typeof target.setSelectionRange === 'function') try { target.setSelectionRange(saved.start, saved.end); } catch { /* Number inputs do not support text selection. */ }
 }
 function restoreDisplacedAccountFocus(saved) {
@@ -315,6 +340,13 @@ function restoreDisplacedAccountFocus(saved) {
     $('main'),
   ];
   candidates.find(visible)?.focus({ preventScroll: true });
+}
+function keepDrawerFocus(saved) {
+  if (!saved?.inDrawer || !S.selectedAccountId || $('action-dialog')?.open) return;
+  const drawer = $('account-drawer');
+  if (drawer && !drawer.hidden && !drawer.contains(document.activeElement)) {
+    drawer.focus({ preventScroll: true });
+  }
 }
 function fold(id, title, content, initiallyOpen = false, attrs = {}) {
   const existing = $(id), open = existing ? existing.open : S.folds[id] ?? initiallyOpen;
@@ -347,6 +379,7 @@ function render() {
   renderAccountDrawer();
   restoreFocus(savedFocus);
   restoreDisplacedAccountFocus(savedFocus);
+  keepDrawerFocus(savedFocus);
 }
 function select(id, options, value, action) {
   const node = el('select', { id, onChange: event => action(event.target.value) }, options.map(([v, label]) => el('option', { value: v }, label)));
@@ -358,7 +391,7 @@ function renderPage() {
   const animate = S.enterRoute; S.enterRoute = false;
   return el('div', { class: `stack${animate ? ' content-enter' : ''}` }, pages[S.route]());
 }
-function updateContent() { const saved = captureFocus(); const container = $('page-content'); if (container) container.replaceChildren(renderPage()); renderAccountDrawer(); restoreFocus(saved); restoreDisplacedAccountFocus(saved); }
+function updateContent() { const saved = captureFocus(); const container = $('page-content'); if (container) container.replaceChildren(renderPage()); renderAccountDrawer(); restoreFocus(saved); restoreDisplacedAccountFocus(saved); keepDrawerFocus(saved); }
 function scheduleRefresh() { clearInterval(S.timer); S.timer = S.authenticated ? setInterval(maybeAutoRefresh, 15000) : null; }
 function canAutoRefresh() {
   return S.auto && S.authenticated && S.accounts !== null && !document.hidden && !S.bulkBusy && !S.loading && !S.actionBusy && !S.settingsBusy && !settingsDirty() && !$('action-dialog').open && !S.testBusy && ![...modelTests.values()].some(r => r.status === 'busy') && !quotaPending.size && !subscriptionPending.size && !document.activeElement?.matches('textarea,input:not([type="checkbox"]):not([type="radio"]),select:not(#account-status):not(#account-test-model)');
@@ -415,8 +448,12 @@ function applyBulkJob(job) {
       const account = S.accounts?.find(a => a.id === result.accountId);
       if (!account) continue;
       for (const detailed of document.querySelectorAll(`.account-quota[data-quota="${CSS.escape(result.accountId)}"]`)) {
-        const scope = detailed.dataset?.quotaScope === 'drawer' ? 'drawer' : 'card';
-        detailed.replaceWith(accountQuotaView(account, scope));
+        detailed.replaceWith(accountQuotaView(account));
+      }
+      const rawPaths = $(`drawer-raw-paths-${result.accountId}`);
+      if (rawPaths) {
+        const rawPathsNode = accountRawRowIdentities(account);
+        rawPaths.replaceChildren(...(rawPathsNode ? [rawPathsNode] : []));
       }
     }
     if (terminalCount > 0) {
@@ -425,12 +462,14 @@ function applyBulkJob(job) {
       const pulse = $('pool-pulse');
       if (pulse) pulse.replaceWith(poolPulseGrid());
     }
-    if (saved && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) {
-      restoreFocus(saved);
-      restoreDisplacedAccountFocus(saved);
-    }
-    if (S.selectedAccountId && (!document.activeElement || document.activeElement === document.body || !$('account-drawer')?.contains(document.activeElement))) {
-      $('account-drawer')?.focus({ preventScroll: true });
+    if (!$('action-dialog')?.open) {
+      if (saved && (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected)) {
+        restoreFocus(saved);
+        restoreDisplacedAccountFocus(saved);
+      }
+      if (S.selectedAccountId && !$('account-drawer')?.hidden && (!document.activeElement || document.activeElement === document.body || !$('account-drawer')?.contains(document.activeElement))) {
+        $('account-drawer')?.focus({ preventScroll: true });
+      }
     }
   }
   updateBulkUI();
@@ -480,7 +519,7 @@ async function refresh() {
   if (!S.authenticated) return;
   if (S.loading) { S.refreshQueued = true; return; }
   S.refreshQueued = false;
-  const epoch = S.epoch; const route = S.route; S.loading = true; S.error = ''; render();
+  const epoch = S.epoch; const route = S.route; const lookupEpoch = S.routeEpoch; S.loading = true; S.error = ''; render();
   try {
     const overview = await api('/overview');
     if (!overview || !Array.isArray(overview.accounts) || !Array.isArray(overview.requests) || !overview.metrics) throw { code: 'INVALID_RESPONSE' };
@@ -491,7 +530,17 @@ async function refresh() {
     if (route === 'keys') { const result = await api('/keys'); if (!Array.isArray(result.keys)) throw { code: 'INVALID_RESPONSE' }; if (epoch === S.epoch) S.keys = result.keys; }
     if (route === 'settings') { const result = await api('/settings'); if (!editableSettings.every(key => key in result)) throw { code: 'INVALID_RESPONSE' }; if (epoch === S.epoch) S.settings = result; }
   } catch (error) { if (epoch === S.epoch && S.authenticated) S.error = safeError(error); }
-  finally { if (epoch === S.epoch) { S.loading = false; render(); focusRouteTarget(); scheduleRefresh(); if (S.refreshQueued || route !== S.route) refresh(); else maybeAutoRefresh(); } }
+  finally {
+    if (epoch === S.epoch) {
+      S.loading = false;
+      const queued = S.refreshQueued || route !== S.route || lookupEpoch !== S.routeEpoch;
+      if (!queued && route === 'accounts' && !S.error) S.pendingAccountLookup = '';
+      render();
+      focusRouteTarget();
+      scheduleRefresh();
+      if (queued) refresh(); else maybeAutoRefresh();
+    }
+  }
 }
 async function logout() {
   confirmDialog(L('Sign out of this workspace?', '登出此工作區？'), L('Your admin session will end. Gateway requests and API keys are unaffected.', '管理員登入階段將結束，閘道請求及 API 金鑰不受影響。'), L('Admin session', '管理員登入階段'), async () => {
@@ -501,10 +550,16 @@ async function logout() {
 function applyRouteFromHash() {
   S.routeEpoch++;
   const { route, params } = readRouteHash(), clean = key => (params.get(key) || '').slice(0, 180);
+  const account = route === 'accounts' ? clean('account') : '';
+  const model = account ? clean('model') : '';
   if (route !== 'keys') revealedKeys.clear();
-  if (route !== 'accounts') closeAccountDrawer(false);
-  S.route = route; S.deepLink = { account: clean('account'), model: clean('model'), session: clean('session'), diagnostics: clean('diagnostics'), capabilities: clean('capabilities') };
-  if (S.deepLink.account) { S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; S.accountQuickFilter = ''; accountDisclosures.add(`account-${S.deepLink.account}`); document.querySelector(`[data-account-details="${CSS.escape(S.deepLink.account)}"]`)?.setAttribute('open', ''); }
+  if (route !== 'accounts' || !account) closeAccountDrawer(false);
+  S.route = route; S.pendingAccountLookup = account; S.deepLink = { account, model, session: clean('session'), diagnostics: clean('diagnostics'), capabilities: clean('capabilities') };
+  if (S.deepLink.account) {
+    S.accountQuery = ''; S.accountStatus = ''; S.accountAttention = false; S.accountCategory = ''; S.accountQuickFilter = '';
+    S.selectedAccountId = S.deepLink.account;
+    S.drawerReturnFocus = { selector: `[data-action="open-drawer"][data-id="${CSS.escape(S.deepLink.account)}"]`, inDrawer: false };
+  }
   if (S.deepLink.session) S.sessionQuery = S.deepLink.session;
   if (S.deepLink.capabilities === '1') { S.capabilitiesOpen = true; S.folds['capabilities-details'] = true; }
   if (S.deepLink.diagnostics === '1') { S.folds.advanced = true; $('advanced')?.setAttribute('open', ''); if (S.diagnostics) S.diagnosticsOpen = true; }
@@ -512,16 +567,31 @@ function applyRouteFromHash() {
 }
 function focusRouteTarget() {
   if (!S.pendingRouteFocus || $('action-dialog')?.open) return;
+  if (S.route === 'accounts' && S.deepLink.account && !(S.accounts || []).some(a => a.id === S.deepLink.account) && (S.accounts === null || S.loading || S.pendingAccountLookup === S.deepLink.account)) {
+    if (S.error && !S.loading && (!document.activeElement || document.activeElement === document.body)) {
+      ($('page-title') || $('main'))?.focus({ preventScroll: true });
+    }
+    return;
+  }
   let target = $('page-title');
   if (S.route === 'accounts' && S.deepLink.account) {
     const account = (S.accounts || []).find(a => a.id === S.deepLink.account);
-    if (account) target = S.deepLink.model && (S.overview?.models || []).includes(S.deepLink.model) ? $(`account-models-${account.id}`) : $(`account-card-${account.id}`);
+    if (account) {
+      S.selectedAccountId = account.id;
+      clearAccountCardSelection();
+      document.querySelector(`[data-account-card="${CSS.escape(account.id)}"]`)?.classList?.add('is-selected');
+      document.querySelector(`.account-drawer-trigger[data-id="${CSS.escape(account.id)}"]`)?.setAttribute('aria-expanded', 'true');
+      renderAccountDrawer();
+      target = S.deepLink.model && (S.overview?.models || []).includes(S.deepLink.model)
+        ? $(`account-models-${account.id}`)
+        : $('account-drawer');
+    }
   } else if (S.route === 'sessions' && S.deepLink.session) target = $('session-results');
   else if (S.route === 'settings' && S.deepLink.diagnostics === '1') target = $('load-diagnostics');
   else if (S.route === 'models' && S.deepLink.capabilities === '1') target = document.querySelector('#capabilities-details > summary');
   if (!target) target = $('page-title');
   if (!target) return;
-  S.pendingRouteFocus = false; target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+  S.pendingRouteFocus = false; target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'nearest', behavior: 'auto' }); ensureVisibleInDrawer(target);
 }
 function goto(route, params = {}) { const next = routeHash(route, params); if (location.hash === next) { applyRouteFromHash(); render(); focusRouteTarget(); refresh(); } else location.hash = next.slice(1); }
 window.addEventListener('hashchange', () => { if (!S.authenticated) return; applyRouteFromHash(); render(); focusRouteTarget(); refresh(); });
@@ -583,8 +653,12 @@ function bulkResultView(a) {
   const reason = { ACCOUNT_DISABLED: L('account disabled', '帳戶已停用'), ACCOUNT_LOGIN_REQUIRED: L('sign-in needed', '需要登入'), ACCOUNT_BUSY: L('account busy', '帳戶忙碌中'), QUOTA_REFRESH_THROTTLED: L('checked less than 30 seconds ago', '30 秒內已查詢'), QUOTA_SNAPSHOT_NEWER: L('newer saved usage kept', '保留較新用量') }[result.reason];
   return el('p', { class: 'help', 'data-bulk-account-result': a.id }, L('Last Refresh all: ', '上次全部更新：'), status, reason ? ` · ${reason}` : '', result.reason && !reason && /^[A-Z0-9_]{1,64}$/.test(result.reason) ? ` · ${result.reason}` : '');
 }
-function accountQuotaView(a, scope = 'card') {
-  const isDrawer = scope === 'drawer';
+function accountRawRowIdentities(a) {
+  return (a.quota?.usageRows || []).some(r => r.sourcePath)
+    ? fold(`quota-paths-${a.id}`, L('Raw row identities', '原始資料列識別'), definition((a.quota.usageRows || []).map(r => [r.label || t('unknown'), mono(r.sourcePath || L('Not supplied', '未提供'))])))
+    : null;
+}
+function accountQuotaView(a) {
   const q = a.quota || {}, known = q.source === 'official', pending = quotaPending.has(a.id);
   const rows = (q.usageRows || []).slice(0, 32), budgets = (q.budgets || []).slice(0, 32), refills = (q.refills || []).slice(0, 32);
   const stamp = (label, value, attrs = {}) => el('span', { class: 'quota-time', ...attrs }, label, value ? el('time', { datetime: value, title: value }, date(value)) : '—');
@@ -597,7 +671,7 @@ function accountQuotaView(a, scope = 'card') {
     : failed ? L('Update failed. ', '更新失敗。') + (hasData ? L('Showing previous values. ', '顯示上次數字。') : L('No usage data yet. ', '尚未取得用量。')) + (quotaRefreshErrors.get(a.id) || q.errorCode || 'QUOTA_ERROR')
     : q.status === 'missing' ? hasData ? L('No new values returned. Showing previous values.', '未取得新數字，顯示上次數字。') : L('No usage data returned.', '未取得用量資料。')
     : hasData ? '' : L('No usage data yet.', '尚未取得用量。');
-  return el('section', { class: 'account-quota', 'data-quota': a.id, 'data-quota-scope': scope, 'aria-label': L('Provider usage', '供應商用量') },
+  return el('section', { class: 'account-quota', 'data-quota': a.id, 'aria-label': L('Provider usage', '供應商用量') },
     bulkResultView(a),
     el('div', { class: 'account-section-head' }, el('h3', {}, L('Usage', '用量'))),
     rows.length > 0 && el('p', { class: 'quota-value-note', 'data-quota-value-note': '' }, L('Google raw percentages — not a remaining balance or a local request count.', 'Google 原始百分比 — 不等於剩餘額度或本地請求數。')),
@@ -614,10 +688,10 @@ function accountQuotaView(a, scope = 'card') {
       b.unit != null && el('span', { class: 'quota-time' }, L('Provider unit code: ', '供應商單位代碼：') + b.unit),
       b.refillAt && stamp(L('Next refill: ', '下次補充：'), b.refillAt), stamp(L('Budget observed: ', '額度觀察時間：'), q.budgetsUpdatedAt || q.budgetUpdatedAt || q.updatedAt))),
     !rows.length && !budgets.length && el('div', { class: 'quota-unavailable' }, el('strong', {}, L('Quota not supplied', '未提供額度')), el('p', {}, known ? L('Google returned no usage values.', 'Google 沒有回傳用量數值。') : L('No provider quota snapshot. Local activity is shown separately.', '尚無供應商配額資料。本地活動會分開顯示。')), !refills.length && el('span', { class: 'quota-time' }, L('Refill / reset time not supplied', '未提供補充／重置時間')))),
-    el('div', { class: 'quota-feedback', 'data-quota-feedback': '', 'data-state': pending ? 'pending' : failed ? 'error' : 'snapshot', id: `${isDrawer ? 'drawer-' : ''}quota-feedback-${a.id}`, tabindex: '-1', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
+    el('div', { class: 'quota-feedback', 'data-quota-feedback': '', 'data-state': pending ? 'pending' : failed ? 'error' : 'snapshot', id: `quota-feedback-${a.id}`, tabindex: '-1', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
       el('p', {}, feedback), commonObservation && stamp(L('Display observed: ', '顯示值觀察時間：'), observedAt(rows[0]), { 'data-quota-observed': '' })),
     el('div', { class: 'quota-controls' }, btn([icon('refresh'), pending ? L('Refreshing…', '更新中…') : L('Refresh quota', '更新額度')], () => refreshAccountQuota(a), { 'data-action': 'refresh-quota', 'data-id': a.id, disabled: pending || Boolean(blocked), 'aria-label': L('Refresh quota for ', '更新額度：') + accountDisplayName(a) }), el('span', { class: 'help', 'data-quota-block-reason': '' }, blocked || L('Read-only · this account only', '唯讀 · 只限此帳戶'))),
-    accountDisclosure(isDrawer ? 'drawer-quota' : 'quota', a.id, L('Source, timing & limit details', '來源、時間與用量說明'), el('div', { class: 'disclosure-body' },
+    accountDisclosure('quota', a.id, L('Source, timing & limit details', '來源、時間與用量說明'), el('div', { class: 'disclosure-body' },
       el('p', {}, L('Verified GetUsageInfo rows show used percentages and usage-window refresh times. A window refresh is not a guarantee that all quota refills to maximum. Unidentified rows keep unspecified meanings. Next refill is not necessarily a full reset. No remaining balance is inferred.', '已核實的 GetUsageInfo 資料列會顯示已用百分比及用量視窗更新時間。視窗更新不保證所有配額補滿；來源未核實的資料列仍保留未指明含義。下次補充也不一定等於完整重置，亦不會推算剩餘額度。')),
       el('p', {}, L('Missing values stay unknown. Refresh only queries this account; no model response is generated.', '未提供的數值會保持未知。更新只查詢此帳戶，不會生成模型回應。')),
       stamp(L('Last attempt: ', '上次查詢：'), q.lastAttemptAt), el('span', { class: 'quota-time' }, L('Source: ', '來源：') + (q.source || 'unknown')),
@@ -634,10 +708,10 @@ async function refreshAccountQuota(account) {
   catch (error) { if (S.epoch === epoch && S.authenticated) { quotaRefreshErrors.set(account.id, safeError(error)); await refresh(); } }
   finally {
     quotaPending.delete(account.id); render();
-    if (returnFocus && S.epoch === epoch && S.route === 'accounts' && (document.activeElement === document.body || document.activeElement?.dataset.action === 'refresh-quota')) {
+    if (returnFocus && S.epoch === epoch && S.authenticated && S.route === 'accounts' && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || (inDrawer && document.activeElement === $('account-drawer')) || document.activeElement?.dataset.action === 'refresh-quota')) {
       const drawer = $('account-drawer');
       const target = [...document.querySelectorAll(`[data-action="refresh-quota"][data-id="${CSS.escape(account.id)}"]`)].find(n => inDrawer ? Boolean(drawer?.contains(n)) : !drawer?.contains(n));
-      target?.focus({ preventScroll: true });
+      if (target && !target.disabled) { target.focus({ preventScroll: true }); if (inDrawer) ensureVisibleInDrawer(target); }
     }
   }
 }
@@ -649,7 +723,7 @@ function accountSubscriptionView(a) {
   const hasPrevious = !known && s.source === 'official' && s.updatedAt && s.tier && s.tier !== 'unknown';
   const blocked = quotaRefreshBlockReason(a);
   return el('section', { class: 'account-subscription', 'data-subscription': a.id, 'aria-label': L('Subscription tier', '訂閱層級') },
-    el('div', { class: 'subscription-summary' }, el('span', { class: 'help' }, L('Subscription', '訂閱')), badge(known ? subscriptionTierLabel(s.tier) : t('unknown'), known ? 'teal' : failed ? 'amber' : '', false, { 'data-subscription-tier': '' }),
+    el('div', { class: 'subscription-summary' }, el('h3', { class: 'help', style: 'font-size:inherit;font-weight:inherit' }, L('Subscription', '訂閱')), badge(known ? subscriptionTierLabel(s.tier) : t('unknown'), known ? 'teal' : failed ? 'amber' : '', false, { 'data-subscription-tier': '' }),
       btn(pending ? L('Checking…', '查詢中…') : L('Check subscription', '查詢訂閱'), () => refreshAccountSubscription(a), { class: 'compact quiet', 'data-action': 'refresh-subscription', 'data-id': a.id, disabled: pending || Boolean(blocked), title: blocked || L('Read-only GetUsageInfo tier; no generation or quota changes', '唯讀 GetUsageInfo 層級，不會生成或更改配額') })),
     el('div', { class: 'subscription-meta help', role: 'status', 'aria-live': 'polite', 'data-subscription-feedback': '' },
       pending ? L('Checking Google subscription tier…', '正在查詢 Google 訂閱層級…') : failed ? L('Current tier unknown — ', '目前層級未知 — ') + (subscriptionRefreshErrors.get(a.id) || s.errorCode || 'SUBSCRIPTION_FETCH_FAILED') : known ? L('Google GetUsageInfo access tier, not billing-owner proof.', 'Google GetUsageInfo 回報的權限層級，不代表付款人證明。') : L('Not checked or no recognized tier returned.', '未查詢或未回報可識別層級。'),
@@ -665,10 +739,10 @@ async function refreshAccountSubscription(account) {
   catch (error) { if (S.epoch === epoch && S.authenticated) { subscriptionRefreshErrors.set(account.id, safeError(error)); await refresh(); } }
   finally {
     subscriptionPending.delete(account.id); render();
-    if (returnFocus && S.epoch === epoch && S.route === 'accounts' && (document.activeElement === document.body || document.activeElement?.dataset.action === 'refresh-subscription')) {
+    if (returnFocus && S.epoch === epoch && S.authenticated && S.route === 'accounts' && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || (inDrawer && document.activeElement === $('account-drawer')) || document.activeElement?.dataset.action === 'refresh-subscription')) {
       const drawer = $('account-drawer');
       const target = [...document.querySelectorAll(`[data-action="refresh-subscription"][data-id="${CSS.escape(account.id)}"]`)].find(n => inDrawer ? Boolean(drawer?.contains(n)) : !drawer?.contains(n));
-      target?.focus({ preventScroll: true });
+      if (target && !target.disabled) { target.focus({ preventScroll: true }); if (inDrawer) ensureVisibleInDrawer(target); }
     }
   }
 }
@@ -726,6 +800,9 @@ async function testAccountModel(a, model) {
   const key = `${a.id}:${model}`;
   if (modelTests.get(key)?.status === 'busy') return;
   const epoch = S.epoch;
+  const active = document.activeElement;
+  const returnFocus = active?.dataset?.action === 'test-model' && active?.dataset?.id === a.id && active?.dataset?.model === model;
+  const inDrawer = Boolean($('account-drawer')?.contains(active));
   modelTests.set(key, { status: 'busy' }); updateContent();
   try {
     if (a.routingAllowed === false) throw { code: 'ACCOUNT_ROUTING_EXCLUDED' };
@@ -735,6 +812,11 @@ async function testAccountModel(a, model) {
     modelTests.set(key, { status: 'ok', at: Date.now() });
   } catch (error) { if (epoch !== S.epoch || !S.authenticated) return; modelTests.set(key, { status: 'fail', at: Date.now(), error: /^[A-Z0-9_]{1,64}$/.test(error?.code || '') ? error.code : 'REQUEST_FAILED' }); }
   updateContent();
+  if (returnFocus && epoch === S.epoch && S.authenticated && S.route === 'accounts' && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || (inDrawer && document.activeElement === $('account-drawer')) || (document.activeElement?.dataset?.action === 'test-model' && document.activeElement?.dataset?.id === a.id && document.activeElement?.dataset?.model === model))) {
+    const drawer = $('account-drawer');
+    const target = [...document.querySelectorAll(`[data-action="test-model"][data-id="${CSS.escape(a.id)}"][data-model="${CSS.escape(model)}"]`)].find(n => inDrawer ? Boolean(drawer?.contains(n)) : !drawer?.contains(n));
+    if (target && !target.disabled) { target.focus({ preventScroll: true }); if (inDrawer) ensureVisibleInDrawer(target); }
+  }
 }
 function modelStateLabel(state) {
   return ({ unverified: L('Not verified', '未驗證'), verified: L('Last verified', '曾成功驗證'), rejected: L('Previous upstream rejection', '曾被上游拒絕'), blocked: L('Previous account rejection (historical)', '過往帳戶拒絕紀錄') })[state] || L('Not verified', '未驗證');
@@ -856,7 +938,7 @@ function poolPulseGrid() {
     el('article', { class: 'pulse-card' },
       el('div', { class: 'pulse-head' }, el('span', {}, L('ROUTABLE ACCOUNT POOL', '可路由帳戶池')), badge(routable > 0 ? L('Ready', '就緒') : L('Unavailable', '暫不可用'), routable > 0 ? 'teal' : 'amber', true)),
       el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value number' }, num(routable), el('small', {}, ` / ${num(all.length)}`)), el('span', { class: 'pulse-sub' }, L(`${proCount} Pro+ · ${attnCount} attention`, `${proCount} Pro+ · ${attnCount} 需關注`))),
-      el('div', { class: 'segmented-bar', 'aria-hidden': true }, all.length ? all.map(a => el('span', { style: `width:${100 / all.length}%;background:${!a.enabled && !accountHasAttention(a) ? 'var(--subtle)' : accountHasAttention(a) ? 'var(--amber)' : accountRoutingEligible(a) ? 'var(--teal)' : 'var(--subtle)'}` })) : el('span', { style: 'width:100%;background:var(--border)' }))),
+      el('div', { class: 'segmented-bar', 'aria-hidden': true }, all.length ? all.map(a => el('span', { style: `width:${100 / all.length}%;background:${!a.enabled && !accountHasAttention(a) ? 'var(--subtle)' : accountHasAttention(a) ? 'var(--amber)' : accountRoutingEligible(a) ? 'var(--teal)' : accountAtCapacity(a) ? 'var(--primary)' : 'var(--subtle)'}` })) : el('span', { style: 'width:100%;background:var(--border)' }))),
     el('article', { class: 'pulse-card' },
       el('div', { class: 'pulse-head' }, el('span', {}, L('CURRENT WINDOW AVG', '目前視窗平均已用')), mono('GetUsageInfo')),
       el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value number' }, avgUsed !== null ? `${num(avgUsed)}%` : t('unknown')), el('span', { class: 'pulse-sub' }, nextRefresh ? L('Refreshes ', '視窗更新 ') + date(nextRefresh, true) : L('Raw used % only', '僅顯示原始已用 %'))),
@@ -930,15 +1012,36 @@ function setBackgroundInert(inert) {
     if (node) node.inert = Boolean(inert);
   }
 }
-function openAccountDrawer(id) {
-  if (!(S.accounts || []).some(a => a.id === id)) return;
-  if (!S.selectedAccountId) {
-    const captured = captureFocus();
-    S.drawerReturnFocus = captured && !captured.inDrawer
-      ? captured
-      : { selector: `[data-action="open-drawer"][data-id="${CSS.escape(id)}"]`, inDrawer: false };
+function clearAccountCardSelection() {
+  document.querySelectorAll('.daily-account.is-selected').forEach(n => n.classList?.remove('is-selected'));
+  document.querySelectorAll('.account-drawer-trigger[aria-expanded="true"]').forEach(n => n.setAttribute('aria-expanded', 'false'));
+}
+function syncAccountRouteHash(accountId = '', model = '') {
+  if (S.route !== 'accounts') return;
+  const nextHash = accountId
+    ? routeHash('accounts', { account: accountId, ...(model ? { model } : {}) })
+    : (location.hash ? '#accounts' : '');
+  if (location.hash === nextHash) return;
+  const nextUrl = new URL(location.href);
+  nextUrl.hash = nextHash;
+  if (typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+    history.replaceState(null, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+  } else {
+    location.hash = nextHash;
+    location.href = nextUrl.href;
   }
+}
+function openAccountDrawer(id) {
+  if (S.route !== 'accounts' || !(S.accounts || []).some(a => a.id === id)) return;
+  const captured = !S.selectedAccountId ? captureFocus() : null;
+  S.drawerReturnFocus = captured && !captured.inDrawer
+    ? captured
+    : { selector: `[data-action="open-drawer"][data-id="${CSS.escape(id)}"]`, inDrawer: false };
   S.selectedAccountId = id;
+  S.pendingAccountLookup = '';
+  S.pendingRouteFocus = false;
+  S.deepLink = { ...S.deepLink, account: id, model: '' };
+  syncAccountRouteHash(id);
   updateContent();
   $('account-drawer')?.focus({ preventScroll: true });
 }
@@ -947,12 +1050,21 @@ function closeAccountDrawer(restore = true) {
   const saved = S.drawerReturnFocus;
   S.selectedAccountId = '';
   S.drawerReturnFocus = null;
+  if (restore) {
+    S.pendingAccountLookup = '';
+    S.pendingRouteFocus = false;
+    if (S.deepLink?.account) {
+      S.deepLink.account = '';
+      S.deepLink.model = '';
+    }
+    syncAccountRouteHash('');
+  }
   setBackgroundInert(false);
   const backdrop = $('drawer-backdrop'), drawer = $('account-drawer');
   if (backdrop) backdrop.hidden = true;
-  if (drawer) { drawer.hidden = true; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren(); }
+  if (drawer) { drawer.hidden = true; delete drawer.dataset.accountId; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren(); }
   if (closedId) {
-    document.querySelectorAll('.daily-account.is-selected').forEach(n => n.classList.remove('is-selected'));
+    clearAccountCardSelection();
     if (restore && S.authenticated && !$('action-dialog')?.open) {
       restoreFocus(saved);
       if (!document.activeElement || document.activeElement === document.body || drawer?.contains(document.activeElement)) {
@@ -998,18 +1110,45 @@ document.addEventListener('keydown', event => {
 function renderAccountDrawer() {
   const backdrop = $('drawer-backdrop'), drawer = $('account-drawer');
   if (!backdrop || !drawer) return;
-  const a = S.authenticated && S.selectedAccountId ? (S.accounts || []).find(item => item.id === S.selectedAccountId) : null;
-  if (!a) {
-    const vanished = Boolean(S.selectedAccountId);
-    S.selectedAccountId = '';
-    S.drawerReturnFocus = null;
+  if (!S.authenticated || S.route !== 'accounts' || !S.selectedAccountId || S.accounts === null) {
+    if (!S.authenticated || S.route !== 'accounts' || !S.selectedAccountId) {
+      S.selectedAccountId = '';
+      S.pendingAccountLookup = '';
+      S.drawerReturnFocus = null;
+      clearAccountCardSelection();
+    }
     setBackgroundInert(false);
-    backdrop.hidden = true; drawer.hidden = true; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren();
-    if (vanished && S.authenticated && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || drawer.contains(document.activeElement))) {
+    backdrop.hidden = true; drawer.hidden = true; delete drawer.dataset.accountId; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren();
+    return;
+  }
+  const a = S.accounts.find(item => item.id === S.selectedAccountId);
+  if (!a) {
+    if ((S.loading || S.pendingAccountLookup === S.selectedAccountId) && S.deepLink?.account === S.selectedAccountId) {
+      setBackgroundInert(false);
+      backdrop.hidden = true; drawer.hidden = true; delete drawer.dataset.accountId; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren();
+      return;
+    }
+    const vanishedId = S.selectedAccountId;
+    S.selectedAccountId = '';
+    S.pendingAccountLookup = '';
+    S.drawerReturnFocus = null;
+    if (S.deepLink?.account === vanishedId) {
+      S.deepLink.account = '';
+      S.deepLink.model = '';
+    }
+    syncAccountRouteHash('');
+    clearAccountCardSelection();
+    setBackgroundInert(false);
+    backdrop.hidden = true; drawer.hidden = true; delete drawer.dataset.accountId; drawer.removeAttribute('role'); drawer.removeAttribute('aria-modal'); drawer.replaceChildren();
+    if (S.authenticated && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || drawer.contains(document.activeElement))) {
       ($('account-search') || $('page-title') || $('main'))?.focus({ preventScroll: true });
     }
     return;
   }
+  if (S.pendingAccountLookup === a.id) S.pendingAccountLookup = '';
+  const prevBody = !drawer.hidden && drawer.dataset.accountId === a.id ? $('drawer-body') : null;
+  const prevScrollTop = prevBody?.scrollTop || 0;
+  drawer.dataset.accountId = a.id;
   setBackgroundInert(true);
   backdrop.hidden = false;
   backdrop.onclick = () => closeAccountDrawer(true);
@@ -1018,24 +1157,38 @@ function renderAccountDrawer() {
   drawer.setAttribute('aria-modal', 'true');
   drawer.setAttribute('tabindex', '-1');
   const plan = a.subscription?.source === 'official' && a.subscription?.tier && a.subscription.tier !== 'unknown' ? subscriptionTierLabel(a.subscription.tier) : '';
+  const routingLabel = accountRoutingLabel(a);
+  const drawerBody = el('div', { class: 'drawer-body', id: 'drawer-body' },
+    el('section', { class: 'drawer-section' },
+      el('h3', { class: 'drawer-section-title' }, L('Account Overview & Routing', '帳戶概覽與路由')),
+      definition([
+        [L('Account ID', '帳戶識別碼'), mono(a.id)],
+        [L('Authentication', '登入驗證'), t(a.authenticationStatus || 'unknown')],
+        [t('status'), accountStatus(a)],
+        [L('Request routing', '請求路由'), routingLabel],
+        [L('Requests / failures / in flight', '請求／失敗／執行中'), `${a.requests ?? '—'} / ${a.failures ?? '—'} / ${a.inFlight ?? '—'}`],
+        [L('Last used', '上次使用'), date(a.lastUsedAt)],
+      ]),
+      el('div', { id: `drawer-raw-paths-${a.id}` }, accountRawRowIdentities(a))),
+    accountQuotaView(a),
+    accountSubscriptionView(a),
+    el('section', { class: 'account-models', id: `account-models-${a.id}`, tabindex: '-1' }, el('h3', {}, L('Model Access & Verification', '模型存取與驗證')), accountModelStates(a)),
+    el('section', { class: 'drawer-section' },
+      el('h3', { class: 'drawer-section-title' }, L('Gemini Main-Service Terms', 'Gemini 主服務條款')),
+      accountTermsView(a)),
+    a.terms?.status === 'error' && termsEvidenceView(a.terms.evidence),
+    a.lastError && el('div', { 'data-account-upstream-error': a.id }, upstreamErrorView(a.lastError.nativeEvidence, a.lastError.status)));
   drawer.replaceChildren(
     el('div', { class: 'drawer-head' },
       el('div', {},
         el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' }, el('h2', { id: 'drawer-title', style: 'margin:0;font-size:15.5px' }, accountDisplayName(a)), plan && el('span', { class: 'plan-pill' }, plan), accountStatus(a)),
         el('div', { class: 'mono muted', style: 'font-size:11px;margin-top:4px' }, L(`${a.id} · ${a.requests ?? '—'} reqs · ${a.failures ?? '—'} errors · ${a.inFlight ?? '—'} in flight`, `${a.id} · ${a.requests ?? '—'} 請求 · ${a.failures ?? '—'} 錯誤 · ${a.inFlight ?? '—'} 執行中`))),
       btn(`✕ ${t('close')}`, () => closeAccountDrawer(true), { id: 'drawer-close', class: 'compact' })),
-    el('div', { class: 'drawer-body' },
-      accountQuotaView(a, 'drawer'),
-      accountSubscriptionView(a),
-      el('section', { class: 'account-models' }, el('h3', {}, L('Model Access & Verification', '模型存取與驗證')), accountModelStates(a)),
-      el('section', { class: 'drawer-section' },
-        el('div', { class: 'drawer-section-title' }, el('span', {}, L('Gemini Main-Service Terms', 'Gemini 主服務條款'))),
-        accountTermsView(a)),
-      a.terms?.status === 'error' && termsEvidenceView(a.terms.evidence),
-      a.lastError && upstreamErrorView(a.lastError.nativeEvidence, a.lastError.status)),
+    drawerBody,
     el('div', { class: 'drawer-foot' },
-      btn(t('rename'), () => renameAccount(a), { id: 'drawer-rename', class: 'compact' }),
-      btn(L('Remove local secrets', '移除本機秘密'), () => removeAccount(a), { id: 'drawer-remove', class: 'compact danger' })));
+      btn(t('rename'), () => renameAccount(a), { id: 'drawer-rename', class: 'compact', 'data-action': 'rename-account', 'data-id': a.id }),
+      btn(L('Remove local secrets', '移除本機秘密'), () => removeAccount(a), { id: 'drawer-remove', class: 'compact danger', 'data-action': 'remove-account', 'data-id': a.id })));
+  if (prevScrollTop > 0) drawerBody.scrollTop = prevScrollTop;
 }
 function quickFilterPills() {
   const all = S.accounts || [];
@@ -1087,17 +1240,18 @@ function accountResults() {
           btn(t(a.enabled ? 'disable' : 'enable'), () => toggleAccount(a), { class: 'enabled-switch', role: 'switch', 'aria-checked': String(a.enabled), 'data-action': 'toggle-account', 'data-id': a.id, 'aria-label': `${t(a.enabled ? 'disable' : 'enable')} ${accountDisplayName(a)}` }),
           dailyQuota(a),
           el('div', { class: 'daily-test' },
-            el('div', { class: 'daily-test-buttons' },
-              btn(result?.status === 'busy' ? L('Testing…', '測試中…') : 'Test', () => testAccountModel(a, model), { class: 'compact', 'data-action': 'test-model', 'data-id': a.id, 'data-model': model, disabled: blocked || !model || result?.status === 'busy', title: blocked ? L('Sign in to test. Routing exclusions still apply.', '請登入以測試，路由排除仍然適用。') : L('Sends one model request; may use quota.', '發送一次模型請求，可能消耗配額。') }),
-              btn(L('Inspect →', '側欄檢視 →'), () => openAccountDrawer(a.id), { class: 'compact quiet', 'data-action': 'open-drawer', 'data-id': a.id, 'aria-label': L('Inspect account details in drawer: ', '在側欄檢視帳戶詳情：') + accountDisplayName(a) })),
+            btn(result?.status === 'busy' ? L('Testing…', '測試中…') : 'Test', () => testAccountModel(a, model), { class: 'compact', 'data-action': 'test-model', 'data-id': a.id, 'data-model': model, disabled: blocked || !model || result?.status === 'busy', title: blocked ? L('Sign in to test. Routing exclusions still apply.', '請登入以測試，路由排除仍然適用。') : L('Sends one model request; may use quota.', '發送一次模型請求，可能消耗配額。') }),
             el('small', { role: 'status', 'data-model-test-result': '', title: result?.error || '' }, result?.status === 'ok' ? 'OK' : result?.status === 'fail' ? L('Failed', '失敗') : L('Uses quota', '消耗配額')))),
         accountTermsView(a),
-        accountDisclosure('account', a.id, L('More / details', '更多／詳細資料'), el('div', { class: 'daily-details stack' },
-          el('div', { class: 'actions' }, btn(t('rename'), () => renameAccount(a), { class: 'compact', 'data-action': 'rename-account', 'data-id': a.id }), btn(t('remove'), () => removeAccount(a), { class: 'compact danger', 'data-action': 'remove-account', 'data-id': a.id })),
-          definition([[L('Account ID', '帳戶識別碼'), mono(a.id)], [L('Authentication', '登入驗證'), t(a.authenticationStatus || 'unknown')], [t('status'), accountStatus(a)], [L('Requests / failures / in flight', '請求／失敗／執行中'), `${a.requests ?? '—'} / ${a.failures ?? '—'} / ${a.inFlight ?? '—'}`], [L('Last used', '上次使用'), date(a.lastUsedAt)]]),
-          (a.quota?.usageRows || []).some(r => r.sourcePath) && fold(`quota-paths-${a.id}`, L('Raw row identities', '原始資料列識別'), definition((a.quota.usageRows || []).map(r => [r.label || t('unknown'), mono(r.sourcePath || L('Not supplied', '未提供'))]))),
-          accountSubscriptionView(a), accountQuotaView(a), el('section', { class: 'account-models', id: `account-models-${a.id}`, tabindex: '-1' }, el('h3', {}, L('Model access details', '模型存取詳情')), accountModelStates(a)),
-          a.terms?.status === 'error' && termsEvidenceView(a.terms.evidence), a.lastError && el('div', { 'data-account-upstream-error': a.id }, upstreamErrorView(a.lastError.nativeEvidence, a.lastError.status)))));
+        btn([el('span', {}, L('More / details', '更多／詳細資料')), el('span', { class: 'drawer-trigger-arrow', 'aria-hidden': 'true' }, '›')], () => openAccountDrawer(a.id), {
+          class: 'account-drawer-trigger',
+          'data-action': 'open-drawer',
+          'data-id': a.id,
+          'aria-haspopup': 'dialog',
+          'aria-controls': 'account-drawer',
+          'aria-expanded': String(S.selectedAccountId === a.id),
+          'aria-label': L('More / details for ', '更多／詳細資料：') + accountDisplayName(a),
+        }));
     }));
 }
 
@@ -1347,7 +1501,7 @@ function closeDialog() {
   const dialog = $('action-dialog'); const focus = D.returnFocus;
   D.generation++; D.busy = false; D.cleanup?.(); D.cleanup = null;
   if (dialog.open) dialog.close(); dialog.replaceChildren();
-  if (focus?.isConnected) focus.focus({ preventScroll: true }); else if (D.returnSelector && [...document.querySelectorAll(D.returnSelector.selector)].some(node => node.getClientRects().length)) restoreFocus(D.returnSelector); else $('main')?.focus({ preventScroll: true });
+  if (focus?.isConnected) focus.focus({ preventScroll: true }); else if (D.returnSelector && [...document.querySelectorAll(D.returnSelector.selector)].some(node => node.getClientRects().length)) restoreFocus(D.returnSelector); else (S.selectedAccountId && !$('account-drawer')?.hidden ? $('account-drawer') : $('main'))?.focus({ preventScroll: true });
 }
 $('action-dialog').addEventListener('cancel', event => { event.preventDefault(); if (!D.busy) closeDialog(); });
 function openDialog(title, description, content, onSubmit, submitText = t('confirm'), danger = false) {
@@ -1558,6 +1712,11 @@ async function runPlayground(model, prompt) {
 }
 
 /* Synthetic fixture exists only in memory, and is constructed only under ?demo=1. */
+function syncDemoAccountRouting(a) {
+  a.routingAllowed = a.routingAllowed !== false;
+  a.routingEligible = Boolean(a.routingAllowed && a.enabled && a.status === 'ready' && !accountCoolingDown(a) && !accountNeedsSignIn(a) && (!finite(a.inFlight) || a.inFlight < 2));
+  return a;
+}
 function makeDemo() {
   const now = Date.now(), ago = seconds => new Date(now - seconds * 1000).toISOString();
   const accounts = [
@@ -1565,7 +1724,7 @@ function makeDemo() {
     { id: 'acct_secondary', label: 'Secondary workspace', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(38), inFlight: 1, requests: 946, failures: 4, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null } },
     { id: 'acct_reserve', label: 'Reserve account', enabled: true, status: 'ready', authenticationStatus: 'signed_in', cooldownUntil: null, lastUsedAt: ago(280), inFlight: 0, requests: 218, failures: 6, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null } },
     { id: 'acct_reconnect', label: 'Reconnect needed', enabled: false, status: 'login_required', authenticationStatus: 'login_required', cooldownUntil: null, lastUsedAt: ago(86400), inFlight: 0, requests: 126, failures: 2, quota: { source: 'unknown', remainingPercent: null, updatedAt: null }, subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null } },
-  ];
+  ].map(syncDemoAccountRouting);
   const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: i % 3 ? 'gemini-argon' : 'gemini-flash-lite', accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
   const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `sess_demo_${String(i + 1).padStart(3, '0')}`, accountId: i % 2 ? 'acct_secondary' : 'acct_primary', turns: [12, 6, 3, 8, 2, 17, 4, 1][i], lastUsedAt: ago(i * 58 + 12), inFlight: i < 3 ? 1 : 0 }));
   const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, sessionTtlMs: 1800000, maxSessions: 256 };
@@ -1587,6 +1746,7 @@ function setDemoScenario(value) {
   if (value === 'empty') { fixture.accounts = []; fixture.sessions = []; fixture.failovers = []; fixture.requests = []; fixture.audit = []; fixture.keys = []; fixture.keyCount = 0; fixture.ready = false; fixture.metrics = { requests: 0, errors: 0, active: 0, successRate: null, p50Ms: null, p95Ms: null }; }
   if (value === 'auth') { fixture.accounts[0].status = 'auth_error'; fixture.accounts[0].authenticationStatus = 'auth_error'; fixture.accounts[1].status = 'login_required'; fixture.accounts[1].authenticationStatus = 'login_required'; fixture.ready = false; }
   if (value === 'quota') fixture.accounts.forEach((a, i) => { a.quota = demoUsage(i); });
+  fixture.accounts.forEach(syncDemoAccountRouting);
   Object.keys(demo).forEach(key => delete demo[key]); Object.assign(demo, fixture);
   S.keys = null; S.settings = null; S.draft = null; S.diagnostics = null; S.settingsError = ''; S.settingsSaved = false; S.output = ''; S.testError = ''; refresh();
 }
@@ -1608,11 +1768,11 @@ async function demoApi(path, method, data) {
   }
   if (method === 'GET') {
     if (path === '/session') return { authenticated: true, csrf: 'demo-csrf-not-a-real-session' };
-    if (path === '/overview') { const { keys, ...overview } = demo; return clone(overview); }
-    if (path === '/accounts') return { accounts: clone(demo.accounts) };
+    if (path === '/overview') { demo.accounts.forEach(syncDemoAccountRouting); const { keys, ...overview } = demo; return clone(overview); }
+    if (path === '/accounts') { demo.accounts.forEach(syncDemoAccountRouting); return { accounts: clone(demo.accounts) }; }
     if (path === '/keys') return { keys: demo.keys.filter(k => !k.revokedAt).map(({ secret: _secret, ...rest }) => clone(rest)) };
     if (path === '/settings') return clone(demo.settings);
-    if (path === '/diagnostics') return { demo: true, version: demo.version, mode: demo.mode, toolProtocol: demo.toolProtocol, ready: demo.ready, metrics: clone(demo.metrics), accountCounts: { total: demo.accounts.length, ready: demo.accounts.filter(a => a.enabled && a.status === 'ready').length }, settings: clone(demo.settings) };
+    if (path === '/diagnostics') return { demo: true, version: demo.version, mode: demo.mode, toolProtocol: demo.toolProtocol, ready: demo.ready, metrics: clone(demo.metrics), accountCounts: { total: demo.accounts.length, ready: demo.accounts.map(syncDemoAccountRouting).filter(accountRoutingEligible).length }, settings: clone(demo.settings) };
   }
   const audit = (action, target) => demo.audit.unshift({ id: `audit_demo_${demo.audit.length + 1}`, at: new Date().toISOString(), action, target });
   if (path === '/logout') return {};
@@ -1625,7 +1785,21 @@ async function demoApi(path, method, data) {
     if (a.authenticationStatus !== 'signed_in') throw { code: 'ACCOUNT_LOGIN_REQUIRED', status: 409 };
     a.terms = { status: 'accepted', acceptedAt: new Date().toISOString(), version: 1 }; audit('account.terms.accepted', a.id); return { terms: clone(a.terms), generationRequests: 0 };
   }
-  if (path.startsWith('/accounts/')) { const id = decodeURIComponent(path.slice('/accounts/'.length)); const a = demo.accounts.find(a => a.id === id); if (!a) throw { code: 'ACCOUNT_NOT_FOUND', status: 404 }; if (method === 'PATCH') { Object.assign(a, data); audit('account.updated', id); } else if (method === 'DELETE') { demo.accounts = demo.accounts.filter(a => a.id !== id); audit('account.removed', id); } return {}; }
+  if (path.startsWith('/accounts/')) {
+    const id = decodeURIComponent(path.slice('/accounts/'.length));
+    const a = demo.accounts.find(a => a.id === id);
+    if (!a) throw { code: 'ACCOUNT_NOT_FOUND', status: 404 };
+    if (method === 'PATCH') {
+      Object.assign(a, data);
+      if (typeof data?.enabled === 'boolean') a.status = data.enabled ? (a.authenticationStatus === 'auth_error' ? 'auth_error' : a.authenticationStatus === 'signed_in' ? 'ready' : 'login_required') : 'disabled';
+      syncDemoAccountRouting(a);
+      audit('account.updated', id);
+    } else if (method === 'DELETE') {
+      demo.accounts = demo.accounts.filter(a => a.id !== id);
+      audit('account.removed', id);
+    }
+    return {};
+  }
   if (path === '/keys' && method === 'POST') { const id = `key_demo_${Date.now()}`, secret = 'DEMO_ONLY_NOT_A_REAL_KEY_7a4e9f2b'; demo.keys.push({ id, label: data.label, secret, preview: 'DEMO_O••••••9f2b', copyable: true, createdAt: new Date().toISOString(), lastUsedAt: null, revokedAt: null }); demo.keyCount++; audit('key.created', data.label); return { id, label: data.label, key: secret, preview: 'DEMO_O••••••9f2b', copyable: true }; }
   const keyReveal = /^\/keys\/([^/]+)\/reveal$/.exec(path);
   if (keyReveal && method === 'POST') { const id = decodeURIComponent(keyReveal[1]), key = demo.keys.find(k => k.id === id && !k.revokedAt); if (!key) throw { code: 'KEY_NOT_FOUND', status: 404 }; if (!key.secret) throw { code: 'KEY_SECRET_UNAVAILABLE', status: 409 }; audit('key.revealed', key.label); return { id: key.id, label: key.label, key: key.secret }; }
@@ -1639,7 +1813,7 @@ async function boot() {
   if (DEMO) { S.authenticated = true; S.csrf = 'demo-csrf-not-a-real-session'; render(); await refresh(); return; }
   render();
   S.authRequired = true;
-  try { const session = await api('/session'); if (session.authenticated === true && typeof session.csrf === 'string' && session.csrf) { S.authenticated = true; S.authRequired = session.authRequired !== false; S.csrf = session.csrf; S.loginError = ''; render(); await refresh(); } }
+  try { const session = await api('/session'); if (session.authenticated === true && typeof session.csrf === 'string' && session.csrf) { S.authenticated = true; S.authRequired = session.authRequired !== false; S.csrf = session.csrf; S.loginError = ''; applyRouteFromHash(); render(); await refresh(); } }
   catch (error) { if (error.status !== 401) S.loginError = safeError(error); else S.loginError = ''; }
   finally { S.checkingSession = false; if (!S.authenticated) render(); }
 }

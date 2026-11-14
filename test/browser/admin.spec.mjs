@@ -134,16 +134,22 @@ test("account confirmation/cancel/removal, unknown quota, settings and sanitized
   await toggle.click();
   await expect(toggle).toHaveText("Disable");
   expect(f.store.data.accounts[0].enabled).toBe(true);
-  await page.locator('[data-account-details="acc-1"] > summary').click();
-  await page.locator('[data-action="remove-account"][data-id="acc-1"]').click();
+  await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await page.locator('#account-drawer [data-action="remove-account"][data-id="acc-1"]').click();
   await expect(page.locator("#action-dialog")).toContainText("does NOT revoke");
   await page.locator("#dialog-cancel").click();
   expect(f.store.data.accounts).toHaveLength(2);
-  await page.locator('[data-action="remove-account"][data-id="acc-1"]').click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await page.locator('#account-drawer [data-action="remove-account"][data-id="acc-1"]').click();
   await page.locator("#dialog-confirm").click();
   await expect(
-    page.locator('[data-action="remove-account"][data-id="acc-1"]'),
+    page.locator('[data-account-card="acc-1"]'),
   ).toHaveCount(0);
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(page).toHaveURL(/#accounts$/);
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+  await expect(page.locator('#account-search')).toBeFocused();
   f.store.data.profile = null;
   const profilePopup = page.waitForEvent("popup");
   await page.locator("#add-account").click();
@@ -347,10 +353,14 @@ test("one-click Google sign-in requests a new tab, cancels cleanly and shows ver
   await expect(page.locator("#accounts-results")).toContainText("synthetic@example.invalid");
   expect(f.store.data.accounts.at(-1).label).toBe("synthetic@example.invalid");
   // Manual rename remains available after automatic identity labelling.
-  await page.locator(`[data-account-details="${f.store.data.accounts.at(-1).id}"] > summary`).click();
-  await page.locator(`[data-action="rename-account"][data-id="${f.store.data.accounts.at(-1).id}"]`).click();
+  const createdId = f.store.data.accounts.at(-1).id;
+  await page.locator(`[data-account-card="${createdId}"] [data-action="open-drawer"]`).click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await page.locator(`#account-drawer [data-action="rename-account"][data-id="${createdId}"]`).click();
   await expect(page.locator("#dialog-label")).toHaveValue("synthetic@example.invalid");
   await page.locator("#dialog-cancel").click();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
   expect(f.seen.length).toBe(0);
 });
 
@@ -463,10 +473,13 @@ test("upstream Google 401 errors on account actions never expire admin session o
     body: JSON.stringify({ error: { code: 'NATIVE_PERMISSION_OR_AUTH', message: 'Upstream Google 401' } }),
   }));
 
-  await page.locator('[data-account-details="acc-0"] > summary').click();
-  await page.locator('[data-subscription="acc-0"] [data-action="refresh-subscription"]').click();
-  await expect(page.locator('[data-subscription="acc-0"] [data-subscription-feedback]')).toContainText('SUBSCRIPTION_AUTH_REJECTED');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await page.locator('#account-drawer [data-subscription="acc-0"] [data-action="refresh-subscription"]').click();
+  await expect(page.locator('#account-drawer [data-subscription="acc-0"] [data-subscription-feedback]')).toContainText('SUBSCRIPTION_AUTH_REJECTED');
   await expect(page.locator('#login-form')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
 
   await page.locator('[data-account-card="acc-0"] .daily-test [data-action="test-model"]').click();
   await expect(page.locator('[data-account-card="acc-0"] .daily-test [data-model-test-result]')).toHaveText('Failed');
@@ -489,12 +502,16 @@ test("Google error original and HTTP/gRPC statuses are shown as text in accounts
   const r=await f.api("/v1/chat/completions",{method:"POST",body:{model:"gemini-argon",messages:[{role:"user",content:"private synthetic prompt"}]}});
   expect(r.status).toBe(502);const requestId=r.headers.get("x-request-id");await r.text();
   await login(page);await route(page,"accounts");
-  await expect(page.locator('[data-account-upstream-error] [data-upstream-message]')).not.toBeVisible();
-  await page.locator('[data-account-details]').filter({has:page.locator('[data-account-upstream-error]')}).locator(':scope > summary').click();
-  await expect(page.locator('[data-account-upstream-error] [data-upstream-message]')).toBeVisible();
-  await expect(page.locator("[data-account-upstream-error] [data-upstream-message]")).toHaveText(message+markup);
-  await expect(page.locator("[data-account-upstream-error]")).toContainText("Google HTTP 200 · gRPC 9");
+  await expect(page.locator('[data-account-upstream-error] [data-upstream-message]')).toHaveCount(0);
+  const erroredId=(await (await f.admin("accounts")).json()).accounts.find(a=>a.lastError).id;
+  await page.locator(`[data-account-card="${erroredId}"] [data-action="open-drawer"]`).click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(page.locator('#account-drawer [data-account-upstream-error] [data-upstream-message]')).toBeVisible();
+  await expect(page.locator("#account-drawer [data-account-upstream-error] [data-upstream-message]")).toHaveText(message+markup);
+  await expect(page.locator("#account-drawer [data-account-upstream-error]")).toContainText("Google HTTP 200 · gRPC 9");
   expect(await page.evaluate(()=>Boolean(window.UPSTREAM_ERROR_EXECUTED))).toBe(false);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
   await route(page,"requests");
   await page.locator(`[data-request-id="${requestId}"]`).click();
   await page.locator('#request-provider-details-toggle').click();
@@ -514,24 +531,36 @@ test("new-user rejection remains observable without a local retry allowance or b
   const message="com.google.assistant.boq.bard.application.utils.BardStatusException: Before proceeding, please accept our terms of service.";
   f.app.provider.openTurn=(...args)=>{opened++;return fail?{events:{async *[Symbol.asyncIterator](){yield {type:"end",httpStatus:200,grpcStatus:9};}},getSafeStatus:()=>({httpStatus:200,grpcStatus:9,ended:true,receivedBytes:123,grpcMessage:message}),cancel(){}}:normal(...args);};
   await login(page);await route(page,"accounts");
-  await page.locator('[data-account-details="acc-0"] > summary').click();
-  const state=()=>page.locator('[data-account-model-states="acc-0"] [data-provider-model="gemini-argon"]');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  const state=()=>page.locator('#account-drawer [data-account-model-states="acc-0"] [data-provider-model="gemini-argon"]');
   await expect(state()).toHaveAttribute("data-provider-state","unverified");expect(opened).toBe(0);
   const body={model:"gemini-argon",messages:[{role:"user",content:"Synthetic first-user check"}]};
   const response=await f.api("/v1/chat/completions",{method:"POST",body});expect(response.status).toBe(502);await response.text();
+  await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
   await route(page,"overview");await route(page,"accounts");
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(state()).toHaveAttribute("data-provider-state","rejected");
-  await expect(page.locator('[data-account-upstream-error="acc-0"] [data-upstream-message]')).toHaveText(message);
+  await expect(page.locator('#account-drawer [data-account-upstream-error="acc-0"] [data-upstream-message]')).toHaveText(message);
   const allow=()=>page.locator('[data-action="provider-retry"][data-id="acc-0"][data-model="gemini-argon"]');
   await expect(allow()).toHaveCount(0);
   const retired = await f.admin('accounts/acc-0/provider-retry', { method: 'POST', body: { model: 'gemini-argon' } });
   expect(retired.status).toBe(404); await retired.text();
+  await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
   await route(page, 'overview'); await route(page, 'accounts');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(state()).toHaveAttribute('data-provider-state', 'rejected'); expect(opened).toBe(1);
-  await expect(page.locator('[data-account-upstream-error="acc-0"] [data-upstream-message]')).toHaveText(message);
+  await expect(page.locator('#account-drawer [data-account-upstream-error="acc-0"] [data-upstream-message]')).toHaveText(message);
   fail=false;const next=await f.api("/v1/chat/completions",{method:"POST",body});expect(next.status).toBe(200);await next.text();
-  await route(page,"overview");await route(page,"accounts");await expect(state()).toHaveAttribute("data-provider-state","verified");expect(opened).toBe(2);
-  await page.locator("#language-toggle").click();await expect(state()).toContainText("曾成功驗證");
+  await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
+  await route(page,"overview");await route(page,"accounts");
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(state()).toHaveAttribute("data-provider-state","verified");expect(opened).toBe(2);
+  await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
+  await page.locator("#language-toggle").click();
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(state()).toContainText("曾成功驗證");
+  await page.keyboard.press('Escape');
 });
 
 test("HTTP2 reset code is distinct from gRPC status in admin and does not imply quota or tool execution", async ({page}) => {
@@ -543,10 +572,13 @@ test("HTTP2 reset code is distinct from gRPC status in admin and does not imply 
   const response=await f.api("/v1/chat/completions",{method:"POST",body:{model:"gemini-argon",messages:[{role:"user",content:"Synthetic request"}],stream:true}});
   expect(response.status).toBe(422);const requestId=response.headers.get("x-request-id");const error=(await response.json()).error;expect(error.code).toBe("GENERATION_FAILED");expect(error.upstream_code).toBe("NATIVE_STREAM_RESET");
   await login(page);await route(page,"accounts");
-  await expect(page.locator('[data-account-upstream-error] [data-http2-reset]')).toContainText('HTTP/2 RST_STREAM 8');
-  await expect(page.locator('[data-account-upstream-error]')).toContainText('gRPC —');
-  await expect(page.locator('[data-account-upstream-error]')).toContainText('Google did not return an error message.');
-  await expect(page.locator('main')).not.toContainText('SYNTHETIC_PRIVATE_TRANSPORT_DETAIL');
+  const erroredId=(await (await f.admin("accounts")).json()).accounts.find(a=>a.lastError).id;
+  await page.locator(`[data-account-card="${erroredId}"] [data-action="open-drawer"]`).click();
+  await expect(page.locator('#account-drawer [data-account-upstream-error] [data-http2-reset]')).toContainText('HTTP/2 RST_STREAM 8');
+  await expect(page.locator('#account-drawer [data-account-upstream-error]')).toContainText('gRPC —');
+  await expect(page.locator('#account-drawer [data-account-upstream-error]')).toContainText('Google did not return an error message.');
+  await expect(page.locator('body')).not.toContainText('SYNTHETIC_PRIVATE_TRANSPORT_DETAIL');
+  await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
   await route(page,"requests");await page.locator(`[data-request-id="${requestId}"]`).click();
   await expect(page.locator('#action-dialog [data-http2-reset]')).toContainText('HTTP/2 RST_STREAM 8');
   await expect(page.locator('#action-dialog')).toContainText('not gRPC status');
@@ -604,8 +636,10 @@ test("per-account quota display and explicit refresh do not query other accounts
   });
   await login(page);
   await route(page, "accounts");
-  for (const id of ['acc-0', 'acc-1']) await page.locator(`[data-account-details="${id}"] > summary`).click();
-  const a = page.locator('[data-quota="acc-0"]'), b = page.locator('[data-quota="acc-1"]');
+  const drawer = page.locator("#account-drawer");
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(drawer).toBeVisible();
+  const a = drawer.locator('[data-quota="acc-0"]'), b = drawer.locator('[data-quota="acc-1"]');
   await expect(a).toContainText("12 / 20");
   await expect(a).toContainText("Remaining: 60%");
   await expect(a).toContainText("Next refill:");
@@ -617,13 +651,23 @@ test("per-account quota display and explicit refresh do not query other accounts
   await expect(a.locator('[data-quota-provider-time] time').first()).toHaveAttribute("datetime", next);
   await a.locator('[data-quota-details] > summary').click();
   await expect(a).toContainText("Your usage over a 5-hour window.");
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
   await expect(b).toContainText("No usage data yet");
   await expect(b).toContainText("Refill / reset time not supplied");
   expect(queried).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await a.locator('[data-action="refresh-quota"]').click();
   await expect.poll(() => queried).toEqual(["acc-0"]);
   await expect(a.locator('[data-action="refresh-quota"]')).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
   await expect(b).not.toContainText("12 / 20");
+  await page.keyboard.press("Escape");
   expect(f.seen).toHaveLength(0);
 });
 
@@ -641,28 +685,38 @@ test('account quota pending, failed and successful refresh retain cached values 
     await r.fulfill({status:503, json:{error:{code:'QUOTA_FIXTURE_FAILED', message:'PRIVATE_FIXTURE_MESSAGE'}}});
   });
   await login(page); await route(page, 'accounts');
-  for (const id of ['acc-0', 'acc-1']) await page.locator(`[data-account-details="${id}"] > summary`).click();
-  const quota = page.locator('[data-quota="acc-0"]'), refresh = quota.locator('[data-action="refresh-quota"]');
+  const drawer = page.locator('#account-drawer');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(drawer).toBeVisible();
+  const quota = drawer.locator('[data-quota="acc-0"]'), refresh = quota.locator('[data-action="refresh-quota"]');
   await expect(quota.locator('[data-quota-provider-time]')).toHaveText('Google quota time: —');
   await quota.locator('summary').click();
   await refresh.focus(); await page.keyboard.press('Enter');
   await expect(refresh).toBeDisabled(); await expect(refresh).toContainText('Refreshing');
+  expect(await page.evaluate(() => document.activeElement?.id)).toBe('account-drawer');
   await expect(quota.locator('.quota-tiles')).toHaveAttribute('aria-busy','true');
   await expect(quota.locator('[data-quota-feedback]')).toContainText('Updating usage');
-  await expect(page.locator('[data-quota="acc-1"] [data-action="refresh-quota"]')).toBeEnabled();
   await expect(quota.locator('[data-quota-percent]')).toHaveText('17%');
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+  await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
+  await expect(drawer.locator('[data-quota="acc-1"] [data-action="refresh-quota"]')).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   release();
   await expect(refresh).toBeEnabled(); await expect(refresh).toBeFocused();
   await expect(quota).toContainText('Update failed. Showing previous values.');
   await expect(quota.locator('[data-quota-details]')).toHaveAttribute('open','');
   await expect(quota.locator('[data-quota-feedback]')).toContainText('QUOTA_FIXTURE_FAILED');
-  await expect(page.locator('main')).not.toContainText('PRIVATE_FIXTURE_MESSAGE');
+  await expect(page.locator('body')).not.toContainText('PRIVATE_FIXTURE_MESSAGE');
   await page.unroute('**/admin/api/accounts/*/quota');
   await page.route('**/admin/api/accounts/*/quota', r => {calls.push(r.request().url().split('/').at(-2));return r.fulfill({json:{quota:f.store.data.accounts[0].quota}});});
   await refresh.click();
   await expect(refresh).toBeEnabled();
   await expect(quota).not.toContainText('Update failed');
   await expect(quota.locator('[data-quota-percent]')).toHaveText('17%');
+  await page.keyboard.press('Escape');
   expect(calls).toEqual(['acc-0','acc-0']);
   expect(f.seen).toHaveLength(0);
 });
@@ -680,22 +734,43 @@ for (const width of [390, 1440]) test(`technical quota and model evidence stay a
   await page.route('**/admin/api/accounts', r => r.fulfill({ json: { accounts } }));
   await page.route('**/admin/api/accounts/*/quota', r => { quotaRequests++; return r.abort(); });
   await page.setViewportSize({ width, height: 1000 }); await login(page);
-  const a = page.locator('[data-account-card="acc-0"]'), problem = page.locator('[data-account-card="acc-1"]');
-  await expect(a.locator('[data-slot="current"]')).toContainText('Unknown');
-  for (const id of ['acc-0', 'acc-1', 'acc-2', 'acc-3']) await page.locator(`[data-account-details="${id}"] > summary`).click();
-  await expect(a.locator('[data-quota-value-note]')).toContainText('not a remaining balance');
-  await expect(a.locator('[data-quota-percent]')).toHaveText(['0%', '37%']);
-  await expect(problem.locator('[data-quota-observed]')).toHaveCount(2);
-  await expect(problem.locator('[data-quota-feedback]')).toContainText('QUOTA_FIXTURE_FAILED');
-  await expect(problem.locator('[data-model-checked-at]')).toContainText('Last rejected:');
-  await expect(a.locator('[data-model-checked-at]')).toContainText('Last verified:');
-  await expect(page.locator('[data-account-card="acc-2"] [data-quota-block-reason]')).toHaveText('Sign in again to refresh.');
-  await expect(page.locator('[data-account-card="acc-3"] [data-quota-block-reason]')).toHaveText('Enable this account to refresh.');
-  await a.locator('[data-action="remove-account"]').click();
+  const card = page.locator('[data-account-card="acc-0"]'), drawer = page.locator('#account-drawer');
+  await expect(card.locator('[data-slot="current"]')).toContainText('Unknown');
+
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('[data-quota-value-note]')).toContainText('not a remaining balance');
+  await expect(drawer.locator('[data-quota-percent]')).toHaveText(['0%', '37%']);
+  await expect(drawer.locator('[data-model-checked-at]')).toContainText('Last verified:');
+  await drawer.locator('[data-action="remove-account"]').click();
   await expect(page.locator('#action-dialog')).toContainText('does NOT revoke'); await page.locator('#dialog-cancel').click();
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+
+  await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
+  await expect(drawer.locator('[data-quota-observed]')).toHaveCount(2);
+  await expect(drawer.locator('[data-quota-feedback]')).toContainText('QUOTA_FIXTURE_FAILED');
+  await expect(drawer.locator('[data-model-checked-at]')).toContainText('Last rejected:');
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+
+  await page.locator('[data-account-card="acc-2"] [data-action="open-drawer"]').click();
+  await expect(drawer.locator('[data-quota-block-reason]')).toHaveText('Sign in again to refresh.');
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+
+  await page.locator('[data-account-card="acc-3"] [data-action="open-drawer"]').click();
+  await expect(drawer.locator('[data-quota-block-reason]')).toHaveText('Enable this account to refresh.');
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+
   await page.locator('#language-toggle').click();
-  await expect(a.locator('[data-quota-value-note]')).toContainText('不等於剩餘額度');
-  await expect(a.locator('[data-model-checked-at]')).toContainText('上次成功驗證');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(drawer.locator('[data-quota-value-note]')).toContainText('不等於剩餘額度');
+  await expect(drawer.locator('[data-model-checked-at]')).toContainText('上次成功驗證');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(quotaRequests).toBe(0); expect(f.seen).toHaveLength(0);
 });
@@ -745,9 +820,11 @@ test("overview attention tiles, category chip, Sign-in needed filter, i18n and p
   await expect(page.locator('[data-account-card="acc-2"]')).toBeVisible();
   await page.locator('#account-status').selectOption('');
 
-  await page.locator('[data-account-details="acc-0"] > summary').click();
-  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('Cooldown');
-  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('Signed in');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(page.locator('#account-drawer')).toContainText('Cooldown');
+  await expect(page.locator('#account-drawer')).toContainText('Signed in');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
 
   const helpBtn = page.locator('.terms-help');
   await helpBtn.focus();
@@ -781,9 +858,11 @@ test("overview attention tiles, category chip, Sign-in needed filter, i18n and p
   await expect(page.locator('#session-results')).toContainText('工具格式錯誤後重試');
 
   await route(page, 'accounts');
-  await page.locator('[data-account-details="acc-0"] > summary').click();
-  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('冷卻中');
-  await expect(page.locator('[data-account-card="acc-0"] .daily-details')).toContainText('已登入');
+  await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+  await expect(page.locator('#account-drawer')).toContainText('冷卻中');
+  await expect(page.locator('#account-drawer')).toContainText('已登入');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(f.seen).toHaveLength(0);
 });
@@ -909,7 +988,7 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
     updatedAt: '2026-11-14T04:00:00.000Z',
     usageUpdatedAt: '2026-11-14T04:00:00.000Z',
     usageRows: [
-      { label: 'Current usage', providerPercent: currentPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-14T09:00:00.000Z' },
+      { label: 'Current usage', sourcePath: 'getUsageInfo.3[0]', providerPercent: currentPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-14T09:00:00.000Z' },
       { label: 'Weekly limit', providerPercent: weeklyPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-20T09:00:00.000Z' },
     ],
   });
@@ -1071,5 +1150,524 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   await expect(page.locator('[data-account-card="acc-0"] [data-daily-quota="acc-0"] [data-slot="current"]')).toContainText('64% used');
   await expect(page.locator('#pool-pulse')).toContainText('42%');
   await expect(drawerRefresh).toBeFocused();
+  expect(f.seen).toHaveLength(0);
+});
+
+test("drawer aria-expanded symmetry, dialog focus protection during bulk poll, model test focus retention, and deep-link Back sync", async ({ page }) => {
+  const accounts = [
+    {
+      id: 'acc-0',
+      label: 'Primary account',
+      enabled: true,
+      authenticationStatus: 'signed_in',
+      status: 'ready',
+      routingAllowed: true,
+      requests: 3,
+      failures: 0,
+      inFlight: 0,
+      modelStates: { 'gemini-argon': { state: 'unverified' } },
+    },
+    {
+      id: 'acc-1',
+      label: 'Backup account',
+      enabled: true,
+      authenticationStatus: 'signed_in',
+      status: 'ready',
+      routingAllowed: true,
+      requests: 1,
+      failures: 0,
+      inFlight: 0,
+      modelStates: { 'gemini-argon': { state: 'unverified' } },
+    },
+  ];
+  const makeQuota = (currentPct, weeklyPct = 50) => ({
+    source: 'official',
+    provider: 'google-robin',
+    status: 'ok',
+    updatedAt: '2026-11-14T04:00:00.000Z',
+    usageUpdatedAt: '2026-11-14T04:00:00.000Z',
+    usageRows: [
+      { label: 'Current usage', sourcePath: 'getUsageInfo.3[0]', providerPercent: currentPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-14T09:00:00.000Z' },
+      { label: 'Weekly limit', providerPercent: weeklyPct, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: '2026-11-20T09:00:00.000Z' },
+    ],
+  });
+
+  await page.route('**/admin/api/accounts', r => {
+    if (r.request().method() !== 'GET') return r.continue();
+    return r.fulfill({ json: { accounts } });
+  });
+
+  let releasePoll, pollSeenResolve;
+  const pollGate = new Promise(resolve => { releasePoll = resolve; });
+  const pollSeen = new Promise(resolve => { pollSeenResolve = resolve; });
+  await page.route('**/admin/api/accounts/quota-refresh', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job: {
+          id: 'job-dialog-safe',
+          status: 'running',
+          total: 2,
+          completed: 0,
+          updated: 0,
+          missing: 0,
+          failed: 0,
+          skipped: 0,
+          results: [
+            { accountId: 'acc-0', status: 'queued' },
+            { accountId: 'acc-1', status: 'queued' },
+          ],
+        },
+        reused: false,
+      }),
+    });
+  });
+  await page.route('**/admin/api/accounts/quota-refresh/job-dialog-safe', async r => {
+    pollSeenResolve();
+    await pollGate;
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        job: {
+          id: 'job-dialog-safe',
+          status: 'completed',
+          total: 2,
+          completed: 2,
+          updated: 2,
+          missing: 0,
+          failed: 0,
+          skipped: 0,
+          results: [
+            { accountId: 'acc-0', status: 'updated', quota: makeQuota(55, 20) },
+            { accountId: 'acc-1', status: 'updated', quota: makeQuota(20, 40) },
+          ],
+        },
+      }),
+    });
+  });
+
+  let releaseTest, testSeenResolve;
+  const testGate = new Promise(resolve => { releaseTest = resolve; });
+  const testSeen = new Promise(resolve => { testSeenResolve = resolve; });
+  await page.route('**/admin/api/accounts/acc-0/test', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    testSeenResolve();
+    await testGate;
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ model: 'gemini-argon', choices: [{ message: { content: 'Synthetic OK' } }] }),
+    });
+  });
+
+  await login(page);
+
+  const card0 = page.locator('[data-account-card="acc-0"]');
+  const opener0 = card0.locator('[data-action="open-drawer"]');
+  const card1 = page.locator('[data-account-card="acc-1"]');
+  const opener1 = card1.locator('[data-action="open-drawer"]');
+
+  await opener0.click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(card0).toHaveClass(/is-selected/);
+  await expect(opener0).toHaveAttribute('aria-expanded', 'true');
+  await expect(page).toHaveURL(/#accounts\?account=acc-0$/);
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(card0).not.toHaveClass(/is-selected/);
+  await expect(opener0).toHaveAttribute('aria-expanded', 'false');
+  await expect(opener0).toBeFocused();
+  await expect(page).toHaveURL(/#accounts$/);
+
+  await opener1.click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(page).toHaveURL(/#accounts\?account=acc-1$/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(page).toHaveURL(/#accounts$/);
+
+  await page.locator('#refresh-all').click();
+  await opener0.click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await page.locator('#drawer-rename').click();
+  const labelInput = page.locator('#dialog-label');
+  await expect(labelInput).toBeVisible();
+  await labelInput.fill('Protected rename draft');
+  await expect(labelInput).toBeFocused();
+
+  await pollSeen;
+  releasePoll();
+  await expect(page.locator('#account-drawer .account-quota[data-quota="acc-0"]')).toContainText('55%');
+  await expect(page.locator('#drawer-raw-paths-acc-0')).toContainText('getUsageInfo.3[0]');
+  await expect(labelInput).toBeFocused();
+  await expect(labelInput).toHaveValue('Protected rename draft');
+  await page.locator('#dialog-cancel').click();
+  await expect(page.locator('#drawer-rename')).toBeFocused();
+
+  const drawerTestBtn = page.locator('#account-drawer [data-action="test-model"][data-id="acc-0"][data-model="gemini-argon"]');
+  await drawerTestBtn.focus();
+  await page.keyboard.press('Enter');
+  await testSeen;
+  await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('account-drawer');
+  releaseTest();
+  await expect(drawerTestBtn).toBeFocused();
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(page).toHaveURL(/#accounts$/);
+
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-1&model=gemini-argon'; });
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toContainText('Backup account');
+  await expect(card1).toHaveClass(/is-selected/);
+  await expect(opener1).toHaveAttribute('aria-expanded', 'true');
+
+  await page.goBack();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+  await expect(opener1).toHaveAttribute('aria-expanded', 'false');
+
+  await page.goForward();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(page).toHaveURL(/#accounts$/);
+  await expect(opener1).toBeFocused();
+
+  await page.reload();
+  await expect(page.locator('[data-page="accounts"]')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+
+  await page.evaluate(() => { location.hash = 'settings?account=acc-0'; });
+  await expect(page.locator('[data-page="settings"]')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+  await expect(page.locator('#page-title')).toBeFocused();
+
+  await page.evaluate(() => { location.hash = 'keys?account=acc-0'; });
+  await expect(page.locator('[data-page="keys"]')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+
+  expect(f.seen).toHaveLength(0);
+});
+
+test("drawer preserves deep links across delayed account list refresh, keeps scrolled controls in view on re-render, and wraps Tab focus", async ({ page }) => {
+  const acc0 = {
+    id: 'acc-0',
+    label: 'Primary account',
+    enabled: true,
+    authenticationStatus: 'signed_in',
+    status: 'ready',
+    routingAllowed: true,
+    requests: 3,
+    failures: 0,
+    inFlight: 0,
+    modelStates: {
+      'gemini-argon': { state: 'unverified' },
+      'gemini-hydrogen': { state: 'unverified' },
+      'gemini-flash-lite': { state: 'unverified' },
+    },
+  };
+  const accDelayed = {
+    id: 'acc-delayed',
+    label: 'Delayed account',
+    enabled: true,
+    authenticationStatus: 'signed_in',
+    status: 'ready',
+    routingAllowed: true,
+    requests: 2,
+    failures: 0,
+    inFlight: 0,
+    modelStates: {
+      'gemini-argon': { state: 'unverified' },
+      'gemini-hydrogen': { state: 'unverified' },
+    },
+  };
+  const accRetry = {
+    id: 'acc-retry',
+    label: 'Retry account',
+    enabled: true,
+    authenticationStatus: 'signed_in',
+    status: 'ready',
+    routingAllowed: true,
+    requests: 1,
+    failures: 0,
+    inFlight: 0,
+    modelStates: {
+      'gemini-argon': { state: 'unverified' },
+      'gemini-hydrogen': { state: 'unverified' },
+    },
+  };
+
+  let currentAccounts = [acc0];
+  let delayNextAccountsFetch = false;
+  let failNextAccountsFetch = false;
+  let releaseAccounts, accountsSeenResolve;
+  const accountsGate = new Promise(resolve => { releaseAccounts = resolve; });
+  const accountsSeen = new Promise(resolve => { accountsSeenResolve = resolve; });
+
+  await page.route('**/admin/api/overview', async r => {
+    const response = await r.fetch();
+    const data = await response.json();
+    await r.fulfill({ json: { ...data, accounts: currentAccounts } });
+  });
+  await page.route('**/admin/api/accounts', async r => {
+    if (r.request().method() !== 'GET') return r.continue();
+    if (delayNextAccountsFetch) {
+      delayNextAccountsFetch = false;
+      accountsSeenResolve();
+      await accountsGate;
+    }
+    if (failNextAccountsFetch) {
+      failNextAccountsFetch = false;
+      return r.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'UPSTREAM_UNAVAILABLE' } }),
+      });
+    }
+    return r.fulfill({ json: { accounts: currentAccounts } });
+  });
+
+  let releaseQuota, quotaSeenResolve;
+  const quotaGate = new Promise(resolve => { releaseQuota = resolve; });
+  const quotaSeen = new Promise(resolve => { quotaSeenResolve = resolve; });
+  await page.route('**/admin/api/accounts/acc-0/quota', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    quotaSeenResolve();
+    await quotaGate;
+    acc0.quota = {
+      source: 'official',
+      provider: 'google-robin',
+      status: 'ok',
+      updatedAt: new Date().toISOString(),
+      usageRows: [
+        { label: 'Current usage', providerPercent: 18, percentMeaning: 'used', timestampMeaning: 'window_refresh', providerTimestamp: new Date(Date.now() + 3600000).toISOString() },
+      ],
+    };
+    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ quota: acc0.quota }) });
+  });
+
+  let releaseSubscription, subscriptionSeenResolve;
+  const subscriptionGate = new Promise(resolve => { releaseSubscription = resolve; });
+  const subscriptionSeen = new Promise(resolve => { subscriptionSeenResolve = resolve; });
+  await page.route('**/admin/api/accounts/acc-0/subscription', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    subscriptionSeenResolve();
+    await subscriptionGate;
+    acc0.subscription = {
+      source: 'official',
+      status: 'ok',
+      tier: 'pro',
+      updatedAt: new Date().toISOString(),
+    };
+    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ subscription: acc0.subscription }) });
+  });
+
+  let releaseTest, testSeenResolve;
+  const testGate = new Promise(resolve => { releaseTest = resolve; });
+  const testSeen = new Promise(resolve => { testSeenResolve = resolve; });
+  await page.route('**/admin/api/accounts/acc-0/test', async r => {
+    if (r.request().method() !== 'POST') return r.continue();
+    testSeenResolve();
+    await testGate;
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ model: 'gemini-argon', choices: [{ message: { content: 'Synthetic OK' } }] }),
+    });
+  });
+
+  const isTargetInDrawerView = selector => page.evaluate(sel => {
+    const body = document.getElementById('drawer-body');
+    const target = body?.querySelector(sel);
+    if (!body || !target) return false;
+    const br = body.getBoundingClientRect();
+    const tr = target.getBoundingClientRect();
+    return tr.top >= br.top && tr.bottom <= br.bottom;
+  }, selector);
+
+  await login(page);
+
+  delayNextAccountsFetch = true;
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-delayed&model=gemini-argon'; });
+  await accountsSeen;
+  await expect(page).toHaveURL(/#accounts\?account=acc-delayed&model=gemini-argon$/);
+  await expect(page.locator('#account-drawer')).toBeHidden();
+
+  currentAccounts = [acc0, accDelayed];
+  releaseAccounts();
+
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toContainText('Delayed account');
+  await expect(page.locator('#account-models-acc-delayed')).toBeFocused();
+  await expect(page).toHaveURL(/#accounts\?account=acc-delayed&model=gemini-argon$/);
+
+  await page.reload();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toContainText('Delayed account');
+
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-missing'; });
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+  await expect(page).toHaveURL(/#accounts$/);
+
+  await page.setViewportSize({ width: 390, height: 520 });
+
+  failNextAccountsFetch = true;
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-retry&model=gemini-argon'; });
+  await expect(page.locator('#page-error')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
+  await expect(page).toHaveURL(/#accounts\?account=acc-retry&model=gemini-argon$/);
+
+  currentAccounts = [acc0, accDelayed, accRetry];
+  await page.locator('#page-error button').click();
+  await expect(page.locator('#account-drawer')).toBeVisible();
+  await expect(page.locator('#account-drawer')).toContainText('Retry account');
+  await expect(page.locator('#account-models-acc-retry')).toBeFocused();
+  await expect(page).toHaveURL(/#accounts\?account=acc-retry&model=gemini-argon$/);
+  expect(await isTargetInDrawerView('#account-models-acc-retry')).toBe(true);
+  await page.locator('#drawer-close').click();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+
+  const opener0 = page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]');
+  await opener0.focus();
+  await page.keyboard.press('Space');
+  await expect(page.locator('#account-drawer')).toBeVisible();
+
+  const refreshQuotaBtn = page.locator('#account-drawer [data-action="refresh-quota"][data-id="acc-0"]');
+  await refreshQuotaBtn.scrollIntoViewIfNeeded();
+  await refreshQuotaBtn.focus();
+  await page.keyboard.press('Enter');
+  await quotaSeen;
+  await page.evaluate(() => {
+    const body = document.getElementById('drawer-body');
+    body.scrollTop = body.scrollHeight;
+  });
+  releaseQuota();
+  await expect(refreshQuotaBtn).toBeFocused();
+  expect(await isTargetInDrawerView('[data-action="refresh-quota"][data-id="acc-0"]')).toBe(true);
+
+  const refreshSubBtn = page.locator('#account-drawer [data-action="refresh-subscription"][data-id="acc-0"]');
+  await refreshSubBtn.scrollIntoViewIfNeeded();
+  await refreshSubBtn.focus();
+  await page.keyboard.press('Enter');
+  await subscriptionSeen;
+  await page.evaluate(() => {
+    const body = document.getElementById('drawer-body');
+    body.scrollTop = body.scrollHeight;
+  });
+  releaseSubscription();
+  await expect(refreshSubBtn).toBeFocused();
+  expect(await isTargetInDrawerView('[data-action="refresh-subscription"][data-id="acc-0"]')).toBe(true);
+
+  await page.evaluate(() => {
+    const body = document.getElementById('drawer-body');
+    body.scrollTop = body.scrollHeight;
+  });
+  const initialScrollTop = await page.evaluate(() => document.getElementById('drawer-body').scrollTop);
+  expect(initialScrollTop).toBeGreaterThan(80);
+
+  const drawerTestBtn = page.locator('#account-drawer [data-action="test-model"][data-id="acc-0"][data-model="gemini-argon"]');
+  await drawerTestBtn.focus();
+  await page.keyboard.press('Enter');
+  await testSeen;
+  expect(await page.evaluate(() => document.getElementById('drawer-body').scrollTop)).toBeGreaterThan(80);
+  releaseTest();
+
+  await expect(drawerTestBtn).toBeFocused();
+  expect(await isTargetInDrawerView('[data-action="test-model"][data-id="acc-0"][data-model="gemini-argon"]')).toBe(true);
+
+  await page.locator('#drawer-remove').focus();
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#drawer-close')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.locator('#drawer-remove')).toBeFocused();
+
+  await page.locator('#drawer-close').click();
+  await expect(page.locator('#account-drawer')).toBeHidden();
+  await expect(page).toHaveURL(/#accounts$/);
+  await expect(opener0).toBeFocused();
+
+  expect(f.seen).toHaveLength(0);
+});
+
+test("drawer distinguishes capacity-saturated signed-in accounts from sign-in errors in en and zh-HK", async ({ page }) => {
+  const busyAccount = {
+    id: 'acc-busy',
+    label: 'Busy workspace',
+    enabled: true,
+    authenticationStatus: 'signed_in',
+    status: 'ready',
+    routingAllowed: true,
+    routingEligible: false,
+    requests: 12,
+    failures: 0,
+    inFlight: 2,
+    modelStates: {
+      'gemini-argon': { state: 'unverified' },
+    },
+  };
+  const unexplainedAccount = {
+    id: 'acc-unexplained',
+    label: 'Unexplained workspace',
+    enabled: true,
+    authenticationStatus: 'signed_in',
+    status: 'unknown',
+    routingAllowed: true,
+    routingEligible: false,
+    requests: 1,
+    failures: 0,
+    inFlight: 0,
+    modelStates: {
+      'gemini-argon': { state: 'unverified' },
+    },
+  };
+  const mockedAccounts = [busyAccount, unexplainedAccount];
+
+  await page.route('**/admin/api/overview', async r => {
+    const response = await r.fetch();
+    const data = await response.json();
+    await r.fulfill({ json: { ...data, accounts: mockedAccounts } });
+  });
+  await page.route('**/admin/api/accounts', async r => {
+    if (r.request().method() !== 'GET') return r.continue();
+    return r.fulfill({ json: { accounts: mockedAccounts } });
+  });
+
+  await login(page);
+
+  await page.locator('[data-account-card="acc-busy"] [data-action="open-drawer"]').click();
+  const drawer = page.locator('#account-drawer');
+  await expect(drawer).toBeVisible();
+  await expect(drawer).toContainText('Busy (at per-account in-flight limit)');
+  await expect(drawer).not.toContainText('Unavailable until signed in');
+  await page.locator('#drawer-close').click();
+  await expect(drawer).toBeHidden();
+
+  await page.locator('[data-account-card="acc-unexplained"] [data-action="open-drawer"]').click();
+  await expect(drawer).toContainText('Not currently eligible for new requests');
+  await expect(drawer).not.toContainText('Unavailable until signed in');
+  await page.locator('#drawer-close').click();
+
+  await page.locator('#language-toggle').click();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-HK');
+
+  await page.locator('[data-account-card="acc-busy"] [data-action="open-drawer"]').click();
+  await expect(drawer).toContainText('忙碌中（已達單一帳戶並行上限）');
+  await expect(drawer).not.toContainText('需登入後方可使用');
+  await page.locator('#drawer-close').click();
+
+  await page.locator('[data-account-card="acc-unexplained"] [data-action="open-drawer"]').click();
+  await expect(drawer).toContainText('目前未能接收新請求');
+  await expect(drawer).not.toContainText('需登入後方可使用');
+
   expect(f.seen).toHaveLength(0);
 });

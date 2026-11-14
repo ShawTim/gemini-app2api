@@ -8,8 +8,11 @@ test('Hydrogen is advertised, independently unverified, and selectable without h
   try {
     await page.goto(f.base + '/admin/'); await page.locator('#admin-password').fill(PASSWORD); await page.locator('#login-submit').click();
     await expect(page.locator('[data-page="accounts"]')).toBeVisible();
-    const state = page.locator('[data-account-model-states="acc-0"] [data-provider-model="gemini-hydrogen"]');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    const state = page.locator('#account-drawer [data-account-model-states="acc-0"] [data-provider-model="gemini-hydrogen"]');
     await expect(state).toHaveAttribute('data-provider-state', 'unverified');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#account-drawer')).toBeHidden();
     await page.evaluate(() => { location.hash = 'models'; });
     await expect(page.locator('#client-model option')).toHaveText(['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
     await page.locator('#client-model').selectOption('gemini-hydrogen');
@@ -20,9 +23,11 @@ test('Hydrogen is advertised, independently unverified, and selectable without h
     await page.locator('#dialog-confirm').click(); await expect(page.locator('#playground-output')).toHaveText('Synthetic answer');
     expect(f.seen).toHaveLength(1); expect(f.seen[0].modeCategory).toBe(1);
     await page.locator('[data-route="accounts"]:visible').first().click();
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     await expect(state).toHaveAttribute('data-provider-state', 'verified');
-    await expect(page.locator('[data-provider-model="gemini-argon"]')).toHaveAttribute('data-provider-state', 'unverified');
-    await expect(page.locator('[data-provider-model="gemini-flash-lite"]')).toHaveAttribute('data-provider-state', 'unverified');
+    await expect(page.locator('#account-drawer [data-provider-model="gemini-argon"]')).toHaveAttribute('data-provider-state', 'unverified');
+    await expect(page.locator('#account-drawer [data-provider-model="gemini-flash-lite"]')).toHaveAttribute('data-provider-state', 'unverified');
+    await page.keyboard.press('Escape');
     expect(quotaRequests).toBe(0); expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

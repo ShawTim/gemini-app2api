@@ -1131,12 +1131,7 @@ button.terms-help {
   display: grid;
   justify-items: end;
   gap: 3px;
-  min-width: 116px;
-}
-.daily-test-buttons {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+  min-width: 72px;
 }
 .daily-test small {
   font-size: 10.5px;
@@ -1172,48 +1167,50 @@ button.terms-help {
 .terms-app-link { font-size: 11.5px; white-space: nowrap; }
 .terms-error { flex-basis: 100%; color: var(--rose); }
 
-[data-page=accounts] .daily-account > .account-disclosure {
-  border: 0;
-  font-size: 11.5px;
-  min-width: 0;
-}
-[data-page=accounts] .daily-account > .account-disclosure > summary {
+[data-page=accounts] .daily-account > .account-drawer-trigger {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 30px;
   padding: 6px 16px;
+  border: 0;
   border-top: 1px solid var(--border);
+  border-radius: 0 0 10px 10px;
+  background: transparent;
+  box-shadow: none;
   font-size: 11px;
   line-height: 1.35;
   font-weight: 560;
   color: var(--muted);
+  text-align: left;
   cursor: pointer;
-  list-style: none;
-  border-radius: 0 0 10px 10px;
   transition: color 120ms ease-out, background-color 120ms ease-out;
 }
-[data-page=accounts] .daily-account > .account-disclosure > summary::-webkit-details-marker { display: none; }
-[data-page=accounts] .daily-account > .account-disclosure > summary::marker { content: ""; }
-[data-page=accounts] .daily-account > .account-disclosure > summary::after {
-  content: "›";
+[data-page=accounts] .daily-account > .account-drawer-trigger:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--hover) 55%, transparent);
+}
+[data-page=accounts] .daily-account > .account-drawer-trigger:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+[data-page=accounts] .daily-account.is-selected > .account-drawer-trigger,
+[data-page=accounts] .daily-account > .account-drawer-trigger[aria-expanded=true] {
+  color: var(--violet);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+.drawer-trigger-arrow {
   font-size: 14px;
   line-height: 1;
   color: var(--subtle);
-  transform: rotate(90deg);
   transition: transform 140ms ease-out, color 120ms ease-out;
 }
-[data-page=accounts] .daily-account > .account-disclosure[open] > summary {
+[data-page=accounts] .daily-account > .account-drawer-trigger:hover .drawer-trigger-arrow,
+[data-page=accounts] .daily-account.is-selected > .account-drawer-trigger .drawer-trigger-arrow {
   color: var(--violet);
-  border-radius: 0;
-}
-[data-page=accounts] .daily-account > .account-disclosure[open] > summary::after {
-  transform: rotate(270deg);
-  color: var(--violet);
-}
-[data-page=accounts] .daily-account > .account-disclosure > summary:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--hover) 55%, transparent);
+  transform: translateX(2px);
 }
 
 /* Bottom Deck — Recent Traffic & Quick Connect */
@@ -1403,23 +1400,9 @@ button.terms-help {
   gap: 8px;
 }
 
-/* Expanded Inline Account Details */
-[data-page=accounts] .daily-details {
-  padding: 15px 16px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--inset);
-  border-radius: 0 0 10px 10px;
-}
-.daily-details .definition {
-  max-width: 760px;
-  padding: 11px 15px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
 .account-subscription,
 .account-quota,
-[data-page=accounts] .daily-details .account-models {
+.drawer-body .account-models {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
@@ -2310,13 +2293,12 @@ dialog details > summary { cursor: pointer; min-height: 36px; display: list-item
     padding: 6px 14px;
     gap: 6px 10px;
   }
-  [data-page=accounts] .daily-account > .account-disclosure > summary {
+  [data-page=accounts] .daily-account > .account-drawer-trigger {
     padding: 8px 14px;
     min-height: 36px;
     max-width: 100%;
     margin-top: 0;
   }
-  [data-page=accounts] .daily-details { padding: 14px; }
   .quota-tiles, .drawer-quota-grid { grid-template-columns: minmax(0,1fr); }
   .attention-grid { grid-template-columns: minmax(0,1fr); }
 }

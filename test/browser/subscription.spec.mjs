@@ -19,16 +19,25 @@ test('subscription lookup is explicit, account scoped, bilingual and clear about
   try {
     await page.setViewportSize({ width: 1440, height: 950 });
     await page.goto(f.base + '/admin/#accounts');
-    for (const id of ['acc-0', 'acc-1']) await page.locator(`[data-account-details="${id}"] > summary`).click();
-    const row = page.locator('[data-subscription="acc-0"]'), other = page.locator('[data-subscription="acc-1"]');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    const row = page.locator('#account-drawer [data-subscription="acc-0"]');
     await expect(row).toBeVisible(); await expect(row.locator('[data-subscription-tier]')).toHaveText('Unknown');
     expect(calls).toBe(0);
     const button = row.locator('[data-action="refresh-subscription"]');
-    await button.click(); await expect(button).toBeDisabled(); release();
+    await button.focus();
+    await page.keyboard.press('Enter');
+    await expect(button).toBeDisabled();
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('account-drawer');
+    release();
     await expect(row.locator('[data-subscription-tier]')).toHaveText('Google AI Pro');
+    await expect(button).toBeFocused();
     await expect(row.locator('[data-subscription-feedback]')).toContainText('Google GetUsageInfo');
     await expect(row.locator('[data-subscription-observed]')).toBeVisible();
-    await expect(other.locator('[data-subscription-tier]')).toHaveText('Unknown');
+    await page.keyboard.press('Escape');
+    await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
+    await expect(page.locator('#account-drawer [data-subscription="acc-1"] [data-subscription-tier]')).toHaveText('Unknown');
+    await page.keyboard.press('Escape');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     expect(calls).toBe(1); expect(f.seen).toHaveLength(0);
     f.app.accounts.subscriptionAttempts.clear();
     await button.click();
@@ -36,7 +45,9 @@ test('subscription lookup is explicit, account scoped, bilingual and clear about
     await expect(row.locator('[data-subscription-feedback]')).toContainText('SUBSCRIPTION_TIMEOUT');
     await expect(row.locator('[data-subscription-feedback]')).toContainText('Last confirmed: Google AI Pro');
     expect(calls).toBe(2);
+    await page.keyboard.press('Escape');
     await page.locator('#language-toggle').click();
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     await expect(row.locator('[data-subscription-tier]')).toHaveText('未知');
     await expect(button).toHaveText('查詢訂閱');
     await page.setViewportSize({ width: 390, height: 844 });
@@ -50,8 +61,8 @@ test('unrecognized Google subscription enum remains unknown rather than guessed 
   const f = await fixture({ adminPassword: '', subscriptionFetch: async () => ({ payload: snapshot(99) }) });
   try {
     await page.goto(f.base + '/admin/#accounts');
-    await page.locator('[data-account-details="acc-0"] > summary').click();
-    const row = page.locator('[data-subscription="acc-0"]');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    const row = page.locator('#account-drawer [data-subscription="acc-0"]');
     await row.locator('[data-action="refresh-subscription"]').click();
     await expect(row.locator('[data-subscription-tier]')).toHaveText('Unknown');
     await expect(row).toContainText('Not checked or no recognized tier returned.');

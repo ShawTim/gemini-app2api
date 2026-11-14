@@ -43,8 +43,8 @@ for (const width of [390, 1440]) test(`advanced test request keeps confirmation 
   await expect(page.locator('#overview-evidence')).not.toBeVisible();
   await page.screenshot({ path: info.outputPath(`overview-${width}.png`), fullPage: true });
   await page.locator('[data-route="accounts"]:visible').click();
-  await expect(page.locator('[data-account-details]')).not.toHaveAttribute('open');
-  await expect(page.locator('.daily-details')).not.toBeVisible();
+  await expect(page.locator('[data-account-card] [data-action="open-drawer"]')).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('#account-drawer')).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(quota).toBe(0); expect(f.seen).toHaveLength(1);
 });

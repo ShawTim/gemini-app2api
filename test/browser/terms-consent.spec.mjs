@@ -91,7 +91,7 @@ for (const lang of ['en', 'zh-HK']) test(`terms controls at 390px in ${lang}: to
     await accept(page).click(); await expect(page.locator('#dialog-description')).toContainText(lang === 'en' ? 'not a model request' : '唔會發送模型請求');
     await page.locator('#dialog-cancel').click(); await page.locator('#theme-toggle').click();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    const termsBox = await row(page).boundingBox(), detailsBox = await page.locator('[data-account-details="acc-0"] > summary').boundingBox();
+    const termsBox = await row(page).boundingBox(), detailsBox = await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').boundingBox();
     expect(detailsBox.y).toBeGreaterThanOrEqual(termsBox.y + termsBox.height - 1);
     expect(errors).toEqual([]); expect(f.seen).toHaveLength(0);
   } finally { await f.close(); }

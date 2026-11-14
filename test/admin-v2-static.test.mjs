@@ -24,6 +24,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     close() { this.open = false; }
     contains() { return false; }
     getClientRects() { return []; }
+    scrollIntoView() {}
   }
   const nodesById = new Map();
   const sandbox = {
@@ -33,11 +34,12 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     Node: StubNode, CSS: { escape: value => String(value) },
     navigator: clipboard ? { clipboard } : {},
     location: { search: demo ? '?demo=1' : '', hash: '', href: `http://fixture.invalid/admin/${demo ? '?demo=1' : ''}`, origin: 'http://fixture.invalid', protocol: 'http:' },
+    history: { replaceState(_state, _title, url) { const parsed = new URL(url, sandbox.location.href); sandbox.location.href = parsed.href; sandbox.location.search = parsed.search; sandbox.location.hash = parsed.hash; } },
     document: { hidden: false, activeElement: null, documentElement: { dataset: {} }, addEventListener() {}, getElementById: id => { if (!nodesById.has(id)) nodesById.set(id, new StubNode(id)); return nodesById.get(id); }, querySelector: () => null, querySelectorAll: () => [], createElement: () => new StubNode(), createElementNS: () => new StubNode(), createTextNode: text => { const s = String(text); createdTexts.push(s); return s; } },
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -488,4 +490,287 @@ test('modelStateLabel localizes all model verification states in English and Tra
   assert.equal(f.modelStateLabel('verified'), '曾成功驗證');
   assert.equal(f.modelStateLabel('rejected'), '曾被上游拒絕');
   assert.equal(f.modelStateLabel('blocked'), '過往帳戶拒絕紀錄');
+});
+
+test('account drawer-only contract removes inline detail remnants and syncs hash deep links', () => {
+  for (const legacy of ['data-account-details', 'daily-details', 'data-quota-scope', 'Inspect →', '側欄檢視 →']) {
+    assert.equal(source.includes(legacy), false, `source still contains ${legacy}`);
+    assert.equal(css.includes(legacy), false, `css still contains ${legacy}`);
+  }
+  const f = fixture();
+  f.S.authenticated = true;
+  f.location.hash = '#accounts?account=acc_1&model=gemini-argon';
+  f.applyRouteFromHash();
+  assert.equal(f.S.route, 'accounts');
+  assert.equal(f.S.selectedAccountId, 'acc_1');
+  assert.equal(f.S.deepLink.model, 'gemini-argon');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.S.drawerReturnFocus)), {
+    selector: '[data-action="open-drawer"][data-id="acc_1"]',
+    inDrawer: false,
+  });
+
+  f.closeAccountDrawer(true);
+  assert.equal(f.S.selectedAccountId, '');
+  assert.equal(f.S.deepLink.account, '');
+  assert.equal(f.S.deepLink.model, '');
+  assert.equal(f.location.hash, '#accounts');
+
+  f.S.accounts = [{ id: 'acc_1' }, { id: 'acc_2' }];
+  f.openAccountDrawer('acc_2');
+  assert.equal(f.S.selectedAccountId, 'acc_2');
+  assert.equal(f.location.hash, '#accounts?account=acc_2');
+
+  f.location.hash = '#accounts?account=acc_new&model=gemini-argon';
+  f.applyRouteFromHash();
+  f.renderAccountDrawer();
+  assert.equal(f.S.selectedAccountId, 'acc_new');
+  assert.equal(f.S.pendingAccountLookup, 'acc_new');
+  assert.equal(f.location.hash, '#accounts?account=acc_new&model=gemini-argon');
+
+  f.S.accounts = [{ id: 'acc_1' }, { id: 'acc_new' }];
+  f.S.pendingAccountLookup = '';
+  f.renderAccountDrawer();
+  assert.equal(f.nodesById.get('account-drawer')?.hidden, false);
+  assert.equal(f.S.selectedAccountId, 'acc_new');
+
+  f.location.hash = '#accounts?account=acc_missing';
+  f.applyRouteFromHash();
+  f.renderAccountDrawer();
+  assert.equal(f.S.selectedAccountId, 'acc_missing');
+  f.S.pendingAccountLookup = '';
+  f.renderAccountDrawer();
+  assert.equal(f.S.selectedAccountId, '');
+  assert.equal(f.location.hash, '#accounts');
+  assert.equal(f.nodesById.get('account-drawer')?.hidden, true);
+
+  f.location.hash = '#settings?account=acc_1';
+  f.applyRouteFromHash();
+  f.renderAccountDrawer();
+  assert.equal(f.S.route, 'settings');
+  assert.equal(f.S.selectedAccountId, '');
+  assert.equal(f.S.deepLink.account, '');
+  assert.equal(f.nodesById.get('app')?.inert, false);
+});
+
+test('account deep-link lookup survives prior errors, failed older refreshes, and failed lookup retries until authoritative response', async () => {
+  let overviewHandler;
+  let accountsHandler;
+  const f = fixture(false, async url => {
+    if (url === '/admin/api/overview') return overviewHandler();
+    if (url === '/admin/api/accounts') return accountsHandler();
+    throw Error(`Unexpected URL ${url}`);
+  });
+  const okOverview = accounts => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      version: '1.2.0',
+      models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'],
+      accounts,
+      requests: [],
+      sessions: [],
+      failovers: [],
+      audit: [],
+      metrics: { requests: 0, errors: 0, active: 0, successRate: null, p50Ms: null, p95Ms: null },
+      settings: {},
+    }),
+  });
+  const okAccounts = accounts => ({ ok: true, status: 200, json: async () => ({ accounts }) });
+  const fail503 = () => ({ ok: false, status: 503, json: async () => ({ error: { code: 'UPSTREAM_UNAVAILABLE' } }) });
+
+  try {
+    f.S.authenticated = true;
+    f.S.csrf = 'fixture-csrf';
+    f.S.route = 'accounts';
+    f.S.accounts = [{ id: 'acc_1' }];
+    f.S.overview = {
+      version: '1.2.0',
+      models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'],
+      accounts: f.S.accounts,
+      requests: [],
+      sessions: [],
+      failovers: [],
+      audit: [],
+      metrics: { requests: 0, errors: 0, active: 0, successRate: null, p50Ms: null, p95Ms: null },
+      settings: {},
+    };
+
+    // 1. Older in-flight refresh fails after navigating to a new account deep link queued a successor refresh.
+    let releaseFirstOverview;
+    let firstOverviewSeen;
+    const firstOverviewGate = new Promise(resolve => { releaseFirstOverview = resolve; });
+    const firstOverviewReached = new Promise(resolve => { firstOverviewSeen = resolve; });
+    let queuedDone;
+    const queuedFinished = new Promise(resolve => { queuedDone = resolve; });
+    let overviewCalls = 0;
+    const accountsWithNew = [{ id: 'acc_1' }, { id: 'acc_new', modelStates: { 'gemini-argon': { state: 'unverified' } } }];
+    overviewHandler = async () => {
+      overviewCalls++;
+      if (overviewCalls === 1) {
+        firstOverviewSeen();
+        await firstOverviewGate;
+        return fail503();
+      }
+      return okOverview(accountsWithNew);
+    };
+    accountsHandler = async () => {
+      try { return okAccounts(accountsWithNew); } finally { setImmediate(queuedDone); }
+    };
+
+    const inFlight = f.refresh();
+    await firstOverviewReached;
+    f.location.hash = '#accounts?account=acc_new&model=gemini-argon';
+    f.applyRouteFromHash();
+    f.renderAccountDrawer();
+    await f.refresh(); // Sets S.refreshQueued = true while first refresh is still in flight.
+    releaseFirstOverview();
+    await inFlight;
+    await queuedFinished;
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(f.S.error, '');
+    assert.equal(f.S.selectedAccountId, 'acc_new');
+    assert.equal(f.S.deepLink.model, 'gemini-argon');
+    assert.equal(f.location.hash, '#accounts?account=acc_new&model=gemini-argon');
+    assert.equal(f.nodesById.get('account-drawer')?.hidden, false);
+
+    // 2. Prior S.error exists when a new deep link is applied before refresh() runs.
+    const accountsWithPrior = [...accountsWithNew, { id: 'acc_prior', modelStates: { 'gemini-argon': { state: 'unverified' } } }];
+    overviewHandler = async () => okOverview(accountsWithPrior);
+    accountsHandler = async () => okAccounts(accountsWithPrior);
+    f.S.error = 'Prior refresh error';
+    f.location.hash = '#accounts?account=acc_prior&model=gemini-argon';
+    f.applyRouteFromHash();
+    f.renderAccountDrawer();
+    f.focusRouteTarget();
+    assert.equal(f.S.selectedAccountId, 'acc_prior');
+    assert.equal(f.S.pendingAccountLookup, 'acc_prior');
+    assert.equal(f.location.hash, '#accounts?account=acc_prior&model=gemini-argon');
+    await f.refresh();
+    assert.equal(f.S.error, '');
+    assert.equal(f.S.selectedAccountId, 'acc_prior');
+    assert.equal(f.nodesById.get('account-drawer')?.hidden, false);
+
+    // 3. Lookup refresh itself fails, then Retry succeeds.
+    const accountsWithRetry = [...accountsWithPrior, { id: 'acc_retry', modelStates: { 'gemini-argon': { state: 'unverified' } } }];
+    f.location.hash = '#accounts?account=acc_retry&model=gemini-argon';
+    f.applyRouteFromHash();
+    overviewHandler = async () => fail503();
+    await f.refresh();
+    assert.ok(f.S.error);
+    assert.equal(f.S.selectedAccountId, 'acc_retry');
+    assert.equal(f.S.pendingAccountLookup, 'acc_retry');
+    assert.equal(f.S.pendingRouteFocus, true);
+    assert.equal(f.location.hash, '#accounts?account=acc_retry&model=gemini-argon');
+    assert.equal(f.nodesById.get('account-drawer')?.hidden, true);
+    assert.equal(f.nodesById.get('app')?.inert, false);
+
+    overviewHandler = async () => okOverview(accountsWithRetry);
+    accountsHandler = async () => okAccounts(accountsWithRetry);
+    await f.refresh();
+    assert.equal(f.S.error, '');
+    assert.equal(f.S.pendingAccountLookup, '');
+    assert.equal(f.S.selectedAccountId, 'acc_retry');
+    assert.equal(f.nodesById.get('account-drawer')?.hidden, false);
+    assert.equal(f.location.hash, '#accounts?account=acc_retry&model=gemini-argon');
+
+    // 4. Authoritative absence clears selection and hash.
+    f.location.hash = '#accounts?account=acc_absent';
+    f.applyRouteFromHash();
+    overviewHandler = async () => okOverview([{ id: 'acc_1' }]);
+    accountsHandler = async () => okAccounts([{ id: 'acc_1' }]);
+    await f.refresh();
+    assert.equal(f.S.pendingAccountLookup, '');
+    assert.equal(f.S.selectedAccountId, '');
+    assert.equal(f.S.deepLink.account, '');
+    assert.equal(f.location.hash, '#accounts');
+    assert.equal(f.nodesById.get('account-drawer')?.hidden, true);
+  } finally {
+    clearInterval(f.S.timer);
+  }
+});
+
+test('accountRoutingLabel distinguishes concurrency saturation, sign-in required, policy exclusion, cooldown, and unexplained ineligibility in en and zh-HK', () => {
+  const f = fixture();
+  const cases = [
+    {
+      name: 'at capacity with authoritative routingEligible: false',
+      account: { enabled: true, authenticationStatus: 'signed_in', status: 'ready', routingAllowed: true, routingEligible: false, inFlight: 2 },
+      eligible: false,
+      en: 'Busy (at per-account in-flight limit)',
+      zh: '忙碌中（已達單一帳戶並行上限）',
+    },
+    {
+      name: 'at capacity fallback without routingEligible field',
+      account: { enabled: true, authenticationStatus: 'signed_in', status: 'ready', inFlight: 2 },
+      eligible: false,
+      en: 'Busy (at per-account in-flight limit)',
+      zh: '忙碌中（已達單一帳戶並行上限）',
+    },
+    {
+      name: 'eligible with 1 in-flight request',
+      account: { enabled: true, authenticationStatus: 'signed_in', status: 'ready', routingAllowed: true, routingEligible: true, inFlight: 1 },
+      eligible: true,
+      en: 'Eligible for requests',
+      zh: '可用於請求',
+    },
+    {
+      name: 'sign-in required',
+      account: { enabled: true, authenticationStatus: 'login_required', status: 'login_required', routingAllowed: true, routingEligible: false, inFlight: 0 },
+      eligible: false,
+      en: 'Unavailable until signed in',
+      zh: '需登入後方可使用',
+    },
+    {
+      name: 'auth error',
+      account: { enabled: true, authenticationStatus: 'auth_error', status: 'auth_error', routingAllowed: true, routingEligible: false, inFlight: 0 },
+      eligible: false,
+      en: 'Unavailable until signed in',
+      zh: '需登入後方可使用',
+    },
+    {
+      name: 'excluded by routing policy',
+      account: { enabled: true, authenticationStatus: 'signed_in', status: 'ready', routingAllowed: false, routingEligible: false, inFlight: 0 },
+      eligible: false,
+      en: 'Excluded by routing policy (not used for requests)',
+      zh: '被路由政策排除（不會用於請求）',
+    },
+    {
+      name: 'disabled locally',
+      account: { enabled: false, authenticationStatus: 'signed_in', status: 'disabled', routingAllowed: true, routingEligible: false, inFlight: 0 },
+      eligible: false,
+      en: 'Disabled locally',
+      zh: '本機已停用',
+    },
+    {
+      name: 'cooldown pause',
+      account: { enabled: true, authenticationStatus: 'signed_in', status: 'cooldown', cooldownUntil: new Date(Date.now() + 60000).toISOString(), routingAllowed: true, routingEligible: false, inFlight: 0 },
+      eligible: false,
+      en: 'Paused (cooldown)',
+      zh: '暫停（冷卻中）',
+    },
+    {
+      name: 'unexplained ineligibility while signed in with 0 in flight',
+      account: { enabled: true, authenticationStatus: 'signed_in', status: 'unknown', routingAllowed: true, routingEligible: false, inFlight: 0 },
+      eligible: false,
+      en: 'Not currently eligible for new requests',
+      zh: '目前未能接收新請求',
+    },
+  ];
+
+  for (const c of cases) {
+    assert.equal(f.accountRoutingEligible(c.account), c.eligible, `${c.name}: eligibility`);
+    f.S.lang = 'en';
+    assert.equal(f.accountRoutingLabel(c.account), c.en, `${c.name}: en`);
+    f.S.lang = 'zh-HK';
+    assert.equal(f.accountRoutingLabel(c.account), c.zh, `${c.name}: zh-HK`);
+  }
+
+  const demoOverview = f.makeDemo();
+  assert.equal(demoOverview.accounts[0].id, 'acct_primary');
+  assert.equal(demoOverview.accounts[0].inFlight, 2);
+  assert.equal(demoOverview.accounts[0].routingEligible, false);
+  assert.equal(demoOverview.accounts[1].routingEligible, true);
+  assert.equal(demoOverview.accounts[2].routingEligible, true);
+  assert.equal(demoOverview.accounts[3].routingEligible, false);
 });

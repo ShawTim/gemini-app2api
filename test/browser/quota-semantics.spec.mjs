@@ -27,8 +27,8 @@ for (const width of [390, 1440]) test(`quota semantics preserve provenance, date
     await expect(page.locator('[data-page="accounts"]')).toBeVisible();
     await expect(page.locator('[data-daily-quota="acc-0"] [data-slot="current"]')).toContainText('Unknown');
     await expect(page.locator('[data-daily-quota="acc-0"] [data-slot="weekly"]')).toContainText('Unknown');
-    await page.locator('[data-account-details="acc-0"] > summary').click();
-    const q = page.locator('[data-quota="acc-0"]');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    const q = page.locator('#account-drawer [data-quota="acc-0"]');
     await expect(q.locator('[data-quota-percent]')).toHaveText(['0%', '25%', '37%', 'Not supplied']);
     await expect(q.locator('[data-quota-percent-meaning]')).toHaveText(['Used', 'Used', 'Provider percentage (meaning unspecified)', 'Used']);
     await expect(q.locator('[data-quota-provider-time]').nth(0)).toContainText('Usage window refreshes:');
@@ -37,10 +37,14 @@ for (const width of [390, 1440]) test(`quota semantics preserve provenance, date
     await expect(q.locator('[data-quota-observed] time')).toHaveAttribute('datetime', observed);
     await q.locator('[data-quota-details] > summary').click();
     await expect(q).toContainText('not a guarantee that all quota refills to maximum');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#account-drawer')).toBeHidden();
     await page.locator('#language-toggle').click();
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     await expect(q.locator('[data-quota-percent-meaning]').first()).toHaveText('已用');
     await expect(q.locator('[data-quota-provider-time]').first()).toContainText('用量視窗更新時間：');
     await expect(q.locator('[data-quota-provider-time]').nth(2)).toContainText('Google 配額時間：');
+    await page.keyboard.press('Escape');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(f.store.data.accounts[0].quota).toEqual(original);
     expect(quotaCalls).toBe(0); expect(f.seen).toHaveLength(0); expect(errors).toEqual([]);

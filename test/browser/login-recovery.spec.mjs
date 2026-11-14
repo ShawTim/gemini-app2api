@@ -33,14 +33,15 @@ test('remove and revoke need confirmation; cancel is inert and toggling remains 
   page.on('request', r => { if (r.method() === 'DELETE') deletes.push(new URL(r.url()).pathname); });
   try {
     await signIn(page, f);
-    await page.locator('[data-account-details="acc-0"] > summary').click();
-    const remove = () => page.locator('[data-action="remove-account"][data-id="acc-0"]');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    const remove = () => page.locator('#account-drawer [data-action="remove-account"][data-id="acc-0"]');
     await remove().click(); await expect(page.locator('#dialog-title')).toHaveText('Remove local account secrets?');
     expect(deletes).toHaveLength(0); expect(f.store.data.accounts).toHaveLength(2);
     await page.locator('#dialog-cancel').click(); expect(deletes).toHaveLength(0);
     await remove().click(); await page.locator('#dialog-confirm').click();
     await expect.poll(() => f.store.data.accounts.length).toBe(1); expect(deletes).toHaveLength(1);
     await expect(page.locator('#action-dialog')).not.toBeVisible();
+    await expect(page.locator('#account-drawer')).toBeHidden();
     await page.locator('[data-route="keys"]:visible').first().click();
     const revoke = () => page.locator('[data-action="revoke-key"]').first();
     await revoke().click(); await expect(page.locator('#dialog-title')).toHaveText('Revoke this API key?'); expect(deletes).toHaveLength(1);

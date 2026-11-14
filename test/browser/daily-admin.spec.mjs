@@ -40,23 +40,29 @@ test('default auto performs real POST/GET job progress; one click refreshes mult
     await expect(page.locator('#refresh-all')).toBeDisabled();
     await expect(page.locator('#bulk-status')).toContainText('0/2');
     await expect.poll(() => polls.length).toBeGreaterThan(0);
-    // Polling must not destroy disclosure state, typing or cursor position.
-    const details = page.locator('[data-account-details="acc-0"]');
-    await details.locator(':scope > summary').click();
-    await page.locator('#account-search').fill('Fixture');
-    await page.locator('#account-search').focus();
+    // Polling must not destroy drawer state, typing or cursor position.
+    const opener = page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]');
+    await opener.click();
+    const drawer = page.locator('#account-drawer');
+    await expect(drawer).toBeVisible();
     release();
     await expect(page.locator('#bulk-status')).toContainText('2 updated');
     await expect(page.locator('#refresh-all')).toBeEnabled();
-    await expect(page.locator('#account-search')).toBeFocused();
-    await expect(page.locator('#account-search')).toHaveValue('Fixture');
-    await expect(details).toHaveAttribute('open', '');
+    await expect(drawer).toBeVisible();
+    await expect(drawer.locator('[data-quota="acc-0"]')).toContainText('20%');
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
     for (const id of ['acc-0', 'acc-1']) { await expect(current(page, id)).toHaveText('20% used'); await expect(weekly(page, id)).toHaveText('60% used'); }
     expect(posts).toHaveLength(1);
     f.app.accounts.quotaAttempts.clear(); // bypass only the documented 30-second server throttle
-    gate = Promise.resolve();
+    gate = new Promise(resolve => { release = resolve; });
     await page.locator('#refresh-all').click();
+    await page.locator('#account-search').fill('Fixture');
+    await page.locator('#account-search').focus();
+    release();
     await expect(page.locator('#bulk-status')).toContainText('2/2');
+    await expect(page.locator('#account-search')).toBeFocused();
+    await expect(page.locator('#account-search')).toHaveValue('Fixture');
     await expect(current(page, 'acc-0')).toHaveText('40% used');
     await page.locator('#auto-refresh').uncheck();
     expect(await page.evaluate(() => localStorage.getItem('gemini_quota_auto'))).toBe('false');
@@ -153,22 +159,25 @@ for (const width of [390, 1440]) test(`daily layout, label semantics, keyboard a
     for (const theme of ['dark', 'light']) {
       if (theme === 'light') await page.locator('#theme-toggle').click();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      const sizes = await page.locator('[data-account-card]').evaluateAll(nodes => nodes.map(n => ({ height: n.getBoundingClientRect().height, main: n.querySelector('.daily-account-main').getBoundingClientRect().height, terms: n.querySelector('[data-account-terms]').getBoundingClientRect().height, summary: n.querySelector('summary').getBoundingClientRect().height })));
-      // Terms and the now-separate mobile More row add content, not empty card padding.
-      expect(sizes.every(s => s.main <= (width < 640 ? 230 : 110) && s.summary <= 44)).toBe(true);
+      const sizes = await page.locator('[data-account-card]').evaluateAll(nodes => nodes.map(n => ({ height: n.getBoundingClientRect().height, main: n.querySelector('.daily-account-main').getBoundingClientRect().height, terms: n.querySelector('[data-account-terms]').getBoundingClientRect().height, trigger: n.querySelector('[data-action="open-drawer"]').getBoundingClientRect().height })));
+      // Terms and the bottom drawer trigger add content, not empty card padding.
+      expect(sizes.every(s => s.main <= (width < 640 ? 230 : 110) && s.trigger <= 44)).toBe(true);
       expect(sizes.every(s => s.terms > 0 && s.terms <= (width < 640 ? 96 : 48))).toBe(true);
-      expect(sizes.every(s => s.height <= s.main + s.terms + s.summary + 2)).toBe(true);
-      const moreBox = await page.locator('[data-account-details="acc-0"] > summary').boundingBox(), testBox = await page.locator('[data-account-card="acc-0"] .daily-test').boundingBox();
+      expect(sizes.every(s => s.height <= s.main + s.terms + s.trigger + 2)).toBe(true);
+      const moreBox = await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').boundingBox(), testBox = await page.locator('[data-account-card="acc-0"] .daily-test').boundingBox();
       expect(moreBox.x + moreBox.width <= testBox.x || moreBox.y >= testBox.y + testBox.height).toBe(true);
       for (const text of ['Google reported', 'Stale', 'sourcePath', 'Routing eligible']) await expect(page.getByText(text, { exact: true }).filter({ visible: true })).toHaveCount(0);
       await page.screenshot({ path: testInfo.outputPath(`daily-${width}-${theme}.png`), fullPage: true });
     }
-    const more = page.locator('[data-account-details="acc-1"] > summary');
+    const more = page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]');
     await more.focus(); await page.keyboard.press('Enter');
-    await expect(page.locator('[data-account-details="acc-1"]')).toHaveAttribute('open', '');
+    await expect(page.locator('#account-drawer')).toBeVisible();
+    await expect(page.locator('#account-drawer [data-quota="acc-1"]')).toContainText('Unidentified row');
+    await expect(page.locator('#account-drawer [data-quota="acc-1"] [data-quota-percent]')).toHaveText(['77%', '9%']);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#account-drawer')).toBeHidden();
+    await expect(more).toBeFocused();
     expect(await more.evaluate(n => getComputedStyle(n).outlineStyle)).toBe('solid');
-    await expect(page.locator('[data-quota="acc-1"]')).toContainText('Unidentified row');
-    await expect(page.locator('[data-quota="acc-1"] [data-quota-percent]')).toHaveText(['77%', '9%']);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     expect(await more.evaluate(n => getComputedStyle(n.closest('article')).animationName)).toBe('none');
     await page.locator('#language-toggle').click();
@@ -194,12 +203,13 @@ test('due automatic lookup waits for typing and dialogs, then resumes without lo
     await page.locator('#account-search').fill('Fixture');
     await page.clock.runFor(300001);
     expect(posts).toBe(1); await expect(page.locator('#account-search')).toHaveValue('Fixture');
-    await page.locator('[data-account-details="acc-0"] > summary').click();
-    await page.locator('[data-action="rename-account"][data-id="acc-0"]').click();
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    await page.locator('#account-drawer [data-action="rename-account"][data-id="acc-0"]').click();
     await page.locator('#dialog-label').fill('Unsaved synthetic name');
     await page.clock.runFor(16000);
     expect(posts).toBe(1); await expect(page.locator('#dialog-label')).toHaveValue('Unsaved synthetic name');
     await page.locator('#dialog-cancel').click();
+    await page.keyboard.press('Escape');
     await page.clock.runFor(16000);
     await expect.poll(() => posts).toBe(2);
     await page.clock.runFor(1000); await expect(page.locator('#refresh-all')).toBeEnabled();
@@ -223,8 +233,9 @@ test('newer saved quota is applied from a skipped result and the visible date be
     await expect(page.locator('#bulk-status')).toContainText('1 skipped');
     await expect(current(page, 'acc-0')).toHaveText('75% used'); await expect(weekly(page, 'acc-0')).toHaveText('88% used');
     await expect(quota(page, 'acc-0').locator('.daily-data-time')).toHaveAttribute('data-usage-observed-at', '2025-01-03T00:00:00.000Z');
-    await page.locator('[data-account-details="acc-0"] > summary').click();
-    await expect(page.locator('[data-bulk-account-result="acc-0"]')).toContainText('newer saved usage kept');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    await expect(page.locator('#account-drawer [data-bulk-account-result="acc-0"]')).toContainText('newer saved usage kept');
+    await page.keyboard.press('Escape');
     expect(f.seen).toHaveLength(0);
   } finally { release(); await f.close(); }
 });
@@ -279,8 +290,12 @@ test('unwanted labels are absent even with all old quota/subscription details ex
         await page.evaluate(() => document.querySelectorAll('details').forEach(node => { node.open = true; }));
         await expect(page.locator('body')).not.toContainText(forbidden);
         if (route === 'accounts') {
-          await expect(page.locator('[data-quota="acc-0"] [data-quota-percent]')).toHaveText(['34%', '12%']);
-          await expect(page.locator('[data-subscription="acc-0"] [data-subscription-observed]')).toHaveAttribute('datetime', old);
+          await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+          await page.evaluate(() => document.querySelectorAll('#account-drawer details').forEach(node => { node.open = true; }));
+          await expect(page.locator('body')).not.toContainText(forbidden);
+          await expect(page.locator('#account-drawer [data-quota="acc-0"] [data-quota-percent]')).toHaveText(['34%', '12%']);
+          await expect(page.locator('#account-drawer [data-subscription="acc-0"] [data-subscription-observed]')).toHaveAttribute('datetime', old);
+          await page.keyboard.press('Escape');
         }
       }
     }
@@ -289,8 +304,8 @@ test('unwanted labels are absent even with all old quota/subscription details ex
     await expect(page.locator('[data-page="accounts"]')).toHaveAttribute('aria-busy', 'false');
     if (await page.locator('html').getAttribute('lang') !== 'en') await page.locator('#language-toggle').click();
     await expect(page.locator('html')).toHaveAttribute('lang', 'en');
-    await page.locator('[data-account-details="acc-0"]').evaluate(node => { node.open = true; });
-    const view = page.locator('[data-quota="acc-0"]');
+    await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
+    const view = page.locator('#account-drawer [data-quota="acc-0"]');
     await view.locator('[data-action="refresh-quota"]').click();
     await expect(view.locator('[data-quota-feedback]')).toContainText('Updating usage');
     await expect(view).not.toContainText(forbidden); release();
