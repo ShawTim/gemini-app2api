@@ -485,3 +485,95 @@ test('automaticRecoveryKind classifies structured_output 502s cleanly and provid
   assert.match(capturedPrompt, /Gateway automatic recovery: regenerate this turn/);
   assert.match(capturedPrompt, /JSON output format/);
 });
+
+test('cross-branch HTTP structured_output automatic recovery updates ModelTelemetry without prompt or output leakage', async t => {
+  const f = await fixture({ allowAutomaticRecovery: true, accountCount: 2 });
+  t.after(f.close);
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['id', 'status'],
+    properties: { id: { type: 'integer' }, status: { type: 'string' } },
+  };
+  const seenPrompts = [];
+  const hugeInvalidJson = 'SECRET_UNSTRUCTURED_PREFIX ' + 'x'.repeat(2200);
+  const validChatJson = '{"id":1,"status":"SECRET_OK_VALUE"}';
+  const mismatchJson = '{"id":"wrong","status":"SECRET_BAD_SCHEMA"}';
+  const validResponsesJson = '{"id":2,"status":"SECRET_DONE_VALUE"}';
+  const scriptedReplies = [hugeInvalidJson, validChatJson, mismatchJson, validResponsesJson];
+  let turnIndex = 0;
+  f.app.provider.openTurn = (_token, opts) => {
+    seenPrompts.push(opts.messages.map(msg => msg.content).join('\n'));
+    const reply = scriptedReplies[turnIndex++];
+    return {
+      cancel() {},
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame(reply, 8, 2) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    };
+  };
+
+  const chatRes = await f.api('/v1/chat/completions', {
+    method: 'POST',
+    body: {
+      model: 'gemini-argon',
+      stream: true,
+      messages: [{ role: 'user', content: 'SECRET_STRUCTURED_CHAT_PROMPT' }],
+      response_format: {
+        type: 'json_schema',
+        json_schema: { name: 'cross_item', strict: true, schema },
+      },
+    },
+  });
+  assert.equal(chatRes.status, 200);
+  assert.equal(chatRes.headers.get('x-gemini-failover-reason'), 'structured_output');
+  assert.equal(chatRes.headers.get('x-gemini-provider-attempts'), '2');
+  const chatSse = await chatRes.text();
+  const chatDeltaText = chatSse
+    .split('\n')
+    .filter(line => line.startsWith('data: ') && line !== 'data: [DONE]')
+    .map(line => JSON.parse(line.slice(6)).choices?.[0]?.delta?.content || '')
+    .join('');
+  assert.deepEqual(JSON.parse(chatDeltaText), { id: 1, status: 'SECRET_OK_VALUE' });
+  assert.doesNotMatch(chatSse, /SECRET_UNSTRUCTURED_PREFIX/);
+
+  const respRes = await f.api('/v1/responses', {
+    method: 'POST',
+    body: {
+      model: 'gemini-argon',
+      stream: false,
+      input: 'SECRET_STRUCTURED_RESPONSES_PROMPT',
+      text: {
+        format: { type: 'json_schema', name: 'cross_item', strict: true, schema },
+      },
+    },
+  });
+  assert.equal(respRes.status, 200);
+  assert.equal(respRes.headers.get('x-gemini-failover-reason'), 'structured_output');
+  assert.equal(respRes.headers.get('x-gemini-provider-attempts'), '2');
+  const respPayload = await respRes.json();
+  assert.deepEqual(JSON.parse(respPayload.output[0].content[0].text), { id: 2, status: 'SECRET_DONE_VALUE' });
+  assert.match(seenPrompts[1], /Gateway automatic recovery: regenerate this turn/);
+  assert.match(seenPrompts[3], /Gateway automatic recovery: regenerate this turn/);
+
+  const overview = await (await f.admin('overview')).json();
+  const serialized = JSON.stringify(overview.modelTelemetry);
+  assert.equal(overview.modelTelemetry.zeroPromptLogging, true);
+  assert.doesNotMatch(
+    serialized,
+    /SECRET_STRUCTURED_CHAT_PROMPT|SECRET_STRUCTURED_RESPONSES_PROMPT|SECRET_UNSTRUCTURED_PREFIX|SECRET_OK_VALUE|SECRET_BAD_SCHEMA|SECRET_DONE_VALUE/,
+  );
+  const argon = overview.modelTelemetry.byModel['gemini-argon'];
+  assert.equal(argon.requests, 4);
+  assert.equal(argon.successes, 2);
+  assert.equal(argon.failures, 2);
+  assert.equal(argon.retries, 2);
+  assert.equal(argon.errorCounts.protocol, 2);
+  assert.equal(argon.outputBytes, Buffer.byteLength(validChatJson) + Buffer.byteLength(validResponsesJson));
+  const perAccountProtocol = overview.accounts.reduce(
+    (sum, a) => sum + (a.modelTelemetry?.['gemini-argon']?.errorCounts?.protocol || 0),
+    0,
+  );
+  assert.equal(perAccountProtocol, 2);
+});

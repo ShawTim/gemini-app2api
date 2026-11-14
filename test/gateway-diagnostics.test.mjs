@@ -476,3 +476,110 @@ test("gateway overview and diagnostics expose zero-text modelTelemetry across re
   );
   assert.equal(perAccountSum, 3);
 });
+
+test("cross-branch HTTP native_search citations and NATIVE_SEARCH_NOT_OBSERVED report ModelTelemetry safely", async t => {
+  const f = await fixture({ allowFailover: false, accountCount: 1 });
+  t.after(f.close);
+  const s = (n, value) => m(n, Buffer.from(value));
+  const groundedText = "Grounded answer doc";
+  const citationUrl = "https://secret-source.example/doc";
+  const citation = m(
+    6,
+    Buffer.concat([
+      v(1, 0),
+      v(2, Buffer.byteLength(groundedText)),
+      s(3, citationUrl),
+      s(5, "SECRET_HTML_TITLE"),
+    ]),
+  );
+  const source = m(
+    14,
+    Buffer.concat([
+      s(5, "SECRET_SOURCE_TITLE"),
+      s(6, "SECRET_SNIPPET"),
+      s(8, s(1, citationUrl)),
+    ]),
+  );
+  const plainFrame = m(
+    1003,
+    m(
+      1,
+      Buffer.concat([
+        m(1, Buffer.concat([s(1, "ungrounded-resp"), m(2, s(1, "Ungrounded text"))])),
+        v(9, 1),
+        v(11, 0),
+        v(31, 0),
+        v(41, 8),
+        v(42, 2),
+      ]),
+    ),
+  );
+  const groundedFrame = m(
+    1003,
+    m(
+      1,
+      Buffer.concat([
+        m(1, Buffer.concat([s(1, "grounded-resp"), m(2, s(1, groundedText)), citation, source])),
+        m(8, m(2, Buffer.concat([s(1, "google"), v(3, 4)]))),
+        v(9, 1),
+        v(11, 0),
+        v(31, 0),
+        v(41, 8),
+        v(42, 2),
+      ]),
+    ),
+  );
+  const frames = [plainFrame, groundedFrame];
+  let idx = 0;
+  f.app.provider.openTurn = () => {
+    const bytes = frames[idx++];
+    return {
+      cancel() {},
+      events: (async function* () {
+        yield { type: "frame", bytes };
+        yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+      })(),
+    };
+  };
+
+  const failRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: {
+      model: "gemini-argon",
+      native_search: true,
+      messages: [{ role: "user", content: "SECRET_SEARCH_PROMPT_1" }],
+    },
+  });
+  assert.equal(failRes.status, 502);
+  const failJson = await failRes.json();
+  assert.equal(failJson.error.upstream_code || failJson.error.code, "NATIVE_SEARCH_NOT_OBSERVED");
+
+  const okRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: {
+      model: "gemini-argon",
+      native_search: true,
+      messages: [{ role: "user", content: "SECRET_SEARCH_PROMPT_2" }],
+    },
+  });
+  assert.equal(okRes.status, 200);
+  const okJson = await okRes.json();
+  assert.equal(okJson.choices[0].message.content, groundedText);
+  assert.equal(okJson.choices[0].message.annotations[0].type, "url_citation");
+  assert.equal(okJson.choices[0].message.annotations[0].url_citation.url, citationUrl);
+
+  const overview = await (await f.admin("overview")).json();
+  const serialized = JSON.stringify(overview.modelTelemetry);
+  assert.equal(overview.modelTelemetry.zeroPromptLogging, true);
+  assert.doesNotMatch(
+    serialized,
+    /SECRET_SEARCH_PROMPT|Grounded answer doc|Ungrounded text|secret-source\.example|SECRET_HTML_TITLE|SECRET_SOURCE_TITLE|SECRET_SNIPPET/,
+  );
+  const argon = overview.modelTelemetry.byModel["gemini-argon"];
+  assert.equal(argon.requests, 2);
+  assert.equal(argon.successes, 1);
+  assert.equal(argon.failures, 1);
+  assert.equal(argon.errorCounts.protocol, 1);
+  assert.equal(argon.outputBytes, Buffer.byteLength(groundedText));
+  assert.equal(overview.accounts[0].modelTelemetry["gemini-argon"].errorCounts.protocol, 1);
+});
