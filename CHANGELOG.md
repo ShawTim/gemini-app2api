@@ -2,6 +2,24 @@
 
 Release notes for Gemini App2API.
 
+## 1.3.0 — 2026-11-15
+
+### Structured outputs (`json_schema` and `json_object`)
+- Added `response_format` (`text`, `json_object`, `json_schema`) on `POST /v1/chat/completions` and `text.format` (plus bounded `text.verbosity`) on `POST /v1/responses`, compiled and validated through `src/prompt-tool-schema.mjs` with a strict keyword allowlist (`400 UNSUPPORTED_OUTPUT_SCHEMA` on unsupported keywords), safe local `$defs` / `definitions` `$ref` pointer traversal, strict JSON Schema applicability for `not` and `required`, and exact `BigInt`-backed `multipleOf` validation.
+- Buffered structured-output turns (including SSE streams) until terminal JSON validation passes, stripped a sole top-level JSON fence cleanly, and wired schema/JSON validation failures into bounded `allowAutomaticRecovery` regeneration before committing output to callers.
+
+### Native search structured `url_citation` annotations
+- Mapped verified final-frame `native_search` citations and `webSources` into bounded OpenAI `url_citation` annotations (`<= 64` annotations, `<= 512`-char sanitized titles, UTF-16 code-unit `[start_index, end_index]` spans) across Chat Completions and Responses (JSON and SSE), accepting assistant `url_citation` history on multi-turn replay.
+- Enforced canonical URL deduplication, syntactic public-web URL filtering (rejecting IP literals, non-alphabetic TLDs, and reserved/internal host suffixes without performing DNS resolution), and end-to-end deny-wins `forceAccount` exclusion preservation across protobuf decoding and citation mapping.
+
+### Per-account × per-model telemetry and operations console
+- Added zero-prompt-logging `ModelTelemetry` counters (`gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite` requests, successes, failures, in-flight turns, output bytes, retries, soft errors, quota errors, and categorized failure counts across `quota`, `auth`, `precondition`, `transient`, `soft_error`, `protocol`, and `other`), preserving `503 NATIVE_CREDENTIAL_REQUIRED` under `auth` and native transport/metadata protocol errors under `protocol`.
+- Surfaced pool-wide **Model Traffic & Reliability** on `#overview` and per-account **Per-Model Traffic & Errors** inside the slide-over Account Inspector Drawer, consolidated inline account card expansion exclusively into the inspector drawer, synchronized demo `ready` routing state dynamically across scenarios and account mutations, aligned Models API help copy with incremental 2,048-byte-gated SSE and estimated usage, and refreshed Light/Dark/Mobile-`zh-HK` demo screenshots.
+
+### Local controller hardening and documentation
+- Hardened `scripts/internal-server.mjs` private state I/O with `O_NOFOLLOW | O_NONBLOCK` file-descriptor verification, atomic `nlink` replacement retries, strict malformed `service-intent` fail-closed guards, and parenthetical `ps` re-probes for exiting child processes under concurrent controller/supervisor load.
+- Aligned `README.md`, `README.zh.md`, `docs/API_SUPPORT.md`, `docs/ACCOUNT_LIFECYCLE.md`, `docs/OPERATIONS.md`, `docs/CURRENT_CONTRACT_TESTS.md`, and `docs/TEST_EXECUTION_SAFETY.md` with the 66-file offline product suite and `1.3.0` contracts.
+
 ## 1.2.0 — 2026-11-14
 
 ### Operations console & accessibility
