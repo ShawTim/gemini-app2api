@@ -23,6 +23,29 @@ function jsonTree(value, state, depth = 0, seen = new Set(), maxDepth = LIMITS.d
 }
 function clone(v) { return Array.isArray(v) ? v.map(clone) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clone(x)])) : v; }
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+const SCHEMA_ANNOTATIONS = new Set([
+  '$schema', '$id', 'title', 'default', 'examples', 'deprecated', 'readOnly', 'writeOnly', 'format',
+]);
+export function stripSchemaAnnotations(value, seen = new Map()) {
+  if (!isPlainObject(value)) return value;
+  if (seen.has(value)) return seen.get(value);
+  const out = {};
+  seen.set(value, out);
+  for (const [key, child] of Object.entries(value)) {
+    if (SCHEMA_ANNOTATIONS.has(key)) continue;
+    if (['properties', '$defs', 'definitions', 'patternProperties'].includes(key) && isPlainObject(child)) {
+      out[key] = Object.fromEntries(Object.entries(child).map(([name, schema]) => [name, stripSchemaAnnotations(schema, seen)]));
+    } else if (['items', 'additionalProperties', 'additionalItems', 'not', 'if', 'then', 'else'].includes(key)) {
+      out[key] = Array.isArray(child) ? child.map((item) => stripSchemaAnnotations(item, seen)) : stripSchemaAnnotations(child, seen);
+    } else if (['anyOf', 'oneOf', 'allOf', 'prefixItems'].includes(key) && Array.isArray(child)) {
+      out[key] = child.map((item) => stripSchemaAnnotations(item, seen));
+    } else {
+      out[key] = child;
+    }
+  }
+  return out;
+}
 const types = new Set(['null','boolean','object','array','number','integer','string']);
 function schemaType(s) {
   if (!own(s, 'type')) return null;
@@ -115,9 +138,36 @@ export function compilePromptTools(tools = []) {
   return out;
 }
 
-export function validatePromptToolArguments(value, schema) {
+function mapOutputSchemaError(e) {
+  if (e?.code === 'TOOL_SIZE_LIMIT') return error('OUTPUT_SCHEMA_SIZE_LIMIT', e.message || 'Output schema exceeds size limit', 400);
+  if (e?.code === 'UNSUPPORTED_TOOL_SCHEMA') return error('UNSUPPORTED_OUTPUT_SCHEMA', e.message || 'Unsupported output schema', 400);
+  return error('INVALID_RESPONSE_FORMAT', e?.message || 'Invalid output schema', 400);
+}
+
+/** Validate and clone a standalone structured output JSON Schema object. */
+export function compileOutputSchema(schema) {
+  if (!isPlainObject(schema)) throw error('INVALID_RESPONSE_FORMAT', 'Output schema must be a plain JSON object', 400);
+  try {
+    jsonTree(schema, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4);
+  } catch (e) {
+    throw mapOutputSchemaError(e);
+  }
+  let text;
+  try { text = JSON.stringify(schema); } catch { throw error('INVALID_RESPONSE_FORMAT', 'Output schema is not JSON serializable', 400); }
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > LIMITS.bytes) {
+    throw error('OUTPUT_SCHEMA_SIZE_LIMIT', 'Output schema exceeds 256 KiB budget', 400);
+  }
+  try {
+    checkSchema(schema);
+  } catch (e) {
+    throw error(e?.code === 'TOOL_SIZE_LIMIT' ? 'OUTPUT_SCHEMA_SIZE_LIMIT' : 'UNSUPPORTED_OUTPUT_SCHEMA', e?.message || 'Unsupported output schema', 400);
+  }
+  return clone(schema);
+}
+
+function validateValueAgainstSchema(value, schema, mismatchCode, mismatchMessage) {
   let work=LIMITS.work, exhausted=false;
-  const mismatch=()=>{ throw error('TOOL_ARGUMENT_SCHEMA_MISMATCH','Tool arguments do not match schema',502); };
+  const mismatch=()=>{ throw error(mismatchCode,mismatchMessage,502); };
   const take=(n=1)=>{ work-=n; if(work<0){exhausted=true;mismatch();} };
   function equal(a,b) {
     take();
@@ -135,8 +185,6 @@ export function validatePromptToolArguments(value, schema) {
     return JSON.stringify(v);
   }
   try { jsonTree(value,{nodes:0}); } catch { mismatch(); }
-  jsonTree(schema,{nodes:0},0,new Set(),LIMITS.depth * 3 + 4);
-  checkSchema(schema);
   const root=schema;
   function visit(v,s,depth=0) {
     take(); if(depth>LIMITS.depth){exhausted=true;mismatch();}
@@ -146,8 +194,8 @@ export function validatePromptToolArguments(value, schema) {
     if(own(s,'const')&&!equal(v,s.const))mismatch();
     if(s.enum&&!s.enum.some(x=>equal(v,x)))mismatch();
     if(s.allOf)for(const x of s.allOf)visit(v,x,depth+1);
-    if(own(s,'not')){let matched=true;try{visit(v,s.not,depth+1);}catch(e){if(e.code!=='TOOL_ARGUMENT_SCHEMA_MISMATCH'||exhausted)throw e;matched=false;}if(matched)mismatch();}
-    for(const k of ['anyOf','oneOf'])if(s[k]){let n=0;for(const x of s[k]){try{visit(v,x,depth+1);n++;if(k==='anyOf')break;}catch(e){if(e.code!=='TOOL_ARGUMENT_SCHEMA_MISMATCH'||exhausted)throw e;}}if(k==='anyOf'?n<1:n!==1)mismatch();}
+    if(own(s,'not')){let matched=true;try{visit(v,s.not,depth+1);}catch(e){if(e.code!==mismatchCode||exhausted)throw e;matched=false;}if(matched)mismatch();}
+    for(const k of ['anyOf','oneOf'])if(s[k]){let n=0;for(const x of s[k]){try{visit(v,x,depth+1);n++;if(k==='anyOf')break;}catch(e){if(e.code!==mismatchCode||exhausted)throw e;}}if(k==='anyOf'?n<1:n!==1)mismatch();}
     let ts=schemaType(s);if(!ts)ts=s.properties||s.required||s.additionalProperties!==undefined||s.patternProperties?['object']:null;
     const match=t=>t==='null'?v===null:t==='boolean'?typeof v==='boolean':t==='string'?typeof v==='string':t==='number'?typeof v==='number'&&Number.isFinite(v):t==='integer'?Number.isSafeInteger(v):t==='array'?Array.isArray(v):t==='object'?v!==null&&typeof v==='object'&&!Array.isArray(v):false;
     if(ts&&!ts.some(match))mismatch();
@@ -173,4 +221,21 @@ export function validatePromptToolArguments(value, schema) {
     }
   }
   visit(value,schema);return true;
+}
+
+export function validatePromptToolArguments(value, schema) {
+  jsonTree(schema,{nodes:0},0,new Set(),LIMITS.depth * 3 + 4);
+  checkSchema(schema);
+  return validateValueAgainstSchema(value, schema, 'TOOL_ARGUMENT_SCHEMA_MISMATCH', 'Tool arguments do not match schema');
+}
+
+/** Validate parsed structured output JSON against a bounded JSON Schema. */
+export function validateOutputValue(value, schema) {
+  try {
+    jsonTree(schema, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4);
+    checkSchema(schema);
+  } catch (e) {
+    throw mapOutputSchemaError(e);
+  }
+  return validateValueAgainstSchema(value, schema, 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH', 'Structured output does not match schema');
 }

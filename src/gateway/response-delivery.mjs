@@ -1,7 +1,7 @@
 // OpenAI-format delivery: text is forwarded while generation is in progress.
 // A downstream 200 is not a claim that an interrupted response completed.
 import crypto from 'node:crypto';
-import { writeChatResponse, writeResponsesResponse } from '../openai-contract.mjs';
+import { writeChatResponse, writeResponsesResponse, toChatAnnotations } from '../openai-contract.mjs';
 import { protocolError as fault } from '../tool-protocol.mjs';
 import { responsesCallFields } from '../responses-tool-namespaces.mjs';
 import { toResponsesUsage } from '../openai-usage.mjs';
@@ -95,8 +95,13 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       if (item.status === 'completed') continue;
       const locator = { item_id: item.id, output_index: output.indexOf(item) };
       if (item.type === 'message') {
-        await sendResponse('response.output_text.done', { ...locator, content_index: 0, text: item.content[0].text, logprobs: [] });
-        await sendResponse('response.content_part.done', { ...locator, content_index: 0, part: item.content[0] });
+        const position = { ...locator, content_index: 0 };
+        const part = item.content[0];
+        for (let annotation_index = 0; annotation_index < part.annotations.length; annotation_index++) {
+          await sendResponse('response.output_text.annotation.added', { ...position, annotation_index, annotation: part.annotations[annotation_index] });
+        }
+        await sendResponse('response.output_text.done', { ...position, text: part.text, logprobs: [] });
+        await sendResponse('response.content_part.done', { ...position, part });
       } else await sendResponse('response.function_call_arguments.done', { ...locator, name: item.name, arguments: item.arguments });
       item.status = 'completed';
       await sendResponse('response.output_item.done', { output_index: locator.output_index, item });
@@ -200,7 +205,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       return;
     }
     if (!started) meta = { ...meta, ...result };
-    else for (const key of ['nativeSearch', 'thinkingLevel']) if (result[key] !== undefined) meta[key] = result[key];
+    else for (const key of ['nativeSearch', 'thinkingLevel', 'annotations']) if (result[key] !== undefined) meta[key] = result[key];
     if (!result.content.startsWith(content)) {
       const sameResponse = result.id === meta.id && result.nativeEvidence?.nativeResponseIdentityVerified === true;
       if (publishedBytes > 0 || calls.length > 0 || !sameResponse) throw Object.assign(fault('NON_MONOTONIC_NATIVE_RESPONSE', 502), {
@@ -215,10 +220,14 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     await start(meta);
     await emitHeld();
     if (route === 'chat') {
-      await sendChat({}, calls.length ? 'tool_calls' : 'stop');
+      const finishDelta = Array.isArray(meta.annotations) && meta.annotations.length ? { annotations: toChatAnnotations(meta.annotations) } : {};
+      await sendChat(finishDelta, calls.length ? 'tool_calls' : 'stop');
       if (includeUsage) await sendWire('data: ' + JSON.stringify({ ...chatBase(), choices: [], usage: estimateUsage() }) + '\n\n');
       await sendWire('data: [DONE]\n\n');
     } else {
+      if (message && Array.isArray(meta.annotations) && meta.annotations.length) {
+        message.content[0].annotations = meta.annotations.map(a => ({ ...a }));
+      }
       await finishResponseItems();
       await sendResponse('response.completed', { response: response('completed') });
     }
@@ -283,6 +292,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // A retried attempt must not inherit a discarded fragment.
   function discard() {
     if (settled) return;
+    delete meta.annotations;
     content = ''; calls = []; bytes = 0; publishedLength = 0; publishedBytes = 0; message = null; output.length = 0;
   }
   return { accept, complete, interrupt, discard,

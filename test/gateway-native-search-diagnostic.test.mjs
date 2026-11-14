@@ -286,8 +286,56 @@ test("validated metadata is retained only after provider completion; reset withh
       ]),
   });
   assert.equal(valid.ok, true);
+  assert.equal(valid.lastTextFrameIndex, 1);
   assert.equal(valid.citationCount, 1);
   assert.equal(valid.citations[0].frameIndex, 1);
+
+  const draftInner = Buffer.concat([
+    m(1, Buffer.from("synthetic-response")),
+    m(2, m(1, Buffer.from("draft text"))),
+    citation,
+  ]);
+  const draftFrame = m(
+    1003,
+    m(
+      1,
+      Buffer.concat([
+        m(1, draftInner),
+        v(9, 0),
+        v(11, 0),
+        v(31, 0),
+        v(41, 8),
+        v(42, 2),
+      ]),
+    ),
+  );
+  const trailingMetaOnly = m(
+    1003,
+    m(
+      1,
+      Buffer.concat([
+        m(1, Buffer.concat([m(1, Buffer.from("synthetic-response")), citation])),
+        v(9, 1),
+        v(11, 0),
+        v(31, 0),
+        v(41, 8),
+        v(42, 2),
+      ]),
+    ),
+  );
+  const multiFrame = await run({
+    openTurn: () =>
+      synthetic([
+        { type: "frame", bytes: draftFrame },
+        { type: "frame", bytes: textFrame("Final text") },
+        { type: "frame", bytes: trailingMetaOnly },
+        { type: "end", httpStatus: 200, grpcStatus: 0 },
+      ]),
+  });
+  assert.equal(multiFrame.ok, true);
+  assert.equal(multiFrame.answer, "Final text");
+  assert.equal(multiFrame.lastTextFrameIndex, 2);
+  assert.deepEqual(multiFrame.framesWithMetadata, [1, 3]);
   async function* resetAfterComplete() {
     yield { type: "frame", bytes: frame };
     throw Object.assign(new Error(), { code: "NATIVE_STREAM_RESET" });
