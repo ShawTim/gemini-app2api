@@ -37,7 +37,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, copyApiKey, toggleRevealKey, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -438,6 +438,8 @@ test('copyApiKey and toggleRevealKey discard delayed reveal responses after logo
     f.S.authenticated = true;
     f.S.authRequired = true;
     f.S.csrf = 'fixture-csrf';
+    f.S.overview = { models: [] };
+    f.S.keys = [{ id: 'key_1', label: 'Client', createdAt: '2026-11-14T00:00:00.000Z' }];
     f.location.hash = '#keys';
     f.applyRouteFromHash();
 
@@ -460,6 +462,7 @@ test('copyApiKey and toggleRevealKey discard delayed reveal responses after logo
 
     assert.deepEqual(clipboardWrites, [], mode);
     assert.deepEqual(writeItemOutcomes, ['rejected'], mode);
+    assert.equal(f.revealedKeys.size, 0, mode);
     assert.equal(f.nodesById.get('action-dialog')?.open ?? false, false, mode);
     const collectChildren = node => {
       if (typeof node === 'string') return [node];
