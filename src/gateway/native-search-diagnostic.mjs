@@ -78,6 +78,7 @@ export async function runNativeSearchDiagnostic({
   let toolStatusCount = 0,
     otherToolStatusCount = 0;
   let frameCount = 0;
+  let lastTextFrameIndex = 0;
   let totalBytes = 0;
   let citationCount = 0;
   let sourceCount = 0;
@@ -157,6 +158,18 @@ export async function runNativeSearchDiagnostic({
                 }
                 const model = one(fields, 1);
                 if (model) {
+                  const modelFields = parse(model.payload);
+                  const display = one(modelFields, 2);
+                  if (display && display.wire === 2) {
+                    const displayText = one(parse(display.payload), 1);
+                    if (
+                      displayText &&
+                      displayText.wire === 2 &&
+                      displayText.payload.length > 0
+                    ) {
+                      lastTextFrameIndex = frameCount;
+                    }
+                  }
                   const metadata = decodeNativeSearchMetadata(model.payload);
                   if (metadata.citations.length || metadata.webSources.length) {
                     if (metadataFrames.length >= MAX_METADATA_FRAMES)
@@ -235,6 +248,7 @@ export async function runNativeSearchDiagnostic({
       otherToolStatusCount,
       toolEvidenceKind:
         "validated-upstream-tool-report; state-enum-semantics-unmapped",
+      lastTextFrameIndex,
       framesWithMetadata: metadataFrames.map(({ frameIndex }) => frameIndex),
       citations: metadataFrames.flatMap(({ frameIndex, citations }) =>
         citations.map((item) => ({ ...item, frameIndex })),

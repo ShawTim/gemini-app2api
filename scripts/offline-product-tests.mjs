@@ -55,6 +55,7 @@ export const productTests = Object.freeze([
   'test/gateway-soft-error.test.mjs',
   'test/gateway-startup.test.mjs',
   'test/gateway-stream-reset.test.mjs',
+  'test/gateway-structured-output.test.mjs',
   'test/gateway-subscription.test.mjs',
   'test/gateway-terms-consent.test.mjs',
   'test/gateway-text-instructions.test.mjs',

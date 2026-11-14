@@ -7,20 +7,22 @@ const user = { role: 'user', content: 'hello' };
 const annotations = { $schema: 'https://json-schema.org/draft/2020-12/schema', $id: 'schema-id', title: 'A title', default: 'ignored', examples: ['sample'], deprecated: true, readOnly: true, writeOnly: false, format: 'email' };
 const schemaTool = { type: 'function', function: { name: 'annotated', description: 'Use tool', parameters: { type: 'object', ...annotations, properties: { value: { type: 'string', ...annotations, enum: ['x', 'y'] } }, required: ['value'], additionalProperties: false } } };
 
-test('Chat harmless sampling, response-format controls are omitted from normalized request/prompt', () => {
-  const request = normalizeChatRequest({ messages: [user], temperature: 0.2, top_p: 0.8, presence_penalty: 1, frequency_penalty: -1, seed: 7, logprobs: true, top_logprobs: 2, response_format: { type: 'json_object', json_schema: { name: 'output' } }, max_tokens: 50 });
+test('Chat harmless sampling, response-format text mode are omitted from normalized request/prompt', () => {
+  const request = normalizeChatRequest({ messages: [user], temperature: 0.2, top_p: 0.8, presence_penalty: 1, frequency_penalty: -1, seed: 7, logprobs: true, top_logprobs: 2, response_format: { type: 'text' }, max_tokens: 50 });
   for (const key of ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed', 'logprobs', 'top_logprobs', 'response_format']) assert.equal(Object.hasOwn(request, key), false);
   assert.equal(request.max_tokens, true);
   const prompt = buildCanonicalPrompt(request).messages[0].content;
-  for (const marker of ['json_object', 'json_schema', '0.2', 'frequency_penalty']) assert.equal(prompt.includes(marker), false);
+  for (const marker of ['response_format', '0.2', 'frequency_penalty']) assert.equal(prompt.includes(marker), false);
 });
 
 test('Responses harmless output controls and requested summary modes are accepted but omitted', () => {
   for (const summary of ['auto', 'concise', 'detailed']) {
-    const request = normalizeResponsesRequest({ input: 'hello', temperature: 0.5, top_p: 0.9, max_output_tokens: 99, text: { format: { type: 'json_object' }, verbosity: 'high' }, reasoning: { summary } }).body;
-    for (const key of ['temperature', 'top_p', 'max_output_tokens', 'text']) assert.equal(Object.hasOwn(request, key), false);
+    const request = normalizeResponsesRequest({ input: 'hello', temperature: 0.5, top_p: 0.9, max_output_tokens: 99, text: { format: { type: 'text' }, verbosity: 'high' }, reasoning: { summary } }).body;
+    for (const key of ['temperature', 'top_p', 'max_output_tokens', 'text', 'response_format']) assert.equal(Object.hasOwn(request, key), false);
     assert.equal(Object.hasOwn(request.reasoning ?? {}, 'summary'), false);
-    assert.equal(buildCanonicalPrompt(request).messages[0].content.includes(summary), false);
+    const prompt = buildCanonicalPrompt(request).messages[0].content;
+    assert.equal(prompt.includes(summary), false);
+    assert.equal(prompt.includes('verbosity'), false);
   }
   assert.deepEqual(normalizeResponsesRequest({ input: 'hello', reasoning: { summary: 'none' } }).body.reasoning, { summary: 'none' });
 });

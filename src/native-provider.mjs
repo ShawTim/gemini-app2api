@@ -16,6 +16,8 @@ import { downloadRemoteImages } from './gateway/image-download.mjs';
 import { quotaDowngradeCode } from './gateway/quota-failover.mjs';
 import { inspectNativeOutput } from './gateway/output-recovery.mjs';
 import { toolRecoveryInstruction } from './gateway/automatic-recovery.mjs';
+import { validateStructuredOutputText } from './gateway/structured-output.mjs';
+import { mapNativeSearchAnnotations, extractNativeSearchSources } from './gateway/native-search-citations.mjs';
 import { softErrorReason } from './gateway/soft-error.mjs';
 import { observeNative } from './gateway/native-diagnostic.mjs';
 export { NATIVE_MODELS, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse };
@@ -136,10 +138,14 @@ export class NativeDirectProvider {
     }
     if (report.otherToolStatusCount) fail('UNSUPPORTED_NATIVE_TOOL_REPORT');
     if (!report.googleToolReported) fail('NATIVE_SEARCH_NOT_OBSERVED');
+    const annotations = mapNativeSearchAnnotations(report.answer, report);
+    const sources = extractNativeSearchSources(report);
     const result = {
       id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now()/1000),
       model: body.model, resolvedModeCategory: report.resolvedModeCategory,
-      content: report.answer, calls: [], thinkingLevel: report.thinkingLevel,
+      content: report.answer, calls: [],
+      ...(annotations.length ? { annotations } : {}),
+      thinkingLevel: report.thinkingLevel,
       requestedThinkingLevel: body.thinking_level, continued: false,
       nativeSearch: {
         provider: 'gemini', evidence: 'upstream_final_tool_invocation', googleToolReported: true,
@@ -147,7 +153,9 @@ export class NativeDirectProvider {
         googleFinalInvocationCount: report.googleFinalInvocationCount,
         revisionCount: report.revisionCount, structuredCitationCount: report.citationCount,
         structuredSourceCount: report.webSourceCount,
-        sourceFormat: 'answer_text; structured annotations not mapped',
+        mappedAnnotationCount: annotations.length,
+        sources,
+        sourceFormat: annotations.length ? 'url_citation_annotations' : 'answer_text; no_public_web_annotations',
       },
     };
     const effort = body.reasoning_effort ?? body.reasoning?.effort;
@@ -194,7 +202,7 @@ export class NativeDirectProvider {
     let snapshotId = null, revisionCount = 0, quotaObservation = null, quotaFrames = 0;
     let emptyResponseReason = null, outputObserved = false, responseLimitReason = null, outputFailureReason = null;
     const outputShape = { nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeStructuredOutputPresent: false, nativeRefusalPresent: false };
-    const incremental = context.incrementalOutput === true;
+    const incremental = context.incrementalOutput === true && !body.response_format;
     const identity = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model: body.model,
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
@@ -386,7 +394,7 @@ export class NativeDirectProvider {
       }
       else { const splitter = createToolCallSplitter({ policy }); items = [...splitter.push(rawText), ...splitter.flush()]; }
       const calls = items.filter(item => item.type === 'call').map(item => item.call);
-      const content = items.filter(item => item.type === 'content').map(item => item.text).join('');
+      let content = items.filter(item => item.type === 'content').map(item => item.text).join('');
       if (!outputShape.nativeStructuredOutputPresent) {
         outputFailureReason = softErrorReason(content, body, calls.length);
         if (outputFailureReason) fail('NATIVE_SOFT_ERROR_RESPONSE');
@@ -394,6 +402,9 @@ export class NativeDirectProvider {
       if (body.parallel_tool_calls === false && calls.length > 1) fail('PARALLEL_TOOL_CALLS_DISABLED');
       validateToolCompletion(calls, policy);
       if (!calls.length && !content.trim()) { emptyResponseReason = 'post_parse_empty'; fail('EMPTY_NATIVE_RESPONSE'); }
+      if (body.response_format && !calls.length) {
+        content = validateStructuredOutputText(content, body.response_format);
+      }
       const result = { ...identity, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), content, calls, frames, thinkingLevel: observedThinking, continued: false };
       const effort = body.reasoning_effort ?? body.reasoning?.effort;
       if (effort !== undefined) result.requestedReasoningEffort = effort;
@@ -406,7 +417,13 @@ export class NativeDirectProvider {
         nativeTextBytes: Buffer.byteLength(rawText), ...outputShape,
         nativeResponseRevisions: revisionCount, nativeResponseIdentityVerified: snapshotId !== null });
       phase = 'output';
-      if (!incremental) for (const item of items) await onDelta(item.type === 'call' ? { call: item.call } : { content: item.text });
+      if (!incremental) {
+        if (body.response_format && !calls.length) {
+          if (content) await onDelta({ content });
+        } else {
+          for (const item of items) await onDelta(item.type === 'call' ? { call: item.call } : { content: item.text });
+        }
+      }
       note('provider_success');
       return result;
     } catch (error) {

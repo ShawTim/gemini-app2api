@@ -247,3 +247,103 @@ test('official SDK SSE accumulates multiple distinct indexed calls on both APIs'
   assert.equal(responses.output_text, verified.content);
   assert.deepEqual(responses.output.filter(i => i.type === 'function_call').map(i => i.call_id), ['call_one', 'call_two']);
 });
+
+test('replay url_citation annotations are accepted on assistant messages/parts and rejected when non-assistant or invalid', () => {
+  const validFlat = { type: 'url_citation', url: 'https://example.org/docs', title: 'Example Docs', start_index: 0, end_index: 7 };
+  const validChat = { type: 'url_citation', url_citation: { url: 'https://example.org/docs', title: 'Example Docs', start_index: 0, end_index: 7 } };
+
+  const chatNorm = normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'Example answer', annotations: [validChat] }, user] });
+  assert.equal(chatNorm.messages[1].content, 'Example answer');
+  assert.deepEqual(normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'Empty ok', annotations: [] }, user] }).messages[1].content, 'Empty ok');
+
+  const respOutputText = normalizeResponsesRequest({
+    input: [
+      user,
+      { type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Example answer', annotations: [validFlat], logprobs: [] }] },
+      user,
+    ],
+  });
+  assert.equal(respOutputText.body.messages[1].content, 'Example answer');
+  const respTextPart = normalizeResponsesRequest({
+    input: [
+      user,
+      { role: 'assistant', content: [{ type: 'text', text: 'Example answer', annotations: [validFlat] }] },
+      user,
+    ],
+  });
+  assert.equal(respTextPart.body.messages[1].content, 'Example answer');
+
+  // 64 valid annotations accepted; 65 rejected
+  const sixtyFourFlat = Array.from({ length: 64 }, (_, i) => ({ ...validFlat, start_index: i, end_index: i + 1 }));
+  const sixtyFourChat = Array.from({ length: 64 }, (_, i) => ({ type: 'url_citation', url_citation: { ...validChat.url_citation, start_index: i, end_index: i + 1 } }));
+  assert.equal(normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', annotations: sixtyFourChat }] }).messages.length, 2);
+  assert.equal(normalizeResponsesRequest({ input: [user, { role: 'assistant', content: [{ type: 'output_text', text: 'x', annotations: sixtyFourFlat }] }] }).body.messages.length, 2);
+
+  invalid(() => normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', annotations: [...sixtyFourChat, validChat] }] }), 'UNSUPPORTED_ANNOTATIONS');
+  invalid(() => normalizeResponsesRequest({ input: [user, { role: 'assistant', content: [{ type: 'output_text', text: 'x', annotations: [...sixtyFourFlat, validFlat] }] }] }), 'UNSUPPORTED_ANNOTATIONS');
+
+  // Non-assistant roles rejected
+  for (const role of ['user', 'system', 'developer']) {
+    invalid(() => normalizeChatRequest({ messages: [{ role, content: 'x', annotations: [] }, user] }), 'UNSUPPORTED_ANNOTATIONS');
+    invalid(() => normalizeChatRequest({ messages: [{ role, content: 'x', annotations: [validChat] }, user] }), 'UNSUPPORTED_ANNOTATIONS');
+  }
+  invalid(() => normalizeChatRequest({ messages: [...history.slice(0, 2), { ...history[2], annotations: [] }], tools: [tool] }), 'UNSUPPORTED_ANNOTATIONS');
+  invalid(() => normalizeResponsesRequest({ input: [{ role: 'user', content: [{ type: 'input_text', text: 'x', annotations: [] }] }] }), 'UNSUPPORTED_ANNOTATIONS');
+  invalid(() => normalizeResponsesRequest({ input: [{ role: 'user', content: [{ type: 'output_text', text: 'x', annotations: [validFlat] }] }] }), 'UNSUPPORTED_ANNOTATIONS');
+  invalid(() => normalizeResponsesRequest({ input: [{ role: 'assistant', content: [{ type: 'input_text', text: 'x', annotations: [validFlat] }] }] }), 'UNSUPPORTED_ANNOTATIONS');
+
+  // Malformed annotation payloads rejected
+  for (const badChat of [
+    'not-an-array',
+    [validFlat],
+    [{ type: 'file_citation', file_id: 'f1' }],
+    [{ type: 'url_citation', url_citation: { url: 'javascript:alert(1)', title: 't', start_index: 0, end_index: 1 } }],
+    [{ type: 'url_citation', url_citation: { url: 'http://127.0.0.1/', title: 't', start_index: 0, end_index: 1 } }],
+    [{ type: 'url_citation', url_citation: { url: 'https://example.org', title: 't', start_index: 5, end_index: 2 } }],
+    [{ type: 'url_citation', url_citation: { url: 'https://example.org', title: 't', start_index: -1, end_index: 2 } }],
+    [{ type: 'url_citation', url_citation: { url: 'https://example.org', title: 't'.repeat(513), start_index: 0, end_index: 1 } }],
+    [{ type: 'url_citation', url_citation: { url: 'https://example.org', title: 't', start_index: 0, end_index: 1 }, extra: true }],
+  ]) invalid(() => normalizeChatRequest({ messages: [{ role: 'assistant', content: 'x', annotations: badChat }] }), 'UNSUPPORTED_ANNOTATIONS');
+
+  for (const badFlat of [
+    'not-an-array',
+    [validChat],
+    [{ type: 'file_citation', file_id: 'f1' }],
+    [{ ...validFlat, url: 'file:///etc/passwd' }],
+    [{ ...validFlat, start_index: 1.5 }],
+    [{ ...validFlat, start_index: 4, end_index: 2 }],
+    [{ ...validFlat, extra: 1 }],
+  ]) invalid(() => normalizeResponsesRequest({ input: [{ role: 'assistant', content: [{ type: 'output_text', text: 'x', annotations: badFlat }] }] }), 'UNSUPPORTED_ANNOTATIONS');
+});
+
+test('official OpenAI JS SDK accumulates SSE url_citation annotations and round-trips replay cleanly', async () => {
+  const annotations = [{ type: 'url_citation', url: 'https://example.org/docs', title: 'Docs', start_index: 0, end_index: 7 }];
+  const annotatedResult = { id: 'chatcmpl-ann', model: 'gemini-argon', created: 456, content: 'Example answer', calls: [], annotations, thinkingLevel: 2, continued: false };
+  const requests = [];
+  const client = new OpenAI({
+    apiKey: 'fixture',
+    baseURL: 'https://fixture.invalid/v1',
+    maxRetries: 0,
+    fetch: async (url, init) => {
+      const payload = JSON.parse(init.body);
+      requests.push(payload);
+      const isResp = String(url).endsWith('/responses');
+      const canonical = isResp ? normalizeResponsesRequest(payload).body : normalizeChatRequest(payload);
+      const res = response();
+      if (isResp) writeResponsesResponse(res, annotatedResult, { stream: canonical.stream });
+      else writeChatResponse(res, annotatedResult, { stream: canonical.stream });
+      return new Response(res.text(), { status: 200, headers: res.headers });
+    },
+  });
+
+  const respStreamed = await client.responses.stream({ model: 'gemini-argon', input: 'cite source' }).finalResponse();
+  assert.deepEqual(respStreamed.output[0].content[0].annotations, annotations);
+  const respReplay = await client.responses.create({ model: 'gemini-argon', input: [{ role: 'user', content: 'cite source' }, ...respStreamed.output, { role: 'user', content: 'follow up' }] });
+  assert.equal(respReplay.output_text, 'Example answer');
+
+  const chatJson = await client.chat.completions.create({ model: 'gemini-argon', messages: [user] });
+  assert.deepEqual(chatJson.choices[0].message.annotations, [{ type: 'url_citation', url_citation: { url: 'https://example.org/docs', title: 'Docs', start_index: 0, end_index: 7 } }]);
+  const chatReplay = await client.chat.completions.create({ model: 'gemini-argon', messages: [user, chatJson.choices[0].message, { role: 'user', content: 'follow up' }] });
+  assert.equal(chatReplay.choices[0].message.content, 'Example answer');
+  assert.equal(requests.length, 4);
+});
