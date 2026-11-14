@@ -303,18 +303,26 @@ export function createLocalController({
         if (!cmdline) fail("STALE_LOCK_REQUIRES_INSPECTION");
         owned = cmdline.split("\0").includes(entry);
       } else {
-        const out = execFileSync(
-          "ps",
-          ["-p", String(pid), "-o", "stat=,command="],
-          { encoding: "utf8" },
-        ).trimStart();
-        const space = out.search(/\s/);
-        const stat = space === -1 ? out.trim() : out.slice(0, space);
-        const command = space === -1 ? "" : out.slice(space).trimStart();
-        owned = command.includes(entry);
-        // Exiting/zombie processes drop user argv before exit; inspect rather than misclassify as foreign.
-        if (!owned && (!out || /[EZ?]/.test(stat) || !command))
-          fail("STALE_LOCK_REQUIRES_INSPECTION");
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const out = execFileSync(
+            "ps",
+            ["-p", String(pid), "-o", "stat=,command="],
+            { encoding: "utf8" },
+          ).trimStart();
+          const space = out.search(/\s/);
+          const stat = space === -1 ? out.trim() : out.slice(0, space);
+          const command = space === -1 ? "" : out.slice(space).trimStart();
+          owned = command.includes(entry);
+          if (owned) break;
+          // Exiting/zombie processes can drop user argv before state switches to E/Z or disappears.
+          if (!out || /[EZ?]/.test(stat) || !command)
+            fail("STALE_LOCK_REQUIRES_INSPECTION");
+          if (/^(\([^)]+\)|<defunct>|<exiting>)$/.test(command.trim()) && attempt < 5) {
+            pauseSync(5);
+            continue;
+          }
+          break;
+        }
       }
     } catch {
       fail("STALE_LOCK_REQUIRES_INSPECTION");
