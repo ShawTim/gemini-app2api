@@ -195,7 +195,7 @@ export function createGateway({
           ? times[Math.min(times.length - 1, Math.floor(times.length * p))]
           : 0;
     return {
-      version: "1.1.1",
+      version: "1.2.0",
       uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
       mode: "native-direct",
       toolProtocol: "prompt",
@@ -475,7 +475,7 @@ export function createGateway({
       if (req.method === "GET" && p === "/health")
         return json(res, {
           status: "ok",
-          version: "1.1.1",
+          version: "1.2.0",
           mode: "native-direct",
           toolProtocol: "prompt",
           liveValidation: !allowFailover && !pool.allowQuotaFailover && !pool.allowEmptyResponseFailover && !pool.allowAutomaticRecovery,

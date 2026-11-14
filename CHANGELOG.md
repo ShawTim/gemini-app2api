@@ -2,6 +2,21 @@
 
 Release notes for Gemini App2API.
 
+## 1.2.0 — 2026-11-14
+
+### Operations console & accessibility
+- Redesigned the Admin Operations Console (`/admin`) with a Mission Control layout across Overview, Accounts, Activity, Playground, API Keys, and Settings, supporting Dark and Light themes plus English and Traditional Chinese (`zh-HK`).
+- Refined inspector drawer navigation, status filter chips, bulk quota synchronization, focus preservation/restoration across drawer close and account card reordering, and WCAG AA primary button / secondary text contrast.
+- Updated `README.md` and `README.zh.md` with current console workflows, key vault security notes, and refreshed Light/Dark/Mobile-zh-HK demo screenshots.
+
+### Copyable API key vault & session lifecycle
+- Added revealable and copyable client API keys for newly created and migrated keys while keeping legacy non-copyable keys behind one-time hash indicators.
+- Guarded asynchronous key reveal and clipboard flows against logout and route round-trips (clearing `revealedKeys` on `#keys` exit or session expiration) so delayed responses never leak or populate stale cache entries.
+
+### Gateway & testing
+- Treated exact upstream generic failure reply `I encountered an error doing what you asked. Could you try again?` as a bounded recoverable soft error without fuzzy matching or replay after streamed output has been delivered.
+- Expanded static, HTTP, and Playwright browser test coverage across the redesigned admin console, key vault session guards, and soft-error recovery.
+
 ## 1.1.1 — 2026-11-13
 
 ### Fixes and model metadata
