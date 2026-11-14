@@ -678,3 +678,105 @@ test('unsupported output schema assertion keywords reject upfront with 400 UNSUP
     }
   }
 });
+
+test('structured output rejects non-schema $ref targets upfront and enforces JSON Schema applicability and exact multipleOf over HTTP', async (t) => {
+  const nonSchemaRefSchemas = [
+    {
+      $defs: { holder: { const: { pattern: '^ONLY$' } } },
+      $ref: '#/$defs/holder/const',
+    },
+    {
+      $defs: { holder: { enum: [{ pattern: '^ONLY$' }] } },
+      $ref: '#/$defs/holder/enum/0',
+    },
+    {
+      $defs: { holder: { type: 'object', properties: { status: { type: 'string' } } } },
+      $ref: '#/$defs/holder/properties',
+    },
+  ];
+  for (const badRefSchema of nonSchemaRefSchemas) {
+    assert.throws(() => compileOutputSchema(badRefSchema), { code: 'UNSUPPORTED_OUTPUT_SCHEMA', status: 400 });
+    assert.throws(() => validateOutputValue('WRONG', badRefSchema), { code: 'UNSUPPORTED_OUTPUT_SCHEMA', status: 400 });
+  }
+
+  // Valid schema-path $ref under #/$defs/... continues to compile and validate.
+  const validSubpathSchema = {
+    $defs: { holder: { type: 'object', properties: { status: { type: 'string', enum: ['ok'] } } } },
+    type: 'object',
+    required: ['status'],
+    additionalProperties: false,
+    properties: { status: { $ref: '#/$defs/holder/properties/status' } },
+  };
+  assert.equal(validateOutputValue({ status: 'ok' }, validSubpathSchema), true);
+  assert.throws(() => validateOutputValue({ status: 'bad' }, validSubpathSchema), { code: 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH' });
+
+  // Keyword applicability inside `not` and exact decimal `multipleOf`.
+  const notRequiredSchema = { not: { required: ['secret'] } };
+  assert.throws(() => validateOutputValue(7, notRequiredSchema), { code: 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH' });
+  assert.throws(() => validateOutputValue({ secret: 1 }, notRequiredSchema), { code: 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH' });
+  assert.equal(validateOutputValue({ ok: 1 }, notRequiredSchema), true);
+
+  assert.throws(() => validateOutputValue(0.0000000001, { type: 'number', multipleOf: 1 }), { code: 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH' });
+  assert.equal(validateOutputValue(0.3, { type: 'number', multipleOf: 0.1 }), true);
+  assert.equal(validateOutputValue(-0.6, { type: 'number', multipleOf: 0.2 }), true);
+  assert.equal(validateOutputValue(0, { type: 'number', multipleOf: 1 }), true);
+
+  const f = await fixture({ allowFailover: false });
+  t.after(f.close);
+  for (const route of ['chat/completions', 'responses']) {
+    for (const stream of [false, true]) {
+      const badRefBody = route === 'chat/completions'
+        ? {
+            model: 'gemini-argon',
+            stream,
+            messages: [{ role: 'user', content: 'hi' }],
+            response_format: { type: 'json_schema', json_schema: { name: 'badref', schema: nonSchemaRefSchemas[0] } },
+          }
+        : {
+            model: 'gemini-argon',
+            stream,
+            input: 'hi',
+            text: { format: { type: 'json_schema', name: 'badref', schema: nonSchemaRefSchemas[0] } },
+          };
+      const badRefRes = await f.api(`/v1/${route}`, { method: 'POST', body: badRefBody });
+      assert.equal(badRefRes.status, 400);
+      assert.equal((await badRefRes.json()).error.code, 'UNSUPPORTED_OUTPUT_SCHEMA');
+
+      for (const [schemaName, schema, reply, expectedStatus] of [
+        ['not_req', notRequiredSchema, '7', 502],
+        ['not_req', notRequiredSchema, '{"ok":1}', 200],
+        ['mult_1', { type: 'number', multipleOf: 1 }, '0.0000000001', 502],
+        ['mult_01', { type: 'number', multipleOf: 0.1 }, '0.3', 200],
+      ]) {
+        f.app.provider.openTurn = () => ({
+          cancel() {},
+          events: (async function* () {
+            yield { type: 'frame', bytes: textFrame(reply, 8, 2) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+          })(),
+        });
+        const body = route === 'chat/completions'
+          ? {
+              model: 'gemini-argon',
+              stream,
+              messages: [{ role: 'user', content: 'hi' }],
+              response_format: { type: 'json_schema', json_schema: { name: schemaName, schema } },
+            }
+          : {
+              model: 'gemini-argon',
+              stream,
+              input: 'hi',
+              text: { format: { type: 'json_schema', name: schemaName, schema } },
+            };
+        const res = await f.api(`/v1/${route}`, { method: 'POST', body });
+        assert.equal(res.status, expectedStatus);
+        if (expectedStatus === 502) {
+          assert.equal((await res.json()).error.code, 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH');
+        } else {
+          const okText = await res.text();
+          assert.match(okText, stream ? /^data:/m : /^\{/);
+        }
+      }
+    }
+  }
+});

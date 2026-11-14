@@ -624,3 +624,64 @@ test("duplicate webSources and metadata frames apply deny-wins for forceAccount 
     }
   }
 });
+
+test("canonical URL identity enforces forceAccount exclusion, source title lookup, and dedup across host casing and default ports", async (t) => {
+  const answer = "Root https://example.org:443/ and distinct case.";
+  const report = {
+    lastTextFrameIndex: 1,
+    citations: [
+      { frameIndex: 1, link: "https://EXAMPLE.org/private", startIndex: 0, endIndex: 4, title: "Bypass Case" },
+      { frameIndex: 1, link: "https://example.org:443/private", startIndex: 0, endIndex: 4, title: "Bypass Port" },
+      { frameIndex: 1, link: "https://EXAMPLE.org/private#frag", startIndex: 0, endIndex: 4, title: "Bypass Hash" },
+      { frameIndex: 1, link: "https://example.org:443/", startIndex: 5, endIndex: 5 + "https://example.org:443/".length },
+      { frameIndex: 1, link: "http://EXAMPLE.ORG/guide", startIndex: 0, endIndex: 4 },
+      { frameIndex: 1, link: "https://example.org/Private", startIndex: 0, endIndex: 4, title: "Public Case Path" },
+    ],
+    webSources: [
+      { frameIndex: 1, url: "https://example.org/private", sourceTitle: "Secret", forceAccount: true },
+      { frameIndex: 1, url: "https://EXAMPLE.org", sourceTitle: "Canonical Root" },
+      { frameIndex: 1, url: "http://example.org:80/guide", sourceTitle: "HTTP Guide" },
+    ],
+  };
+
+  const annotations = mapNativeSearchAnnotations(answer, report);
+  assert.deepEqual(
+    annotations.map((item) => ({ url: item.url, title: item.title })),
+    [
+      { url: "https://example.org:443/", title: "Canonical Root" },
+      { url: "http://EXAMPLE.ORG/guide", title: "HTTP Guide" },
+      { url: "https://example.org/Private", title: "Public Case Path" },
+    ],
+  );
+  const sources = extractNativeSearchSources(report);
+  assert.deepEqual(sources, [
+    { url: "https://example.org:443/", title: "Canonical Root" },
+    { url: "http://EXAMPLE.ORG/guide", title: "HTTP Guide" },
+    { url: "https://example.org/Private", title: "Public Case Path" },
+  ]);
+
+  const events = [
+    frame({
+      text: "Check docs.",
+      tool: "google",
+      modelExtra: [
+        citationMsg({ url: "https://EXAMPLE.org/private#s1", start: 0, end: 5, title: "Secret Cite" }),
+        citationMsg({ url: "https://example.org:443/", start: 6, end: 10 }),
+        webSourceMsg({ url: "https://example.org/private", sourceTitle: "Secret", forceAccount: true }),
+        webSourceMsg({ url: "https://EXAMPLE.org", sourceTitle: "Canonical Root" }),
+      ],
+    }),
+    end,
+  ];
+  for (const kind of ["chat", "responses"]) {
+    const f = await setup(t, events);
+    const r = await f.request(kind, body(kind, false));
+    assert.equal(r.status, 200);
+    const data = await r.json();
+    assert.deepEqual(data.native_search.sources, [
+      { url: "https://example.org:443/", title: "Canonical Root" },
+    ]);
+    const serialized = JSON.stringify(data);
+    assert.doesNotMatch(serialized, /private|Secret/);
+  }
+});

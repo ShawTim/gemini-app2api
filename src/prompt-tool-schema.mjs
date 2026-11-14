@@ -56,12 +56,71 @@ function schemaType(s) {
 function nonnegativeInt(s, k) { if (own(s,k) && (!Number.isSafeInteger(s[k]) || s[k] < 0)) throw badSchema(`Invalid ${k}`); }
 function finite(s,k) { if (own(s,k) && (typeof s[k] !== 'number' || !Number.isFinite(s[k]))) throw badSchema(`Invalid ${k}`); }
 function literalValid(v) { try { jsonTree(v,{nodes:0}); return true; } catch { return false; } }
-function definition(root, ref) {
+const DIRECT_SCHEMA_STEP_KEYS = new Set(['not', 'additionalProperties', 'additionalItems']);
+const MAPPED_SCHEMA_STEP_KEYS = new Set(['properties', '$defs', 'definitions', 'patternProperties']);
+const ARRAY_SCHEMA_STEP_KEYS = new Set(['anyOf', 'oneOf', 'allOf', 'prefixItems']);
+
+function isCanonicalIndexToken(part) {
+  return /^(?:0|[1-9]\d*)$/.test(part);
+}
+
+function definition(root, ref, { strictPointer = false } = {}) {
   if (typeof ref !== 'string' || !ref.startsWith('#/')) throw badSchema('External references are unsupported');
   const parts = ref.slice(2).split('/').map(x => x.replace(/~1/g, '/').replace(/~0/g, '~'));
-  if (!['$defs', 'definitions'].includes(parts[0]) || parts.length > 36) throw badSchema('Unknown local reference');
+  if (!['$defs', 'definitions'].includes(parts[0]) || parts.length < 2 || parts.length > 36) throw badSchema('Unknown local reference');
   let target = root;
-  for (const part of parts) { if (!target || typeof target !== 'object' || !own(target, part)) throw badSchema('Unknown local reference'); target = target[part]; }
+  for (let i = 0; i < parts.length;) {
+    const part = parts[i];
+    if (!target || typeof target !== 'object' || Array.isArray(target) || !own(target, part)) throw badSchema('Unknown local reference');
+    if (i === 0) {
+      const container = target[part];
+      const defName = parts[1];
+      if (!container || typeof container !== 'object' || Array.isArray(container) || !own(container, defName)) throw badSchema('Unknown local reference');
+      target = container[defName];
+      i = 2;
+      continue;
+    }
+    if (DIRECT_SCHEMA_STEP_KEYS.has(part)) {
+      target = target[part];
+      i += 1;
+      continue;
+    }
+    if (part === 'items') {
+      if (Array.isArray(target.items)) {
+        if (i + 1 >= parts.length || !isCanonicalIndexToken(parts[i + 1])) throw badSchema('Unknown local reference');
+        const idx = Number(parts[i + 1]);
+        if (idx >= target.items.length) throw badSchema('Unknown local reference');
+        target = target.items[idx];
+        i += 2;
+        continue;
+      }
+      target = target.items;
+      i += 1;
+      continue;
+    }
+    if (MAPPED_SCHEMA_STEP_KEYS.has(part)) {
+      if (i + 1 >= parts.length) throw badSchema('Unknown local reference');
+      const key = parts[i + 1];
+      if (part === 'patternProperties' && strictPointer && key !== '^(.*)$' && key !== '^.*$') {
+        throw badSchema('Unsupported patternProperties pattern');
+      }
+      const map = target[part];
+      if (!map || typeof map !== 'object' || Array.isArray(map) || !own(map, key)) throw badSchema('Unknown local reference');
+      target = map[key];
+      i += 2;
+      continue;
+    }
+    if (ARRAY_SCHEMA_STEP_KEYS.has(part)) {
+      if (i + 1 >= parts.length || !isCanonicalIndexToken(parts[i + 1])) throw badSchema('Unknown local reference');
+      const arr = target[part];
+      const idx = Number(parts[i + 1]);
+      if (!Array.isArray(arr) || idx >= arr.length) throw badSchema('Unknown local reference');
+      target = arr[idx];
+      i += 2;
+      continue;
+    }
+    throw badSchema('Invalid reference target');
+  }
   if (typeof target !== 'boolean' && (!target || typeof target !== 'object' || Array.isArray(target))) throw badSchema('Invalid reference target');
   return target;
 }
@@ -83,11 +142,12 @@ const OUTPUT_SCHEMA_METADATA = new Set([
 
 function checkSchema(root, { rejectUnsupportedKeywords = false } = {}) {
   const defs = new Map();
+  const walked = new WeakSet();
   function walk(s, depth=0, visited=new Set()) {
     if (depth > LIMITS.depth) throw error('TOOL_SIZE_LIMIT');
     if (typeof s === 'boolean') return;
     if (!s || typeof s !== 'object' || Array.isArray(s)) throw badSchema('Schema must be an object');
-    if (visited.has(s)) throw badSchema('Cyclic schema'); visited.add(s);
+    if (visited.has(s)) throw badSchema('Cyclic schema'); visited.add(s); walked.add(s);
     if (rejectUnsupportedKeywords) {
       for (const k of Object.keys(s)) {
         if (!OUTPUT_SCHEMA_KEYWORDS.has(k) && !OUTPUT_SCHEMA_METADATA.has(k)) {
@@ -128,7 +188,11 @@ function checkSchema(root, { rejectUnsupportedKeywords = false } = {}) {
   // Validate all local references syntactically and resolve only known definition pointers.
   function refs(s, seen=new Set()) {
     if (!s || typeof s!=='object' || seen.has(s)) return; seen.add(s);
-    if (own(s,'$ref')) refs(definition(root,s.$ref),seen);
+    if (own(s,'$ref')) {
+      const target = definition(root, s.$ref, { strictPointer: rejectUnsupportedKeywords });
+      if (target && typeof target === 'object' && !walked.has(target)) walk(target, 0, new Set());
+      refs(target, seen);
+    }
     for (const k of ['properties','$defs','definitions']) if (s[k] && typeof s[k]==='object') for(const v of Object.values(s[k])) refs(v,seen);
     for (const k of ['items','additionalProperties','additionalItems','not']) if (own(s,k)) { const children = k === 'items' && Array.isArray(s[k]) ? s[k] : [s[k]]; for (const child of children) refs(child,seen); }
     if (s.prefixItems) for (const child of s.prefixItems) refs(child,seen);
@@ -191,7 +255,32 @@ export function compileOutputSchema(schema) {
   return clone(schema);
 }
 
-function validateValueAgainstSchema(value, schema, mismatchCode, mismatchMessage) {
+function parseFiniteDecimal(num) {
+  if (num === 0) return { coeff: 0n, exp: 0 };
+  const raw = Math.abs(num).toString();
+  const eIdx = raw.indexOf('e');
+  const mantissa = eIdx >= 0 ? raw.slice(0, eIdx) : raw;
+  const baseExp = eIdx >= 0 ? Number.parseInt(raw.slice(eIdx + 1), 10) : 0;
+  const dotIdx = mantissa.indexOf('.');
+  const fracLen = dotIdx >= 0 ? mantissa.length - dotIdx - 1 : 0;
+  const digits = dotIdx >= 0 ? mantissa.slice(0, dotIdx) + mantissa.slice(dotIdx + 1) : mantissa;
+  return { coeff: BigInt(digits), exp: baseExp - fracLen };
+}
+
+function isExactMultipleOf(value, multiple) {
+  if (value === 0) return true;
+  if (!Number.isFinite(value) || !Number.isFinite(multiple) || multiple <= 0) return false;
+  const v = parseFiniteDecimal(value);
+  const m = parseFiniteDecimal(multiple);
+  const expDiff = Math.abs(v.exp - m.exp);
+  if (expDiff > 1000) return false;
+  const scale = 10n ** BigInt(expDiff);
+  const vCoeff = v.exp > m.exp ? v.coeff * scale : v.coeff;
+  const mCoeff = m.exp > v.exp ? m.coeff * scale : m.coeff;
+  return mCoeff !== 0n && vCoeff % mCoeff === 0n;
+}
+
+function validateValueAgainstSchema(value, schema, mismatchCode, mismatchMessage, { strictApplicability = false } = {}) {
   let work=LIMITS.work, exhausted=false;
   const mismatch=()=>{ throw error(mismatchCode,mismatchMessage,502); };
   const take=(n=1)=>{ work-=n; if(work<0){exhausted=true;mismatch();} };
@@ -216,17 +305,17 @@ function validateValueAgainstSchema(value, schema, mismatchCode, mismatchMessage
     take(); if(depth>LIMITS.depth){exhausted=true;mismatch();}
     if(s===true)return;if(s===false)mismatch();
     if(v===null&&s.nullable===true)return;
-    if(own(s,'$ref'))visit(v,definition(root,s.$ref),depth+1);
+    if(own(s,'$ref'))visit(v,definition(root,s.$ref,{strictPointer:strictApplicability}),depth+1);
     if(own(s,'const')&&!equal(v,s.const))mismatch();
     if(s.enum&&!s.enum.some(x=>equal(v,x)))mismatch();
     if(s.allOf)for(const x of s.allOf)visit(v,x,depth+1);
     if(own(s,'not')){let matched=true;try{visit(v,s.not,depth+1);}catch(e){if(e.code!==mismatchCode||exhausted)throw e;matched=false;}if(matched)mismatch();}
     for(const k of ['anyOf','oneOf'])if(s[k]){let n=0;for(const x of s[k]){try{visit(v,x,depth+1);n++;if(k==='anyOf')break;}catch(e){if(e.code!==mismatchCode||exhausted)throw e;}}if(k==='anyOf'?n<1:n!==1)mismatch();}
-    let ts=schemaType(s);if(!ts)ts=s.properties||s.required||s.additionalProperties!==undefined||s.patternProperties?['object']:null;
+    let ts=schemaType(s);if(!ts&&!strictApplicability)ts=s.properties||s.required||s.additionalProperties!==undefined||s.patternProperties?['object']:null;
     const match=t=>t==='null'?v===null:t==='boolean'?typeof v==='boolean':t==='string'?typeof v==='string':t==='number'?typeof v==='number'&&Number.isFinite(v):t==='integer'?Number.isSafeInteger(v):t==='array'?Array.isArray(v):t==='object'?v!==null&&typeof v==='object'&&!Array.isArray(v):false;
     if(ts&&!ts.some(match))mismatch();
     if(typeof v==='string'){const n=[...v].length;if(s.minLength!==undefined&&n<s.minLength||s.maxLength!==undefined&&n>s.maxLength)mismatch();}
-    if(typeof v==='number'){if(s.minimum!==undefined&&v<s.minimum||s.maximum!==undefined&&v>s.maximum||s.exclusiveMinimum!==undefined&&v<=s.exclusiveMinimum||s.exclusiveMaximum!==undefined&&v>=s.exclusiveMaximum||s.multipleOf!==undefined&&Math.abs(v/s.multipleOf-Math.round(v/s.multipleOf))>1e-9)mismatch();}
+    if(typeof v==='number'){if(s.minimum!==undefined&&v<s.minimum||s.maximum!==undefined&&v>s.maximum||s.exclusiveMinimum!==undefined&&v<=s.exclusiveMinimum||s.exclusiveMaximum!==undefined&&v>=s.exclusiveMaximum||s.multipleOf!==undefined&&!isExactMultipleOf(v,s.multipleOf))mismatch();}
     if(Array.isArray(v)){
       if(s.minItems!==undefined&&v.length<s.minItems||s.maxItems!==undefined&&v.length>s.maxItems)mismatch();
       if(s.uniqueItems&&new Set(v.map(canonical)).size!==v.length)mismatch();
@@ -263,5 +352,5 @@ export function validateOutputValue(value, schema) {
   } catch (e) {
     throw mapOutputSchemaError(e);
   }
-  return validateValueAgainstSchema(value, schema, 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH', 'Structured output does not match schema');
+  return validateValueAgainstSchema(value, schema, 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH', 'Structured output does not match schema', { strictApplicability: true });
 }

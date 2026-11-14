@@ -1,6 +1,7 @@
 /** OpenAI compatibility contract v1: text/images Chat/Responses, JSON + SSE.
- * Known sampling/format controls are advisory and ignored; other unknown keys
- * remain rejected. Safe Codex metadata is inert; tools use caller-owned protocol.
+ * Known sampling controls are advisory and ignored; response_format and
+ * text.format enforce validated Structured Outputs; other unknown keys remain
+ * rejected. Safe Codex metadata is inert; tools use caller-owned protocol.
  * `native_search` is a documented Gemini-native opt-in, not OpenAI web_search.
  */
 import crypto from 'node:crypto';

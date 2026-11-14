@@ -13,7 +13,7 @@ node scripts/run-offline-product.mjs --run --file=test/gateway-sdk.test.mjs
 
 `npm test` and `npm run test:product` invoke this runner. Direct Node invocation is also supported when running with `--ignore-scripts` discipline.
 
-`scripts/offline-product-tests.mjs` explicitly enumerates all **65** product test files rather than discovering files via shell globs. Adding a new test file requires adding it to the reviewed manifest and release file list.
+`scripts/offline-product-tests.mjs` explicitly enumerates all **66** product test files rather than discovering files via shell globs. Adding a new test file requires adding it to the reviewed manifest and release file list.
 
 For each run, `scripts/run-offline-product.mjs`:
 

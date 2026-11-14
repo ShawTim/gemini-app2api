@@ -28,6 +28,18 @@ function hostnameFallback(url) {
   }
 }
 
+function canonicalWebUrlKey(urlString, { stripHash = false } = {}) {
+  if (typeof urlString !== 'string') return '';
+  try {
+    const parsed = new URL(urlString);
+    parsed.hostname = parsed.hostname.replace(/\.+$/, '');
+    if (stripHash) parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return urlString;
+  }
+}
+
 function filterReportMetadata(report) {
   const minFrame = Number.isInteger(report?.lastTextFrameIndex) ? report.lastTextFrameIndex : 0;
   const frameOk = (item) => (minFrame === 0
@@ -36,32 +48,41 @@ function filterReportMetadata(report) {
 
   const rawSources = Array.isArray(report?.webSources) ? report.webSources : [];
   const excludedUrls = new Set();
+  const excludedBaseUrls = new Set();
   for (const src of rawSources) {
     if (typeof src?.url === 'string' && src.forceAccount === true) {
-      excludedUrls.add(src.url);
+      excludedUrls.add(canonicalWebUrlKey(src.url));
+      try {
+        if (!new URL(src.url).hash) excludedBaseUrls.add(canonicalWebUrlKey(src.url, { stripHash: true }));
+      } catch {}
     }
   }
+  const isExcludedUrl = (url) => (
+    excludedUrls.has(canonicalWebUrlKey(url))
+    || excludedBaseUrls.has(canonicalWebUrlKey(url, { stripHash: true }))
+  );
 
   const webSources = [];
   for (const src of rawSources) {
     if (!frameOk(src) || typeof src?.url !== 'string') continue;
-    if (src.forceAccount === true || excludedUrls.has(src.url)) continue;
+    if (src.forceAccount === true || isExcludedUrl(src.url)) continue;
     if (isSafeWebUrl(src.url)) webSources.push(src);
   }
 
   const citations = [];
   for (const cit of Array.isArray(report?.citations) ? report.citations : []) {
-    if (!frameOk(cit) || !isSafeWebUrl(cit?.link) || excludedUrls.has(cit.link)) continue;
+    if (!frameOk(cit) || !isSafeWebUrl(cit?.link) || isExcludedUrl(cit.link)) continue;
     citations.push(cit);
   }
 
   const sourceTitles = new Map();
   for (const src of webSources) {
-    if (sourceTitles.has(src.url)) continue;
+    const key = canonicalWebUrlKey(src.url);
+    if (sourceTitles.has(key)) continue;
     const title = cleanPlainTitle(src.sourceTitle)
       || cleanPlainTitle(src.title)
       || cleanPlainTitle(src.attributionTitle);
-    if (title) sourceTitles.set(src.url, title);
+    if (title) sourceTitles.set(key, title);
   }
 
   return { citations, webSources, sourceTitles };
@@ -69,7 +90,7 @@ function filterReportMetadata(report) {
 
 function resolveTitle(url, { sourceTitles, directTitle, untrustedHtmlTitle } = {}) {
   return cleanPlainTitle(directTitle)
-    || sourceTitles?.get(url)
+    || sourceTitles?.get(canonicalWebUrlKey(url))
     || cleanPlainTitle(untrustedHtmlTitle, { stripHtml: true })
     || hostnameFallback(url);
 }
@@ -113,10 +134,11 @@ export function mapNativeSearchAnnotations(answerText, report) {
 
   const pushAnnotation = (url, title, [start_index, end_index]) => {
     if (out.length >= CITATION_LIMITS.MAX_ANNOTATIONS) return;
-    const key = `${url}\0${start_index}\0${end_index}`;
+    const canonicalUrl = canonicalWebUrlKey(url);
+    const key = `${canonicalUrl}\0${start_index}\0${end_index}`;
     if (seen.has(key)) return;
     seen.add(key);
-    citedUrls.add(url);
+    citedUrls.add(canonicalUrl);
     out.push({ type: 'url_citation', url, title, start_index, end_index });
   };
 
@@ -133,7 +155,7 @@ export function mapNativeSearchAnnotations(answerText, report) {
 
   for (const src of webSources) {
     if (out.length >= CITATION_LIMITS.MAX_ANNOTATIONS) break;
-    if (citedUrls.has(src.url)) continue;
+    if (citedUrls.has(canonicalWebUrlKey(src.url))) continue;
     const title = resolveTitle(src.url, {
       sourceTitles,
       directTitle: src.sourceTitle || src.title || src.attributionTitle,
@@ -151,8 +173,9 @@ export function extractNativeSearchSources(report) {
   const seenUrls = new Set();
 
   const pushSource = (url, title) => {
-    if (sources.length >= CITATION_LIMITS.MAX_ANNOTATIONS || seenUrls.has(url)) return;
-    seenUrls.add(url);
+    const canonicalUrl = canonicalWebUrlKey(url);
+    if (sources.length >= CITATION_LIMITS.MAX_ANNOTATIONS || seenUrls.has(canonicalUrl)) return;
+    seenUrls.add(canonicalUrl);
     sources.push({ url, title });
   };
 

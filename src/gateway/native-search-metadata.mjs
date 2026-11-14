@@ -157,22 +157,21 @@ function decodeString(bytes, maxLength, fieldName) {
   }
 }
 
+const NON_PUBLIC_HOST_SUFFIX = /(?:^|\.)(?:localhost|local|localdomain|internal|home|lan|arpa|invalid|test|onion)$/i;
+
 /**
  * Syntactic safe HTTP(S) URL validation.
  *
  * Enforces:
  * - Scheme must be http: or https:
  * - No credentials (username / password)
- * - Rejects IP literals (IPv4 and IPv6) syntactically
- * - Rejects local/reserved hostnames (localhost, .local, .internal, .lan, .test, .example, etc.)
+ * - Rejects IP literals (IPv4 and IPv6) syntactically and non-alphabetic TLDs
+ * - Rejects local/reserved hostnames (localhost, .localhost, .local, .localdomain, .internal, .home, .lan, .arpa, .invalid, .test, .onion)
  * - Rejects single-label hostnames without a dot
  * - Bounded length (<= 4096 bytes)
  *
  * NOTE: This is purely syntactic formatting validation for metadata hygiene.
  * It performs NO DNS requests and must NOT be claimed to be an SSRF-safe fetcher.
- */
-/**
- * Syntactic public-looking HTTP(S) URL validation only; this is not DNS or SSRF protection.
  */
 export function isSafeWebUrl(urlString) {
   if (typeof urlString !== "string" || !urlString) return false;
@@ -196,8 +195,9 @@ export function isSafeWebUrl(urlString) {
     return false;
   if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname) || /^\d+$/.test(hostname))
     return false;
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) return false;
+  if (NON_PUBLIC_HOST_SUFFIX.test(hostname)) return false;
   const labels = hostname.split(".");
+  if (!/[a-z]/i.test(labels[labels.length - 1] || "")) return false;
   return labels.every(
     (label) =>
       label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),

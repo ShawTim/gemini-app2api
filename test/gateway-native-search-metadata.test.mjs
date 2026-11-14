@@ -223,3 +223,32 @@ test("accepts Buffer and Uint8Array, rejects other input types", () => {
     METADATA_ERROR_CODES.MALFORMED_SEARCH_METADATA,
   );
 });
+
+test("isSafeWebUrl rejects internal/reserved host suffixes and non-alphabetic TLDs while keeping public and .example hosts", () => {
+  for (const publicUrl of [
+    "https://public.box/path",
+    "https://example.org/doc",
+    "https://a.example/page",
+    "https://docs.python.org:8443/3/",
+  ]) {
+    assert.equal(isSafeWebUrl(publicUrl), true, publicUrl);
+  }
+  for (const rejectedUrl of [
+    "https://wiki.internal/page",
+    "https://mail.corp.local/page",
+    "https://router.lan/admin",
+    "https://nas.home/files",
+    "https://host.home.arpa/x",
+    "https://box.localdomain/x",
+    "https://app.test/x",
+    "https://site.invalid/x",
+    "https://hidden.onion/x",
+    "http://localhost/x",
+    "http://sub.localhost/x",
+    "https://127.0.0.1/x",
+    "https://[::1]/x",
+    "https://bad.123/x",
+  ]) {
+    assert.equal(isSafeWebUrl(rejectedUrl), false, rejectedUrl);
+  }
+});
