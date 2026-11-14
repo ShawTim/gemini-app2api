@@ -87,6 +87,7 @@ function safeFailure(error) {
   if (error instanceof ProtocolError) return error;
   if (error?.code === 'NATIVE_QUOTA_EXHAUSTED') return protocolError('NATIVE_QUOTA_EXHAUSTED', 429);
   if (error?.code === 'NATIVE_PERMISSION_OR_AUTH') return protocolError('NATIVE_PERMISSION_OR_AUTH', 403);
+  if (error?.code === 'NATIVE_CREDENTIAL_REQUIRED') return protocolError('NATIVE_CREDENTIAL_REQUIRED', 503);
   if (error?.code === 'ACCOUNT_LOGIN_REQUIRED') return protocolError('ACCOUNT_LOGIN_REQUIRED', 401);
   if (error?.code === 'OAUTH_REFRESH_FAILED') return protocolError('OAUTH_REFRESH_FAILED', 502);
   if (error?.code === 'REQUEST_CANCELLED') return protocolError('NATIVE_TURN_ABORTED', 499);
@@ -128,6 +129,7 @@ export class NativeDirectProvider {
     });
     if (!report.ok) {
       const status = ['NATIVE_RATE_LIMITED','NATIVE_QUOTA_EXHAUSTED'].includes(report.errorCode) ? 429
+        : report.errorCode === 'NATIVE_CREDENTIAL_REQUIRED' ? 503
         : report.errorCode === 'NATIVE_TURN_TIMEOUT' ? 504
         : report.errorCode === 'NATIVE_TURN_ABORTED' ? 499
         : report.errorCode === 'ACCOUNT_LOGIN_REQUIRED' ? 401
@@ -256,7 +258,7 @@ export class NativeDirectProvider {
       phase = 'auth';
       let token;
       try { token = await bounded(this.authManager.getValidAccessToken(accountId, { accountTest: context.accountTest === true })); }
-      catch (error) { if (error instanceof ProtocolError || ['NATIVE_PERMISSION_OR_AUTH','OAUTH_REFRESH_FAILED','ACCOUNT_LOGIN_REQUIRED'].includes(error?.code)) throw safeFailure(error); fail('NATIVE_AUTH_FAILED', 503); }
+      catch (error) { if (error instanceof ProtocolError || ['NATIVE_PERMISSION_OR_AUTH','NATIVE_CREDENTIAL_REQUIRED','OAUTH_REFRESH_FAILED','ACCOUNT_LOGIN_REQUIRED'].includes(error?.code)) throw safeFailure(error); fail('NATIVE_AUTH_FAILED', 503); }
       if (controller.signal.aborted) await deadline;
       phase = 'upload';
       const attachments = images.length ? await bounded(this.uploadImages(token, images, { signal: controller.signal, timeoutMs: Math.min(timeoutMs, 60000) })) : [];

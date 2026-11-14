@@ -5,6 +5,7 @@ import { safeNativeEvidence } from "../src/gateway/native-evidence.mjs";
 import { lengthDelimited as m, varintField as v } from "../native-wire/protobuf.mjs";
 import { ModelTelemetry, classifyTelemetryError, measureOutputBytes } from "../src/gateway/model-telemetry.mjs";
 import { AccountPool } from "../src/gateway/pool.mjs";
+import { openDirectTurn } from "../src/gateway/native-transport.mjs";
 
 const chat = {
   model: "gemini-argon",
@@ -720,4 +721,62 @@ test("HTTP transport protocol failures NATIVE_FRAME_REJECTED, NATIVE_INVALID_STA
   assert.equal(argon.failures, 3);
   assert.equal(argon.errorCounts.protocol, 3);
   assert.equal(argon.errorCounts.other, 0);
+});
+
+test("real native transport NATIVE_CREDENTIAL_REQUIRED guard preserves HTTP 503 and auth telemetry across Chat/Responses JSON/SSE", async () => {
+  const f = await fixture({ allowFailover: false, accountCount: 1 });
+  try {
+    f.app.provider.authManager.getValidAccessToken = async () => "   ";
+    f.app.provider.openTurn = (token, opts) =>
+      openDirectTurn(token, opts, {
+        connect() {
+          throw new Error("unexpected network connect during credential guard test");
+        },
+      });
+
+    for (const [route, baseBody] of [
+      ["/v1/chat/completions", { model: "gemini-argon", messages: [{ role: "user", content: "hi" }] }],
+      ["/v1/responses", { model: "gemini-argon", input: "hi" }],
+    ]) {
+      for (const stream of [false, true]) {
+        const res = await f.api(route, {
+          method: "POST",
+          body: { ...baseBody, stream },
+        });
+        assert.equal(res.status, 503);
+        const body = await res.json();
+        assert.equal(body.error.code, "NATIVE_CREDENTIAL_REQUIRED");
+      }
+    }
+
+    // Also ensure a credential error thrown directly from getValidAccessToken is preserved as auth.
+    f.app.provider.authManager.getValidAccessToken = async () => {
+      throw Object.assign(new Error("missing token"), { code: "NATIVE_CREDENTIAL_REQUIRED", status: 503 });
+    };
+    const authThrowRes = await f.api("/v1/chat/completions", {
+      method: "POST",
+      body: { model: "gemini-argon", messages: [{ role: "user", content: "hi" }] },
+    });
+    assert.equal(authThrowRes.status, 503);
+    assert.equal((await authThrowRes.json()).error.code, "NATIVE_CREDENTIAL_REQUIRED");
+
+    const overview = await (await f.admin("overview")).json();
+    const diagnostics = await (await f.admin("diagnostics")).json();
+    for (const payload of [overview, diagnostics]) {
+      const argon = payload.modelTelemetry.byModel["gemini-argon"];
+      assert.equal(argon.requests, 5);
+      assert.equal(argon.failures, 5);
+      assert.equal(argon.errorCounts.auth, 5);
+      assert.equal(argon.errorCounts.transient, 0);
+      assert.equal(argon.errorCounts.other, 0);
+    }
+    const accountArgon = overview.accounts[0].modelTelemetry["gemini-argon"];
+    assert.equal(accountArgon.requests, 5);
+    assert.equal(accountArgon.failures, 5);
+    assert.equal(accountArgon.errorCounts.auth, 5);
+    assert.equal(accountArgon.errorCounts.transient, 0);
+    assert.equal(accountArgon.errorCounts.other, 0);
+  } finally {
+    await f.close();
+  }
 });
