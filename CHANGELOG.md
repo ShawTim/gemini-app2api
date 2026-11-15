@@ -2,6 +2,12 @@
 
 Release notes for Gemini App2API.
 
+## 1.3.1 — 2026-11-15
+
+### CI and documentation alignment
+- Updated the pinned offline product manifest count assertion in `scripts/verify-offline-product-runner.mjs` (`65` -> `66` files) after adding `test/gateway-structured-output.test.mjs`, restoring the `Verify staged product runner isolation` CI gate across Linux and macOS.
+- Aligned the offline product manifest count in `CONTRIBUTING.md` (`66-file manifest`).
+
 ## 1.3.0 — 2026-11-15
 
 ### Structured outputs (`json_schema` and `json_object`)
