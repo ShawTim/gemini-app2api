@@ -1,8 +1,8 @@
 # Dependencies and licensing / 依賴與授權
 
-Project: MIT, Copyright 2026 ShawTim, as declared in `package.json` and [`LICENSE`](../LICENSE). The published repository contains JavaScript, HTML, CSS, documentation and synthetic demo screenshots; it does not distribute any Google application binary, private OAuth client profile, user credentials or network captures. Google, Gemini and OpenAI names are used solely to describe protocol compatibility and do not imply affiliation or endorsement. Upstream service terms and account eligibility remain separate from this source license.
+Project: MIT, Copyright 2026 ShawTim, as declared in `package.json` and [`LICENSE`](../LICENSE). The published repository contains JavaScript, HTML, CSS, documentation and synthetic demo screenshots; it does not distribute any Google application binary, user credentials, refresh/access tokens, accounts or network captures. Google, Gemini and OpenAI names are used solely to describe protocol compatibility and do not imply affiliation or endorsement. Upstream service terms and account eligibility remain separate from this source license.
 
-專案採用 MIT 授權，詳見 [`LICENSE`](../LICENSE)。本儲存庫僅包含 JavaScript、HTML、CSS、說明文件與合成示範截圖，不分發任何 Google 應用程式二進位檔、私密 OAuth client profile、用戶憑證或網絡封包紀錄。Google、Gemini 與 OpenAI 名稱僅作相容性說明，不代表隸屬或官方背書；上游服務條款及帳戶權益獨立於本開源授權之外。
+專案採用 MIT 授權，詳見 [`LICENSE`](../LICENSE)。本儲存庫僅包含 JavaScript、HTML、CSS、說明文件與合成示範截圖，不分發任何 Google 應用程式二進位檔、使用者登入憑證、Refresh/Access Token、帳戶或網絡封包紀錄。Google、Gemini 與 OpenAI 名稱僅作相容性說明，不代表隸屬或官方背書；上游服務條款及帳戶權益獨立於本開源授權之外。
 
 ## Verified npm metadata
 

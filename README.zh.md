@@ -17,7 +17,7 @@
 </div>
 
 > [!IMPORTANT]
-> **非官方互通性研究專案。** 本專案與 Google 無任何關聯、合作或背書關係。使用第三方客戶端或閘道可能違反 Google 服務條款 —— 你的帳戶，風險自負。你需要自行準備合資格的 Google 帳戶與相容的 OAuth client profile；本專案不分發任何憑證、Token 或 Google 二進位程式。請先詳閱完整[免責聲明](DISCLAIMER.md)。
+> **非官方互通性研究專案。** 本專案與 Google 無任何關聯、合作或背書關係。使用第三方客戶端或閘道可能違反 Google 服務條款 —— 你的帳戶，風險自負。你必須親自以本人合資格的 Google 帳戶完成登入驗證；本專案不分發任何使用者憑證、Token、帳戶或 Google 二進位程式。請先詳閱完整[免責聲明](DISCLAIMER.md)。
 
 ![Gemini App2API 維運管理台 —— 深色主題（合成示範資料）](docs/assets/admin-v2-demo-dark-desktop.png)
 
@@ -69,28 +69,36 @@
 
 ### 1. 準備工作
 
-- **Node.js 22+**（`>= 22.0.0`）、npm、現代瀏覽器，以及具備相應 Gemini 模型權限的 Google 帳戶（適用於 macOS 與 Linux）。
-- 從**獲授權的私密來源取得相容的靜態 OAuth client profile**（本儲存庫不隨附任何憑證，亦無法以 Google AI Studio API key 替代）。請先參閱[私密初始化與 Profile 格式要求](docs/OPERATIONS.md#private-initial-setup--私密初始化)。
+- **Node.js 22+**（`>= 22.0.0`）（macOS、Linux 或 Windows WSL2）**或 Docker Compose**（Windows、macOS、Linux）。
+- 現代瀏覽器與具備相應 Gemini 模型權限的 Google 帳戶（Google AI Studio API key 屬不同服務，無法替代）。
 
-### 2. 初始化並啟動閘道
+### 2. 啟動閘道
 
-在專案根目錄執行：
+**方式 A — Node.js（macOS / Linux / Windows WSL2）：**
 
 ```sh
+git clone https://github.com/ShawTim/gemini-app2api.git
+cd gemini-app2api
 npm ci --omit=dev --ignore-scripts
-export GATEWAY_DATA_DIR="$HOME/.gemini-app2api"
 
-# 建立權限為 0600 的私密 .env 設定檔（若已存在則不覆寫）：
-test -e .env || cp .env.example .env
-chmod 600 .env
-# 編輯 .env，將 GATEWAY_ADMIN_PASSWORD 設為獨立的 12–256 字元密碼。
+# 選用：建立權限為 0600 的私密 .env 設定檔（若已存在則不覆寫）：
+test -e .env || (cp .env.example .env && chmod 600 .env)
+# 如需設定管理員密碼，可編輯 .env 設定 GATEWAY_ADMIN_PASSWORD（12–256 字元）；留空則僅限本機 loopback 免密碼登入。
 
-node bin/gemini-gateway init
-node bin/gemini-gateway import-profile < /private/path/oauth-profile.json
-node bin/gemini-gateway start
+npm start
 ```
 
-> **偏好使用 Docker？** 請參閱強化安全設定的 [Docker Compose 部署指南](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈)（預設以 `uid 1000`、唯讀根目錄、最小權限及本機 loopback 連接埠運行）。
+**方式 B — Docker Compose（Windows / macOS / Linux）：**
+
+```sh
+git clone https://github.com/ShawTim/gemini-app2api.git
+cd gemini-app2api
+read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
+export GATEWAY_ADMIN_PASSWORD
+docker compose up -d --build
+```
+
+> `compose.yaml` 已自動本機映射閘道連接埠（`127.0.0.1:18989:18989`）與 OAuth 回呼連接埠（`127.0.0.1:18765:18765`）。如改用獨立 `docker run` 或經由遠端主機 SSH port forwarding 登入，請參閱強化安全設定的 [Docker Compose 部署指南](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈)（預設以 `uid 1000`、唯讀根目錄及最小權限運行；亦說明選用覆寫設定檔的方式）。
 
 ### 3. 登入 Google 帳戶並建立客戶端金鑰
 
@@ -226,7 +234,7 @@ wire_api = "responses"
 
 ## 安全運行與操作原則
 
-- **嚴格保護私密憑證：** 切勿公開或提交 `.env`、OAuth client profile、refresh token、API 金鑰或 `GATEWAY_DATA_DIR` 目錄。詳見[安全性政策](SECURITY.md)。
+- **嚴格保護私密憑證：** 切勿公開或提交 `.env`、refresh token、API 金鑰、自訂 `oauth-profile*.json` 覆寫檔或 `GATEWAY_DATA_DIR` 目錄。詳見[安全性政策](SECURITY.md)。
 - **對話歷史與執行權歸屬客戶端：** 閘道不會代執行任何本機指令、不會暗中摘要或刪減歷史訊息，亦絕不在上游發生降級時暗中替換成低階模型。
 - **誠實標示中斷與未完成狀態：** 已輸出可用內容但中途斷線的串流會附帶明確的 `incomplete: true` 標記收尾，以保護客戶端已收到的工作成果；若需判斷上游是否完整結束，請一併檢查 `incomplete` 欄位。詳見[完成與失敗語義](docs/COMPLETION_CONTRACT.md)。
 - **審慎配置自動恢復：** 開啟 `GATEWAY_QUOTA_FAILOVER=1` 或 `GATEWAY_AUTOMATIC_RECOVERY=1` 可在單一帳戶觸頂或瞬斷時自動切換其他合資格帳戶，但故障重試亦可能消耗額外配額。詳見[維運設定](docs/OPERATIONS.md#configuration--設定)與[鎖與限制清單](docs/LOCKS_AND_LIMITS.md)。
@@ -252,6 +260,6 @@ wire_api = "responses"
 
 [MIT License](LICENSE) · [免責聲明](DISCLAIMER.md) · [安全性政策](SECURITY.md)
 
-<sub>非官方自行部署互通性研究軟體；不分發任何 Google 二進位程式、OAuth client profile 或帳戶憑證。</sub>
+<sub>非官方自行部署互通性研究軟體；不分發任何 Google 二進位程式、使用者憑證、Token、帳戶或模型額度。</sub>
 
 </div>

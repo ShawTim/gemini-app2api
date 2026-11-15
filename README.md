@@ -17,7 +17,7 @@ Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents,
 </div>
 
 > [!IMPORTANT]
-> **Unofficial interoperability research project.** Not affiliated with, endorsed by, or sponsored by Google. Using third-party clients or gateways may violate Google's Terms of Service—your accounts, your responsibility. You must supply your own eligible Google accounts and a compatible OAuth client profile; no credentials, tokens, or Google binaries are distributed. Read the full [Disclaimer](DISCLAIMER.md).
+> **Unofficial interoperability research project.** Not affiliated with, endorsed by, or sponsored by Google. Using third-party clients or gateways may violate Google's Terms of Service—your accounts, your responsibility. You must sign in personally with your own eligible Google accounts; no user credentials, tokens, accounts, or Google binaries are distributed. Read the full [Disclaimer](DISCLAIMER.md).
 
 ![Gemini App2API Operations Console — Dark Theme (synthetic demo data)](docs/assets/admin-v2-demo-dark-desktop.png)
 
@@ -69,28 +69,36 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 
 ### 1. Prerequisites
 
-- **Node.js 22+** (`>= 22.0.0`), npm, a modern browser, and a Google account with Gemini access (macOS or Linux).
-- A **compatible static OAuth client profile** supplied from an authorized private source (not distributed in this repo; a Google AI Studio API key is a different service and cannot be substituted). Review the [OAuth profile format and setup guide](docs/OPERATIONS.md#private-initial-setup--私密初始化) first.
+- **Node.js 22+** (`>= 22.0.0`) on macOS, Linux, or Windows WSL2 — **or Docker Compose** (Windows, macOS, Linux).
+- A modern browser and a Google account with Gemini access (a Google AI Studio API key is a different service and cannot be substituted).
 
-### 2. Initialize and Start
+### 2. Start the Gateway
 
-From the repository root:
+**Option A — Node.js (macOS / Linux / WSL2):**
 
 ```sh
+git clone https://github.com/ShawTim/gemini-app2api.git
+cd gemini-app2api
 npm ci --omit=dev --ignore-scripts
-export GATEWAY_DATA_DIR="$HOME/.gemini-app2api"
 
-# Create a private 0600 .env without overwriting an existing one:
-test -e .env || cp .env.example .env
-chmod 600 .env
-# Edit .env and set GATEWAY_ADMIN_PASSWORD to a unique 12–256 character secret.
+# Optional: create a private 0600 .env without overwriting an existing one:
+test -e .env || (cp .env.example .env && chmod 600 .env)
+# Edit .env to set GATEWAY_ADMIN_PASSWORD (12–256 chars) if desired; leave blank for loopback-only access.
 
-node bin/gemini-gateway init
-node bin/gemini-gateway import-profile < /private/path/oauth-profile.json
-node bin/gemini-gateway start
+npm start
 ```
 
-> **Prefer Docker?** Follow the hardened [Docker Compose deployment guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) (runs as `uid 1000` with read-only rootfs, dropped capabilities, and loopback port publishing).
+**Option B — Docker Compose (Windows / macOS / Linux):**
+
+```sh
+git clone https://github.com/ShawTim/gemini-app2api.git
+cd gemini-app2api
+read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
+export GATEWAY_ADMIN_PASSWORD
+docker compose up -d --build
+```
+
+> `compose.yaml` binds both the gateway (`127.0.0.1:18989:18989`) and the OAuth loopback callback (`127.0.0.1:18765:18765`) automatically. For standalone `docker run` or headless SSH port forwarding, review the [Docker Compose & loopback publishing guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) (runs as `uid 1000` with read-only rootfs and dropped capabilities; optional profile overrides are also documented there).
 
 ### 3. Sign In and Create a Client Key
 
@@ -226,7 +234,7 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 
 ## Security and Operational Principles
 
-- **Keep private state off Git and public networks:** Never share `.env`, OAuth client profiles, refresh tokens, client API keys, or `GATEWAY_DATA_DIR`. See [SECURITY.md](SECURITY.md).
+- **Keep private state off Git and public networks:** Never share `.env`, refresh tokens, client API keys, custom `oauth-profile*.json` overrides, or `GATEWAY_DATA_DIR`. See [SECURITY.md](SECURITY.md).
 - **Client-owned history & permissions:** The gateway never runs shell/file tools, never truncates or summarizes conversation history behind your back, and rejects silent upstream model downgrades.
 - **Explicit incomplete-turn semantics:** Interrupted streams that already flushed usable output close cleanly with `incomplete: true` metadata so coding agents keep delivered work; always check `incomplete` when exact upstream completion matters. See [COMPLETION_CONTRACT.md](docs/COMPLETION_CONTRACT.md).
 - **Deliberate recovery budgets:** Enabling `GATEWAY_QUOTA_FAILOVER=1` or `GATEWAY_AUTOMATIC_RECOVERY=1` helps survive single-account limits or transient resets, at the cost of additional upstream attempts when failures occur. See [OPERATIONS.md](docs/OPERATIONS.md#configuration--設定) and [LOCKS_AND_LIMITS.md](docs/LOCKS_AND_LIMITS.md).
@@ -252,6 +260,6 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 
 [MIT License](LICENSE) · [Disclaimer](DISCLAIMER.md) · [Security Policy](SECURITY.md)
 
-<sub>Unofficial self-hosted interoperability software. No Google binaries, OAuth client profiles, or account credentials are distributed.</sub>
+<sub>Unofficial self-hosted interoperability software. No Google binaries, user credentials, tokens, accounts, or model quota are distributed.</sub>
 
 </div>

@@ -18,7 +18,7 @@ Read [test execution boundaries](docs/TEST_EXECUTION_SAFETY.md) and [current-con
 - Do not add automatic model generation to dashboards, startup, health checks, or test discovery.
 - Prefer small zero-dependency runtime modules with injectable I/O, fixed error codes, and bounded memory/frame budgets.
 - API or configuration changes should update `docs/API_SUPPORT.md`, `docs/OPERATIONS.md`, SDK fixtures, and both `README.md` / `README.zh.md` together.
-- Never commit state directories, OAuth client profiles, account files, `.env`, raw requests/replies, or credentials. UI screenshots must use synthetic `?demo=1` state only.
+- Never commit state directories, custom `oauth-profile*.json` files, account files, `.env`, raw requests/replies, or user credentials. UI screenshots must use synthetic `?demo=1` state only.
 
 ## Feedback and bug reports
 

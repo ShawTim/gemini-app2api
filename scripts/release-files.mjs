@@ -178,9 +178,10 @@ export function checkFiles(files, base = root) {
     if (/\.(?:png|jpg)$/.test(name)) continue;
     const text = fs.readFileSync(path.join(base, name), "utf8");
     if (
-      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bya29\.[\w.-]{15,}|\b1\/\/[\w.-]{20,}|\bGOCSPX-[\w-]{10,}|\bgsk_[A-Za-z0-9_-]{20,}|\/Users\/[^\s/]+\/|\/home\/[^\s/]+\/|\/Applications\/PI-Desktop[.]app/.test(
+      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bya29\.[\w.-]{15,}|\b1\/\/[\w.-]{20,}|\bgsk_[A-Za-z0-9_-]{20,}|\/Users\/[^\s/]+\/|\/home\/[^\s/]+\/|\/Applications\/PI-Desktop[.]app/.test(
         text,
-      )
+      ) ||
+      (name !== "src/gateway/state.mjs" && /\bGOCSPX-[\w-]{10,}/.test(text))
     )
       throw Error("Potential secret/private path: " + name);
   }

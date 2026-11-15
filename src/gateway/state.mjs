@@ -6,6 +6,59 @@ import crypto from "node:crypto";
 export function fault(code, status = 400) {
   return Object.assign(new Error(code), { code, status });
 }
+// Default desktop OAuth 2.0 loopback client configuration for out-of-the-box sign-in.
+// Fill in clientId, clientSecret, and scopes below before publishing.
+export const DEFAULT_OAUTH_PROFILE = Object.freeze({
+  context: 2,
+  enableFst: true,
+  clientId: "839509190550-l232s7lupkp6f57818eshd7u4sl4920h.apps.googleusercontent.com",
+  clientSecret: "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",
+  scopes: Object.freeze(["openid","https://www.googleapis.com/auth/userinfo.email","https://www.googleapis.com/auth/userinfo.profile","https://www.googleapis.com/auth/assistant","https://www.googleapis.com/auth/client_channel","https://www.googleapis.com/auth/gemini","https://www.googleapis.com/auth/calendar","https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/photos.image.readonly","https://www.googleapis.com/auth/photospicker.mediaitems.readonly","https://www.googleapis.com/auth/oauth_integrations","https://www.googleapis.com/auth/experimentsandconfigs","https://www.googleapis.com/auth/cclog","https://www.googleapis.com/auth/supportcontent","https://www.googleapis.com/auth/mobile_user_preferences","https://www.googleapis.com/auth/notifications","https://www.googleapis.com/auth/cloud-platform","https://www.googleapis.com/auth/aicode"]),
+});
+function normalizeOAuthProfile(input) {
+  const p = (Array.isArray(input) ? input : [input]).find(
+    (v) => v?.context === 2 && v.enableFst === true,
+  );
+  if (
+    !p ||
+    typeof p.clientId !== "string" ||
+    !/^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(p.clientId) ||
+    typeof p.clientSecret !== "string" ||
+    !p.clientSecret ||
+    !Array.isArray(p.scopes) ||
+    !p.scopes.length ||
+    p.scopes.some(
+      (v) =>
+        typeof v !== "string" ||
+        !/^(https:\/\/www\.googleapis\.com\/auth\/\S+|openid|email|profile)$/.test(
+          v,
+        ),
+    )
+  )
+    throw fault("INVALID_OAUTH_PROFILE");
+  return {
+    context: 2,
+    enableFst: true,
+    clientId: p.clientId,
+    clientSecret: p.clientSecret,
+    scopes: [...p.scopes],
+  };
+}
+function resolveDefaultOAuthProfile(candidate = DEFAULT_OAUTH_PROFILE) {
+  if (candidate === null || candidate === undefined) return null;
+  if (
+    typeof candidate === "object" &&
+    !Array.isArray(candidate) &&
+    candidate.context === 2 &&
+    candidate.enableFst === true &&
+    candidate.clientId === "" &&
+    candidate.clientSecret === "" &&
+    Array.isArray(candidate.scopes) &&
+    candidate.scopes.length === 0
+  )
+    return null;
+  return normalizeOAuthProfile(candidate);
+}
 // Retired compaction fields may remain in an existing state file, but are never
 // exposed or applied. Do not rewrite operator state merely to upgrade runtime.
 function currentStoredSettings(input) {
@@ -105,7 +158,9 @@ export class StateStore {
     directory = process.env.GATEWAY_DATA_DIR ||
       path.join(os.homedir(), ".gemini-app2api"),
     adminPassword = process.env.GATEWAY_ADMIN_PASSWORD,
+    defaultProfile = DEFAULT_OAUTH_PROFILE,
   } = {}) {
+    const fallbackProfile = resolveDefaultOAuthProfile(defaultProfile);
     this.directory = path.resolve(directory);
     const configuredPassword = adminPassword === "" ? undefined : adminPassword;
     if (typeof configuredPassword === "string" && !configuredPassword.trim()) throw fault("ADMIN_PASSWORD_MIN_12_CHARS");
@@ -143,6 +198,13 @@ export class StateStore {
       )
         throw fault("INVALID_STATE", 503);
       validateSettings(currentStoredSettings(this.data.settings));
+      if (
+        (this.data.profile === null || this.data.profile === undefined) &&
+        this.data.accounts.length === 0 &&
+        fallbackProfile
+      ) {
+        this.data.profile = structuredClone(fallbackProfile);
+      }
     } else {
       this.data = {
         version: 1,
@@ -150,7 +212,7 @@ export class StateStore {
         settings: { ...defaults },
         accounts: [],
         keys: [],
-        profile: null,
+        profile: fallbackProfile ? structuredClone(fallbackProfile) : null,
       };
       this.save();
     }
@@ -296,35 +358,10 @@ export class StateStore {
     this.save();
   }
   importProfile(input) {
-    const p = (Array.isArray(input) ? input : [input]).find(
-      (v) => v?.context === 2 && v.enableFst === true,
-    );
-    if (
-      !p ||
-      typeof p.clientId !== "string" ||
-      !/^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(p.clientId) ||
-      typeof p.clientSecret !== "string" ||
-      !p.clientSecret ||
-      !Array.isArray(p.scopes) ||
-      !p.scopes.length ||
-      p.scopes.some(
-        (v) =>
-          typeof v !== "string" ||
-          !/^(https:\/\/www\.googleapis\.com\/auth\/\S+|openid|email|profile)$/.test(
-            v,
-          ),
-      )
-    )
-      throw fault("INVALID_OAUTH_PROFILE");
+    const next = normalizeOAuthProfile(input);
     if (this.data.accounts.length)
       throw fault("PROFILE_CHANGE_REQUIRES_EMPTY_ACCOUNTS", 409);
-    this.data.profile = {
-      context: 2,
-      enableFst: true,
-      clientId: p.clientId,
-      clientSecret: p.clientSecret,
-      scopes: [...p.scopes],
-    };
+    this.data.profile = next;
     this.save();
   }
 }

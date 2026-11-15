@@ -102,6 +102,7 @@ test('Release checkFiles rejects forbidden paths, secrets, personal homes, and d
   }
   const secretPayloads = [
     'token=' + 'gsk_' + 'aB3_-'.repeat(5),
+    'secret=' + 'GOCSPX-' + 'synthetic_fixture_12345',
     'path=' + '/' + 'home/operator/workspace/file.mjs',
     'bundle=' + '/Applications/' + 'PI-Desktop.app/Contents/Resources',
   ];
@@ -110,6 +111,30 @@ test('Release checkFiles rejects forbidden paths, secrets, personal homes, and d
     fs.writeFileSync(path.join(dir, rel), payload);
     assert.throws(() => checkFiles([rel], dir), /Potential secret\/private path:/);
   });
+  fs.mkdirSync(path.join(dir, 'src/gateway'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'src/gateway/state.mjs'),
+    'export const DEFAULT_OAUTH_PROFILE = { clientSecret: "' + 'GOCSPX-' + 'synthetic_fixture_12345" };\n',
+  );
+  checkFiles(['src/gateway/state.mjs'], dir);
+  fs.writeFileSync(
+    path.join(dir, 'README.md'),
+    'leaked=' + 'GOCSPX-' + 'synthetic_fixture_12345\n',
+  );
+  assert.throws(() => checkFiles(['README.md'], dir), /Potential secret\/private path:/);
+  fs.writeFileSync(
+    path.join(dir, 'src/gateway/app.mjs'),
+    'const s = "' + 'GOCSPX-' + 'synthetic_fixture_12345";\n',
+  );
+  assert.throws(() => checkFiles(['src/gateway/app.mjs'], dir), /Potential secret\/private path:/);
+  for (const forbiddenInState of [
+    'token="' + 'ya29.' + 'a'.repeat(20) + '"\n',
+    'refresh="' + '1//' + 'b'.repeat(24) + '"\n',
+    'key="' + 'gsk_' + 'aB3_-'.repeat(5) + '"\n',
+  ]) {
+    fs.writeFileSync(path.join(dir, 'src/gateway/state.mjs'), forbiddenInState);
+    assert.throws(() => checkFiles(['src/gateway/state.mjs'], dir), /Potential secret\/private path:/);
+  }
 });
 
 test('Release git ls-files gate enforces tracked membership in git worktrees while preserving non-git exports', (t) => {

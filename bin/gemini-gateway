@@ -61,7 +61,7 @@ try {
     console.log(`Gemini App2API · Native Direct Gateway
 
   gemini-gateway init           Initialize private state; admin password comes from .env / environment
-  gemini-gateway import-profile Read official OAuth client profile JSON on stdin (server stopped)
+  gemini-gateway import-profile Optional: override OAuth client profile JSON on stdin (server stopped)
   gemini-gateway start          Foreground server; Ctrl-C / SIGTERM for graceful shutdown
   gemini-gateway status         Readiness only; never invokes a model
   gemini-gateway create-key LABEL  Print a new API key ONCE (server stopped)

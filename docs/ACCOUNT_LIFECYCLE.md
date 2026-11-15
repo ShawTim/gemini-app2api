@@ -28,7 +28,7 @@ Automated consent tests (`test/gateway-onboarding.test.mjs` and `test/browser/te
 
 ## Normal first use / 正常首次使用
 
-1. Install the source, initialize a dedicated private state directory, and import a compatible, privately supplied OAuth client profile as documented in [README.md](../README.md) and [OPERATIONS.md](OPERATIONS.md). No credentials or private profiles are distributed in this repository.
+1. Install the source and initialize a dedicated private state directory (or launch directly with Docker Compose / `npm start`) as documented in [README.md](../README.md) and [OPERATIONS.md](OPERATIONS.md). Built-in fallback desktop OAuth loopback configuration is included for out-of-the-box local sign-in; no user credentials or accounts are distributed in this repository.
 2. Start the gateway and open `/admin/`. Choose **Accounts → Google sign-in** once, and complete Google consent/MFA personally. Your verified email becomes the account label, and the waiting state and account list update automatically.
 3. Successful OAuth means **signed in**, not model access verified. Declared models initially show **Not verified**. Dashboard loads, account creation, `/health`, and `/ready` send **no model requests**.
 4. Create a separate client API key in **API keys**. A normal caller request to a declared model is the first provider inference. Only a completely validated response matching the selected model's native mode records **Last verified** for that account and model.

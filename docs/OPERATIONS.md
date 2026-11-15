@@ -15,7 +15,7 @@ Official JS / Python SDK or OpenAI-compatible coding agent
   → caller executes approved tools → next HTTP turn with complete linked history
 
 Browser → same-origin /admin/ → HttpOnly session + CSRF → local operations APIs
-Private state → scrypt admin hash / SHA-256 + 0600 copyable gateway keys / private OAuth profile + refresh tokens
+Private state → scrypt admin hash / SHA-256 + 0600 copyable gateway keys / OAuth profile + refresh tokens
 ```
 
 The gateway entry point is `src/gateway-server.mjs`. Runtime transport relies solely on Node.js built-in modules (`node:http2`, `node:http`, `node:crypto`, `node:fs`) with zero third-party production npm dependencies. Caller-defined functions use the explicit validated prompt-tool protocol rather than native structured function calling, while `native_search: true` opts into the bounded Gemini-native Google Search path documented in [API_SUPPORT.md](API_SUPPORT.md#native-search-integration-status).
@@ -71,7 +71,6 @@ Use a **dedicated** `GATEWAY_DATA_DIR` (default `~/.gemini-app2api`), owned by t
 export GATEWAY_DATA_DIR="$HOME/.gemini-app2api"
 node bin/gemini-gateway init
 # Optional: copy .env.example to .env, chmod 600 .env, and configure GATEWAY_ADMIN_PASSWORD.
-node bin/gemini-gateway import-profile < /private/path/oauth-profile.json
 npm start
 ```
 
@@ -81,23 +80,23 @@ Both the server and CLI load `.env` from the working directory when present (or 
 
 Set `GATEWAY_ADMIN_PASSWORD` to a unique `12–256` character password to require sign-in. Leaving it empty skips the password prompt **only when bound to loopback with a loopback public origin** (still enforcing `HttpOnly`/`SameSite` session cookies, `Origin`, and CSRF checks on mutations, and still requiring Bearer API keys on `/v1/*`). Do not use passwordless admin mode on shared multi-user hosts; non-loopback binds or remote origins without a password fail startup with `ADMIN_PASSWORD_REQUIRED_FOR_REMOTE`.
 
-### Importing an OAuth client profile
+### Optional: overriding the default OAuth client profile
 
-No OAuth client credentials are distributed with this repository. Supply a compatible official static OAuth client profile from an authorized private source (never include user access or refresh tokens in the profile JSON). `import-profile` accepts either an object or an array containing a `context: 2` / `enableFst: true` entry:
+Fresh installations and upgrades from earlier `profile: null` state files (when `accounts` is empty) automatically use the built-in desktop OAuth 2.0 loopback configuration—no `import-profile` step is required before signing in. If you explicitly want to supply your own compatible OAuth client configuration before adding any accounts (never include user access or refresh tokens in the profile JSON), `import-profile` accepts either an object or an array containing a `context: 2` / `enableFst: true` entry:
 
 ```json
 {
   "context": 2,
   "enableFst": true,
-  "clientId": "<privately supplied official client id>",
-  "clientSecret": "<privately supplied static client secret>",
+  "clientId": "<custom official client id>",
+  "clientSecret": "<custom client secret>",
   "scopes": ["<official profile scopes>"]
 }
 ```
 
-Missing profiles return `OAUTH_PROFILE_REQUIRED`, and replacing a profile while accounts exist is refused (`PROFILE_CHANGE_REQUIRES_EMPTY_ACCOUNTS`).
+States without an active profile return `OAUTH_PROFILE_REQUIRED`, and replacing a profile while accounts exist is refused (`PROFILE_CHANGE_REQUIRES_EMPTY_ACCOUNTS`).
 
-OAuth client profile **不隨專案分發**；請從獲授權私密來源匯入相容結構（切勿放入個人 refresh/access token）。缺 profile 時回 `OAUTH_PROFILE_REQUIRED`；已有帳戶時拒絕覆寫 profile。
+全新部署或從舊版無設定檔（`profile: null` 且帳戶為空）升級時，系統會自動套用內建預設桌面 OAuth loopback 設定，無須額外執行 `import-profile`。如欲在尚未新增帳戶前顯式覆寫成自訂相容結構（切勿放入個人 refresh/access token），仍可透過 `import-profile` 匯入；缺有效設定檔時回 `OAUTH_PROFILE_REQUIRED`，已有帳戶時拒絕覆寫 profile。
 
 ### Adding accounts and client API keys
 
@@ -147,8 +146,6 @@ read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; e
 export GATEWAY_ADMIN_PASSWORD
 
 docker compose build
-docker compose run --rm -T gateway node bin/gemini-gateway init
-docker compose run --rm -T gateway node bin/gemini-gateway import-profile < /private/path/oauth-profile.json
 docker compose up -d
 curl -i http://127.0.0.1:18989/ready
 
@@ -187,7 +184,7 @@ Disable response buffering on reverse proxies (for example `proxy_buffering off`
 
 | Code / symptom | Action / 處理方式 |
 |---|---|
-| `/ready` `503` `ACCOUNT_OR_PROFILE_REQUIRED` | Import a valid OAuth profile, complete Google sign-in, and enable at least one eligible account. / 匯入 OAuth profile、完成登入並啟用帳戶。 |
+| `/ready` `503` `ACCOUNT_OR_PROFILE_REQUIRED` | Open `/admin/`, complete Google sign-in, and enable at least one eligible account (or import a custom OAuth profile before signing in if using explicit overrides). / 前往 `/admin/` 完成 Google 登入並啟用至少一個合資格帳戶。 |
 | `ADMIN_PASSWORD_REQUIRED_FOR_REMOTE` | Set `GATEWAY_ADMIN_PASSWORD` (`12–256` chars) in private `.env` or environment before non-loopback or HTTPS proxy use. |
 | `UNSAFE_ENV_FILE` | Ensure `.env` is owned by the current user, mode `0600`, regular file (no symlink/hardlink), and `<= 64 KiB`. |
 | `UNSAFE_STATE_PERMISSIONS` | Verify `GATEWAY_DATA_DIR` is mode `0700` and state files are mode `0600` owned by the current user. / 檢查專用資料目錄與檔案權限。 |

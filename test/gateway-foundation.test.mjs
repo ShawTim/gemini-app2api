@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { StateStore, defaults } from "../src/gateway/state.mjs";
+import { StateStore, DEFAULT_OAUTH_PROFILE, defaults } from "../src/gateway/state.mjs";
 import { Security } from "../src/gateway/security.mjs";
 import { Accounts } from "../src/gateway/accounts.mjs";
 import { AccountPool } from "../src/gateway/pool.mjs";
@@ -228,6 +228,7 @@ test("rejected refresh marks account unavailable without exposing endpoint detai
 test("OAuth login saves only refresh, can cancel, requires explicit profile", async (t) => {
   const s = storeFor(t),
     a = new Accounts(s);
+  s.data.profile = null;
   await assert.rejects(
     a.beginLogin("fixture"),
     (e) => e.code === "OAUTH_PROFILE_REQUIRED",
@@ -541,4 +542,138 @@ test("Accounts.cancelFlow and Accounts.close drain backgroundTasks immediately w
   assert.equal(accounts.flow(second.flowId).status, "cancelled");
   assert.equal(accounts.backgroundTasks.size, 0);
   assert.equal(closedCalls, 2);
+});
+
+test("default OAuth profile enables fresh installs and heals legacy null-profile empty states cleanly", async (t) => {
+  // DEFAULT_OAUTH_PROFILE (unfilled template or populated constant) never fails store construction.
+  assert.equal(typeof DEFAULT_OAUTH_PROFILE, "object");
+  const defaultDir = root();
+  t.after(() => fs.rmSync(defaultDir, { recursive: true, force: true }));
+  const defaultStore = new StateStore({
+    directory: defaultDir,
+    adminPassword: "fixture-password-not-real",
+  });
+  assert.ok(
+    defaultStore.data.profile === null ||
+      (typeof defaultStore.data.profile?.clientId === "string" &&
+        defaultStore.data.profile.clientId.length > 0),
+  );
+
+  // Fresh install with populated defaultProfile persists it and allows login immediately.
+  const freshDir = root();
+  t.after(() => fs.rmSync(freshDir, { recursive: true, force: true }));
+  const fresh = new StateStore({
+    directory: freshDir,
+    adminPassword: "fixture-password-not-real",
+    defaultProfile: syntheticProfile,
+  });
+  assert.deepEqual(fresh.data.profile, syntheticProfile);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(fresh.file, "utf8")).profile,
+    syntheticProfile,
+  );
+  const freshAccounts = new Accounts(fresh, {
+    login: async (cfg) => {
+      assert.equal(cfg.clientId, syntheticProfile.clientId);
+      assert.equal(cfg.clientSecret, syntheticProfile.clientSecret);
+      assert.deepEqual(cfg.refreshScopes, syntheticProfile.scopes);
+      return {
+        authorizationUrl: "https://accounts.google.com/o/oauth2/auth?synthetic",
+        done: new Promise(() => {}),
+        close() {},
+      };
+    },
+  });
+  const loginFlow = await freshAccounts.beginLogin("zero-config");
+  freshAccounts.cancelFlow(loginFlow.flowId);
+  await freshAccounts.close();
+
+  // Upgrade healing: legacy 0600 state with profile: null and empty accounts receives defaultProfile
+  // in memory on passive open without mutating state.json bytes, and preserves API keys & settings.
+  const upgradeDir = root();
+  t.after(() => fs.rmSync(upgradeDir, { recursive: true, force: true }));
+  const legacy = new StateStore({
+    directory: upgradeDir,
+    adminPassword: "fixture-password-not-real",
+    defaultProfile: null,
+  });
+  const createdKey = legacy.createKey("legacy-operator-key");
+  legacy.updateSettings({ maxConcurrent: 5 });
+  assert.equal(JSON.parse(fs.readFileSync(legacy.file, "utf8")).profile, null);
+  const beforeUpgradeBytes = fs.readFileSync(legacy.file);
+
+  const reopened = new StateStore({
+    directory: upgradeDir,
+    defaultProfile: syntheticProfile,
+  });
+  assert.deepEqual(reopened.data.profile, syntheticProfile);
+  assert.deepEqual(fs.readFileSync(reopened.file), beforeUpgradeBytes);
+  assert.equal(reopened.settings().maxConcurrent, 5);
+  assert.equal(reopened.authenticate(createdKey.key).id, createdKey.id);
+
+  // Subsequent state mutation persists the healed profile alongside preserved state.
+  reopened.updateSettings({ maxConcurrent: 6 });
+  const persistedAfterSave = JSON.parse(fs.readFileSync(reopened.file, "utf8"));
+  assert.deepEqual(persistedAfterSave.profile, syntheticProfile);
+  assert.equal(persistedAfterSave.settings.maxConcurrent, 6);
+  assert.equal(reopened.authenticate(createdKey.key).id, createdKey.id);
+
+  // Custom profiles and non-empty account stores are never overwritten by defaultProfile,
+  // while importProfile can still override a default profile before accounts are added.
+  const customProfile = {
+    context: 2,
+    enableFst: true,
+    clientId: "987654321-custom.apps.googleusercontent.com",
+    clientSecret: "synthetic-custom-secret",
+    scopes: ["openid", "email"],
+  };
+  const customDir = root();
+  t.after(() => fs.rmSync(customDir, { recursive: true, force: true }));
+  const customStore = new StateStore({
+    directory: customDir,
+    adminPassword: "fixture-password-not-real",
+    defaultProfile: syntheticProfile,
+  });
+  customStore.importProfile(customProfile);
+  const reopenedCustom = new StateStore({
+    directory: customDir,
+    defaultProfile: syntheticProfile,
+  });
+  assert.deepEqual(reopenedCustom.data.profile, customProfile);
+
+  const nonEmptyNullDir = root();
+  t.after(() => fs.rmSync(nonEmptyNullDir, { recursive: true, force: true }));
+  const nonEmptyNull = new StateStore({
+    directory: nonEmptyNullDir,
+    adminPassword: "fixture-password-not-real",
+    defaultProfile: null,
+  });
+  nonEmptyNull.data.accounts.push({
+    id: "acc-existing",
+    label: "existing",
+    enabled: true,
+    status: "ready",
+    refreshToken: "SYNTHETIC_REFRESH",
+  });
+  nonEmptyNull.save();
+  const reopenedNonEmpty = new StateStore({
+    directory: nonEmptyNullDir,
+    defaultProfile: syntheticProfile,
+  });
+  assert.equal(reopenedNonEmpty.data.profile, null);
+
+  // Malformed non-empty defaultProfile fails fast rather than silently falling back to null.
+  for (const invalidDefault of [
+    { ...syntheticProfile, clientId: "bad-client-id" },
+    { ...syntheticProfile, clientSecret: "" },
+    { ...syntheticProfile, scopes: [] },
+    { context: 2, enableFst: false, clientId: "", clientSecret: "", scopes: [] },
+  ]) {
+    const badDir = root();
+    t.after(() => fs.rmSync(badDir, { recursive: true, force: true }));
+    assert.throws(
+      () => new StateStore({ directory: badDir, defaultProfile: invalidDefault }),
+      (e) => e.code === "INVALID_OAUTH_PROFILE",
+    );
+  }
 });
