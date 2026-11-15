@@ -9,7 +9,7 @@ const directory = fs.mkdtempSync(path.join(process.env.PI_SCRATCH_DIR || os.tmpd
 try {
   assert.equal(selectTests(['--list']), null);
   const files = selectTests(['--run']);
-  assert.equal(files.length, 65); assert.equal(new Set(files).size, 65);
+  assert.equal(files.length, 66); assert.equal(new Set(files).size, 66);
   assert.deepEqual(selectTests(['--run', `--file=${files[0]}`]), [files[0]]);
   for (const args of [[], ['--unknown'], ['--run', '--file=../private.mjs'], ['--list', '--run']]) assert.throws(() => selectTests(args));
   const env = childEnvironment(path.join(directory, 'child'));

@@ -4,7 +4,7 @@ Requires Node.js 22+ on Linux or macOS. Install development dependencies with `n
 
 ## Running the test suites
 
-- **Product regression suite**: Run `node scripts/run-offline-product.mjs --list` then `--run` (also `npm test` / `npm run test:product`). It stages curated source files, isolates `HOME` and configuration, and executes a fixed 65-file manifest against synthetic fixtures.
+- **Product regression suite**: Run `node scripts/run-offline-product.mjs --list` then `--run` (also `npm test` / `npm run test:product`). It stages curated source files, isolates `HOME` and configuration, and executes a fixed 66-file manifest against synthetic fixtures.
 - **Current-contract suite**: Run `npm run test:current-contract` (`node scripts/run-current-contract.mjs --run`) for delivery, namespace, context-window, and zero-output termination contracts.
 - **Admin & browser suites**: Run `npm run test:admin` for static VM/contract checks and `npm run test:browser` for Playwright end-to-end console verification.
 - **Release hygiene check**: Run `npm run test:release` (`node scripts/check-release.mjs`) to verify the curated file list, Docker runtime boundary, and secret/path guards.
