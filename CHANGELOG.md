@@ -2,6 +2,13 @@
 
 Release notes for Gemini App2API.
 
+## 1.3.2 — 2026-11-16
+
+### Zero-config OAuth onboarding and upgrade healing
+- Added built-in fallback desktop OAuth 2.0 loopback client configuration (`DEFAULT_OAUTH_PROFILE` in `src/gateway/state.mjs`) so fresh clones work out of the box (`npm start` or `docker compose up -d --build`) without a manual `import-profile` step or `409 OAUTH_PROFILE_REQUIRED` rejection on first Google sign-in.
+- Automatically healed existing `v1.0.0`–`v1.3.1` state files with `"profile": null` and empty `accounts` in memory on startup without rewriting passive `state.json` bytes, preserving existing client API keys and settings while keeping `import-profile` available for optional overrides before accounts are added.
+- Scoped the `GOCSPX-` Installed-App constant check in `scripts/release-files.mjs` while keeping full-repository blocks on user access/refresh tokens (`ya29.`, `1//`), gateway keys (`gsk_`), private keys, and personal paths, and aligned `DISCLAIMER.md`, `README.md`, `README.zh.md`, and `docs/OPERATIONS.md`.
+
 ## 1.3.1 — 2026-11-15
 
 ### CI and documentation alignment
