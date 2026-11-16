@@ -2,6 +2,13 @@
 
 Release notes for Gemini App2API.
 
+## 1.3.3 — 2026-11-16
+
+### Docker Compose cross-container networking and authority validation
+- Separated route-level HTTP `Host` validation in `src/gateway/app.mjs` so Bearer-authenticated `/v1/*` endpoints accept canonical container, service-DNS (`http://gateway:18989/v1`, `http://<service-name>:18989/v1`), `host.docker.internal`, cluster, private-IP, and reverse-proxy authorities without triggering `403 HOST_REJECTED` or changing `GATEWAY_PUBLIC_ORIGIN`.
+- Allowed container and internal network `GET /health` and `GET /ready` probes across single-label service names, `.internal`/`.local`/`.localhost`/`.home.arpa`/`.svc`/`.svc.cluster.local`, loopback/private/CGNAT IPv4, and canonical IPv6 (`::1`, `::ffff:0:0/96` private mappings, `fc00::/7` ULA, `fe80::/10` link-local), plus optional `GATEWAY_ALLOWED_PROBE_HOSTS` forwarded by `compose.yaml`.
+- Kept `/admin/*` `Host` and `Origin` allowlists symmetric on `GATEWAY_PUBLIC_ORIGIN`'s effective port (preserving explicit `:80`/`:443` and cross-scheme ports, supporting `127.0.0.1` / `localhost` / `[::1]` aliases on HTTP loopback origins without widening HTTPS origins), and hardened request parsing against duplicate `Host` headers, non-canonical IPv4 literals, malformed percent escapes, `%00`, backslashes, and fragments.
+
 ## 1.3.2 — 2026-11-16
 
 ### Zero-config OAuth onboarding and upgrade healing
