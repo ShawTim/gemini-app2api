@@ -98,11 +98,11 @@ export GATEWAY_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
-> `compose.yaml` 已自動本機映射閘道連接埠（`127.0.0.1:18989:18989`）與 OAuth 回呼連接埠（`127.0.0.1:18765:18765`）。如改用獨立 `docker run` 或經由遠端主機 SSH port forwarding 登入，請參閱強化安全設定的 [Docker Compose 部署指南](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈)（預設以 `uid 1000`、唯讀根目錄及最小權限運行；亦說明選用覆寫設定檔的方式）。
+> `compose.yaml` 預設僅喺本機 IPv4 loopback 發佈閘道與 OAuth 連接埠（`127.0.0.1:18989:18989`、`127.0.0.1:18765:18765`），並喺容器橋接介面上強制要求 `GATEWAY_ADMIN_PASSWORD`。共用同一個 Docker Compose 網路嘅其他容器可直接透過內部通訊埠呼叫 `http://gateway:18989/v1`（或自訂 `http://<service-name>:18989/v1`）並附上 Bearer API key；喺支援路由至主機 loopback 嘅 Docker Desktop 上，獨立容器亦可連線 `http://host.docker.internal:<published-port>/v1`。`/admin/` 嘅 `Host`/`Origin` 白名單（針對 `GATEWAY_PUBLIC_ORIGIN`，且當其為 `http://` loopback 時同時允許 `localhost` / `[::1]`）係用嚟防止瀏覽器 DNS rebinding 同 CSRF 攻擊，並唔替代本機連接埠綁定、密碼驗證或網路隔離原則。如改用獨立 `docker run`、自訂連接埠或 SSH port forwarding，請參閱 [Docker Compose 部署指南](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈)（預設以 `uid 1000`、唯讀根目錄及最小權限運行）。
 
 ### 3. 登入 Google 帳戶並建立客戶端金鑰
 
-在瀏覽器開啟 **http://127.0.0.1:18989/admin/**：
+在瀏覽器開啟 **http://127.0.0.1:18989/admin/**（或 **http://localhost:18989/admin/**）：
 
 1. 輸入 `GATEWAY_ADMIN_PASSWORD` 登入後台（若留空，僅限本機 loopback 免密碼管理；遠端連線必須設定密碼與 [TLS 反向代理](docs/OPERATIONS.md#remote-access-with-tls--遠端-tls)）。
 2. 在 **帳戶（Accounts）** 頁面點擊 **+ Google 登入**，親自於瀏覽器完成 Google 授權與 MFA 驗證。
@@ -118,7 +118,7 @@ docker compose up -d --build
 
 | 設定項目 | 填寫內容 |
 |---|---|
-| **Base URL** | `http://127.0.0.1:18989/v1`（遠端部署請填寫已設定的 HTTPS 閘道網址 `/v1`） |
+| **Base URL** | `http://127.0.0.1:18989/v1`（同 Compose 共用網路其他容器填 `http://<service-name>:18989/v1`；支援主機路由之 Docker Desktop 獨立容器填 `http://host.docker.internal:<published-port>/v1`；遠端部署請填 HTTPS 反向代理網址 `/v1`） |
 | **API Key** | 在管理後台 **API 金鑰**頁面建立的 client key（切勿填寫管理員密碼或 Google token） |
 | **Model** | `gemini-argon`（旗艦推理與編碼模式）、`gemini-hydrogen`（Gemini 4 Hydrogen）或 `gemini-flash-lite` |
 | **API 類型** | `/v1/chat/completions` 或 `/v1/responses`（以[支援契約](docs/API_SUPPORT.md)為準） |

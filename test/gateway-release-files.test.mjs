@@ -48,6 +48,7 @@ test('Docker image defaults to loopback without GATEWAY_ALLOW_REMOTE and Compose
   const compose = fs.readFileSync(path.join(root, 'compose.yaml'), 'utf8');
   assert.ok(compose.includes('127.0.0.1:${GATEWAY_PUBLISHED_PORT:-18989}:18989'));
   assert.ok(compose.includes('${GATEWAY_PUBLIC_ORIGIN:-http://127.0.0.1:${GATEWAY_PUBLISHED_PORT:-18989}}'));
+  assert.ok(compose.includes('GATEWAY_ALLOWED_PROBE_HOSTS: "${GATEWAY_ALLOWED_PROBE_HOSTS:-}"'));
   assert.ok(compose.includes('127.0.0.1:18765:18765'));
   assert.match(compose, /^\s+GATEWAY_HOST:\s+"0\.0\.0\.0"\s*$/m);
   assert.match(compose, /^\s+GATEWAY_CALLBACK_HOST:\s+"0\.0\.0\.0"\s*$/m);

@@ -193,3 +193,34 @@ test('entry enforces the account routing allowlist without credential requests o
     assert.equal(fs.existsSync(path.join(directory, 'runtime.lock')), false);
   }
 });
+
+test('entry validates and applies GATEWAY_ALLOWED_PROBE_HOSTS', async (t) => {
+  const directory = state(t);
+  for (const invalid of ['bad/host', 'gateway.default,,other', '   ']) {
+    const running = await launch(t, directory, { GATEWAY_ALLOWED_PROBE_HOSTS: invalid });
+    assert.equal((await running.exited)[0], 1);
+    assert.equal(JSON.parse(running.errors.trim()).code, 'INVALID_PROBE_HOSTS');
+    assert.equal(fs.existsSync(path.join(directory, 'runtime.lock')), false);
+  }
+  const running = await launch(t, directory, {
+    GATEWAY_ALLOWED_PROBE_HOSTS: 'gateway.default,gateway.default.svc.cluster.example:18989',
+  });
+  const port = new URL(running.event.origin).port;
+  const { get } = await import('node:http');
+  for (const [host, expectedStatus] of [
+    ['gateway.default', 200],
+    ['gateway.default.svc.cluster.example:18989', 200],
+    ['gateway.default.svc.cluster.example:9999', 403],
+    ['attacker.invalid', 403],
+  ]) {
+    const status = await new Promise((resolve, reject) => {
+      get({ hostname: '127.0.0.1', port, path: '/health', headers: { Host: host } }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      }).on('error', reject);
+    });
+    assert.equal(status, expectedStatus, host);
+  }
+  running.child.kill('SIGTERM');
+  assert.deepEqual(await running.exited, [0, null]);
+});

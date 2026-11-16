@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Product entry. Does not import the legacy server, IPC bridge or account store. */
 import { StateStore, validateSettings, fault } from "./gateway/state.mjs";
-import { createGateway } from "./gateway/app.mjs";
+import { createGateway, parseProbeHosts } from "./gateway/app.mjs";
 import { loadLocalEnvironment } from "./gateway/environment.mjs";
 import { parseRoutingAccountIds } from './gateway/routing-policy.mjs';
 
@@ -63,6 +63,7 @@ try {
   if (callbackHost === "0.0.0.0" && process.env.GATEWAY_ALLOW_REMOTE !== "1")
     throw fault("EXPLICIT_REMOTE_CONFIGURATION_REQUIRED");
   const routingAccountIds = parseRoutingAccountIds(process.env.GATEWAY_ROUTING_ACCOUNT_IDS);
+  const probeHosts = parseProbeHosts(process.env.GATEWAY_ALLOWED_PROBE_HOSTS);
   const quotaFailover = process.env.GATEWAY_QUOTA_FAILOVER;
   if (quotaFailover !== undefined && !["0", "1"].includes(quotaFailover)) throw fault("INVALID_QUOTA_FAILOVER");
   const emptyFailover = process.env.GATEWAY_EMPTY_RESPONSE_FAILOVER;
@@ -79,6 +80,7 @@ try {
     allowEmptyResponseFailover: emptyFailover === "1",
     allowAutomaticRecovery: automaticRecovery === '1',
     routingAccountIds,
+    probeHosts,
     callbackPort,
     callbackHost,
   });

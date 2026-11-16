@@ -98,11 +98,11 @@ export GATEWAY_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
-> `compose.yaml` binds both the gateway (`127.0.0.1:18989:18989`) and the OAuth loopback callback (`127.0.0.1:18765:18765`) automatically. For standalone `docker run` or headless SSH port forwarding, review the [Docker Compose & loopback publishing guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) (runs as `uid 1000` with read-only rootfs and dropped capabilities; optional profile overrides are also documented there).
+> `compose.yaml` publishes gateway and OAuth ports on IPv4 host loopback (`127.0.0.1:18989:18989`, `127.0.0.1:18765:18765`) and requires `GATEWAY_ADMIN_PASSWORD` on the container bridge listener. Containers sharing the same Docker Compose network can call Bearer-authenticated `http://gateway:18989/v1` (or `http://<service-name>:18989/v1` on internal port `18989`), and separate containers on Docker Desktop backends that route host loopback can use `http://host.docker.internal:<published-port>/v1`. `/admin/` `Host`/`Origin` checks protect browsers against DNS rebinding and CSRF via `GATEWAY_PUBLIC_ORIGIN` (with `localhost` / `[::1]` aliases when `GATEWAY_PUBLIC_ORIGIN` is an `http://` loopback origin), rather than replacing host-loopback publishing or container network policies. For standalone `docker run`, custom ports, or headless SSH port forwarding, review the [Docker Compose & loopback publishing guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) (runs as `uid 1000` with read-only rootfs and dropped capabilities).
 
 ### 3. Sign In and Create a Client Key
 
-Open **http://127.0.0.1:18989/admin/** in your browser:
+Open **http://127.0.0.1:18989/admin/** (or **http://localhost:18989/admin/**) in your browser:
 
 1. Sign in with your `GATEWAY_ADMIN_PASSWORD` (if left empty, passwordless admin is restricted strictly to loopback—see [Remote access with TLS](docs/OPERATIONS.md#remote-access-with-tls--遠端-tls)).
 2. Under **Accounts**, click **+ Google sign-in** and complete Google OAuth + MFA in your browser.
@@ -118,7 +118,7 @@ Point any supported **OpenAI-compatible** client at your gateway:
 
 | Setting | Value |
 |---|---|
-| **Base URL** | `http://127.0.0.1:18989/v1` (or your HTTPS reverse-proxy URL `/v1`) |
+| **Base URL** | `http://127.0.0.1:18989/v1` (`http://<service-name>:18989/v1` on a shared Compose network, `http://host.docker.internal:<published-port>/v1` on Docker Desktop where host-loopback routing applies, or your HTTPS reverse-proxy URL `/v1`) |
 | **API Key** | Client key generated in **API keys** (never your admin password or Google token) |
 | **Model** | `gemini-argon` (Pro reasoning/coding), `gemini-hydrogen` (Gemini 4 Hydrogen), or `gemini-flash-lite` |
 | **Endpoints** | `/v1/chat/completions` or `/v1/responses` ([supported contract](docs/API_SUPPORT.md)) |

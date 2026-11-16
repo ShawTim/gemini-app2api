@@ -1,6 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import net from "node:net";
 import { TextDecoder } from "node:util";
 import * as protocol from "../native-provider.mjs";
 import { Security } from "./security.mjs";
@@ -24,6 +25,151 @@ const assets = new Map([
   ["/admin/styles.css", "styles.css"],
 ]);
 const sensitiveMethods = new Set(["POST", "PATCH", "DELETE", "PUT"]);
+function hasDuplicateHostHeader(rawHeaders) {
+  if (!Array.isArray(rawHeaders)) return false;
+  let count = 0;
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    if (typeof rawHeaders[i] === "string" && rawHeaders[i].toLowerCase() === "host") {
+      count++;
+      if (count > 1) return true;
+    }
+  }
+  return false;
+}
+/** Parse and canonicalize an HTTP Host header while keeping explicit default ports intact. */
+function parseHostHeader(raw) {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 255)
+    return null;
+  if (raw.startsWith("[")) {
+    const match = raw.match(/^\[([0-9a-fA-F:.]+)\](?::([1-9][0-9]{0,4}))?$/);
+    if (!match || net.isIP(match[1]) !== 6) return null;
+    const port = match[2] ?? "";
+    if (port && (Number(port) < 1 || Number(port) > 65535)) return null;
+    let parsed;
+    try {
+      parsed = new URL(`http://[${match[1]}]`);
+    } catch {
+      return null;
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    return { hostname, bareHost: hostname.slice(1, -1), port, family: 6 };
+  }
+  const match = raw.match(/^([A-Za-z0-9._-]+)(?::([1-9][0-9]{0,4}))?$/);
+  if (!match) return null;
+  const hostPart = match[1];
+  const port = match[2] ?? "";
+  if (port && (Number(port) < 1 || Number(port) > 65535)) return null;
+  let parsed;
+  try {
+    parsed = new URL(`http://${hostPart}`);
+  } catch {
+    return null;
+  }
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.port
+  )
+    return null;
+  const hostname = parsed.hostname.toLowerCase();
+  // Reject non-canonical IPv4 shorthand forms such as 127.1 or 2130706433.
+  if (hostPart.toLowerCase() !== hostname) return null;
+  return { hostname, bareHost: hostname, port, family: net.isIP(hostname) };
+}
+function isPrivateIPv4Bytes(a, b) {
+  return (
+    a === 127 ||
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+function parseIPv6Words(bareHost) {
+  const halves = bareHost.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves[1] ? halves[1].split(":") : [];
+  const missing = halves.length === 2 ? 8 - left.length - right.length : 0;
+  if (missing < 0 || (halves.length === 1 && left.length !== 8)) return null;
+  const groups = [
+    ...left,
+    ...Array.from({ length: missing }, () => "0"),
+    ...right,
+  ];
+  return groups.length === 8 ? groups.map((g) => parseInt(g, 16)) : null;
+}
+/** Parse optional GATEWAY_ALLOWED_PROBE_HOSTS (comma-separated string or array of host[:port]). */
+export function parseProbeHosts(value) {
+  if (value === undefined || value === null || value === "")
+    return Object.freeze([]);
+  let items;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return Object.freeze([]);
+    items = value;
+  } else if (typeof value === "string") {
+    if (Buffer.byteLength(value) > 8192) throw fault("INVALID_PROBE_HOSTS", 400);
+    items = value.split(",").map((s) => s.trim());
+  } else {
+    throw fault("INVALID_PROBE_HOSTS", 400);
+  }
+  if (items.length > 64) throw fault("INVALID_PROBE_HOSTS", 400);
+  const rules = [];
+  for (const entry of items) {
+    let raw;
+    if (typeof entry === "string") {
+      raw = entry.trim();
+    } else if (
+      entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof entry.hostname === "string" &&
+      typeof entry.port === "string"
+    ) {
+      raw = entry.port ? `${entry.hostname}:${entry.port}` : entry.hostname;
+    } else {
+      throw fault("INVALID_PROBE_HOSTS", 400);
+    }
+    const parsed = parseHostHeader(raw);
+    if (!parsed) throw fault("INVALID_PROBE_HOSTS", 400);
+    rules.push(Object.freeze({ hostname: parsed.hostname, port: parsed.port }));
+  }
+  return Object.freeze(rules);
+}
+/** Return true for built-in container/internal probe hosts or explicitly configured probe hosts. */
+function isInternalProbeHost(parsedHost, customProbeHosts = []) {
+  if (
+    customProbeHosts.some(
+      (rule) =>
+        rule.hostname === parsedHost.hostname &&
+        (rule.port === "" || (parsedHost.port || "80") === rule.port),
+    )
+  )
+    return true;
+  if (parsedHost.family === 4) {
+    const [a, b] = parsedHost.bareHost.split(".").map(Number);
+    return isPrivateIPv4Bytes(a, b);
+  }
+  if (parsedHost.family === 6) {
+    const words = parseIPv6Words(parsedHost.bareHost);
+    if (!words) return false;
+    if (words.slice(0, 7).every((w) => w === 0) && words[7] === 1) return true;
+    if (words.slice(0, 5).every((w) => w === 0) && words[5] === 0xffff)
+      return isPrivateIPv4Bytes(words[6] >> 8, words[6] & 0xff);
+    return (words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xffc0) === 0xfe80;
+  }
+  return (
+    parsedHost.hostname === "localhost" ||
+    /^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$/.test(parsedHost.hostname) ||
+    /\.(?:internal|local|localhost|home\.arpa|svc|svc\.cluster\.local)$/.test(
+      parsedHost.hostname,
+    )
+  );
+}
 // Terminal operation failure after bounded provider recovery, never an input limit.
 const NO_OUTPUT_FAILURES = new Set(['NATIVE_STREAM_CLOSED_EARLY', 'NATIVE_TURN_TIMEOUT',
   'NATIVE_STREAM_RESET', 'NATIVE_CONNECTION_FAILED', 'NATIVE_STREAM_FAILED',
@@ -114,12 +260,14 @@ export function createGateway({
   allowEmptyResponseFailover = false,
   allowAutomaticRecovery = false,
   routingAccountIds = null,
+  probeHosts = null,
   secureCookies = false,
   publicOrigin = null,
   callbackPort = 18765,
   callbackHost = "127.0.0.1",
 } = {}) {
   if (!store) throw new TypeError("store required");
+  const normalizedProbeHosts = parseProbeHosts(probeHosts);
   const startedAt = Date.now(),
     requests = [],
     audit = [];
@@ -456,23 +604,62 @@ export function createGateway({
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     );
     try {
-      const host = req.headers.host;
       if (!origin) throw fault("STARTING", 503);
+      if (hasDuplicateHostHeader(req.rawHeaders))
+        throw fault("HOST_REJECTED", 403);
+      const parsedHost = parseHostHeader(req.headers.host);
+      if (!parsedHost) throw fault("HOST_REJECTED", 403);
+      if (
+        typeof req.url !== "string" ||
+        !req.url.startsWith("/") ||
+        req.url.startsWith("//") ||
+        req.url.includes("\\") ||
+        req.url.includes("#") ||
+        /%(?![0-9A-Fa-f]{2})|%00|[\u0000-\u001f\u007f]/.test(req.url)
+      )
+        throw fault("ENDPOINT_NOT_FOUND", 404);
       const expected = new URL(origin);
-      const address = server.address(),
-        localPort =
-          address && typeof address === "object"
-            ? address.port
-            : store.settings().port;
-      const allowed = new Set([
-        expected.host,
-        `127.0.0.1:${localPort}`,
-        `localhost:${localPort}`,
-        `[::1]:${localPort}`,
-      ]);
-      if (!allowed.has(host)) throw fault("HOST_REJECTED", 403);
-      const url = new URL(req.url, origin),
-        p = url.pathname;
+      let url;
+      try {
+        url = new URL(req.url, expected.origin);
+      } catch {
+        throw fault("ENDPOINT_NOT_FOUND", 404);
+      }
+      if (url.origin !== expected.origin)
+        throw fault("ENDPOINT_NOT_FOUND", 404);
+      const defaultPort = expected.protocol === "https:" ? "443" : "80";
+      const expectedPort = expected.port || defaultPort;
+      const loopbackHosts = ["127.0.0.1", "localhost", "[::1]"];
+      const expectedHostname = expected.hostname.toLowerCase();
+      const expectedIsLoopbackHttp =
+        expected.protocol === "http:" &&
+        loopbackHosts.includes(expectedHostname);
+      const adminAllowedHostnames = new Set(
+        expectedIsLoopbackHttp ? loopbackHosts : [expectedHostname],
+      );
+      const isAdminHost =
+        adminAllowedHostnames.has(parsedHost.hostname) &&
+        (parsedHost.port || defaultPort) === expectedPort;
+      const originPortSuffix =
+        expectedPort === defaultPort ? "" : `:${expectedPort}`;
+      const adminAllowedOrigins = new Set(
+        expectedIsLoopbackHttp
+          ? loopbackHosts.map((h) => `http://${h}${originPortSuffix}`)
+          : [expected.origin],
+      );
+      const p = url.pathname;
+      const isApiRoute = p.startsWith("/v1/");
+      const isProbeRoute =
+        req.method === "GET" && (p === "/health" || p === "/ready");
+      if (isProbeRoute) {
+        if (
+          !isAdminHost &&
+          !isInternalProbeHost(parsedHost, normalizedProbeHosts)
+        )
+          throw fault("HOST_REJECTED", 403);
+      } else if (!isApiRoute) {
+        if (!isAdminHost) throw fault("HOST_REJECTED", 403);
+      }
       if (req.method === "GET" && p === "/health")
         return json(res, {
           status: "ok",
@@ -526,7 +713,7 @@ export function createGateway({
       }
       if (p.startsWith("/admin/api/")) {
         if (req.method === "POST" && p === "/admin/api/login") {
-          security.checkOrigin(req, origin);
+          security.checkOrigin(req, adminAllowedOrigins);
           const body = await readJson(req, 4096);
           if (req.aborted || res.destroyed) return;
           only(body, ["password"]);
@@ -541,10 +728,15 @@ export function createGateway({
             const remote = req.socket.remoteAddress;
             const loopback = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
             const site = req.headers["sec-fetch-site"];
-            if (!loopback || (req.headers.origin && req.headers.origin !== origin) || (site && site === "cross-site"))
+            if (
+              !loopback ||
+              (req.headers.origin &&
+                !adminAllowedOrigins.has(req.headers.origin)) ||
+              (site && site === "cross-site")
+            )
               throw fault("ORIGIN_REJECTED", 403);
             if (site && !["same-origin", "none"].includes(site)) throw fault("ORIGIN_REJECTED", 403);
-            if (host !== expected.host) throw fault("HOST_REJECTED", 403);
+            if (!isAdminHost) throw fault("HOST_REJECTED", 403);
             const bootstrap = security.issueSession(remote);
             res.setHeader("Set-Cookie", security.cookie(bootstrap.token));
             session = { csrf: bootstrap.csrf };
@@ -553,7 +745,7 @@ export function createGateway({
           return json(res, { authenticated: true, csrf: session.csrf, authRequired: security.adminAuthRequired });
         }
         const session = sensitiveMethods.has(req.method)
-          ? security.requireMutation(req, origin)
+          ? security.requireMutation(req, adminAllowedOrigins)
           : security.requireAdmin(req);
         if (p === "/admin/api/logout" && req.method === "POST") {
           security.logout(session);

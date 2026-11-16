@@ -72,7 +72,12 @@ export class Security {
     return s;
   }
   checkOrigin(req, origin) {
-    if (req.headers.origin !== origin) throw fault("ORIGIN_REJECTED", 403);
+    const allowed = origin instanceof Set ? origin : new Set([origin]);
+    if (
+      typeof req.headers.origin !== "string" ||
+      !allowed.has(req.headers.origin)
+    )
+      throw fault("ORIGIN_REJECTED", 403);
     const site = req.headers["sec-fetch-site"];
     if (site && !["same-origin", "none"].includes(site))
       throw fault("ORIGIN_REJECTED", 403);

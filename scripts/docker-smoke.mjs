@@ -32,20 +32,22 @@ async function publishedOriginSmoke() {
   const temporary = fs.mkdtempSync(path.join(process.env.PI_SCRATCH_DIR || os.tmpdir(), "docker-origin-smoke-"));
   const envFile = path.join(temporary, ".env"), overrideFile = path.join(temporary, "override.yaml");
   fs.writeFileSync(envFile, "", { mode: 0o600 });
-  let composeStarted = false, composePort = "";
+  let composeStarted = false, composePort = "", composeProbeHosts = "";
   // Always use the shipped Compose service; isolate only the test image/name/ports/restart policy.
-  const composeRun = (args, { port = "", origin = "", override = false } = {}) => execFileSync("docker", [
+  const composeRun = (args, { port = "", origin = "", probeHosts = "", override = false } = {}) => execFileSync("docker", [
     "compose", "--env-file", envFile, "--project-name", project,
     "-f", path.resolve(import.meta.dirname, "../compose.yaml"), ...(override ? ["-f", overrideFile] : []), ...args,
   ], { encoding: "utf8", timeout: 60000, stdio: ["ignore", "pipe", "pipe"], env: {
     ...process.env, GATEWAY_ADMIN_PASSWORD: password,
     GATEWAY_PUBLISHED_PORT: String(port), GATEWAY_PUBLIC_ORIGIN: origin,
+    GATEWAY_ALLOWED_PROBE_HOSTS: probeHosts,
   } }).trim();
   const compose = options => JSON.parse(composeRun(["config", "--format", "json"], options)).services.gateway;
   try {
     // An empty --env-file and explicit synthetic values prevent reading operator secrets.
     const defaults = compose();
     assert.equal(defaults.environment.GATEWAY_PUBLIC_ORIGIN, "http://127.0.0.1:18989");
+    assert.equal(defaults.environment.GATEWAY_ALLOWED_PROBE_HOSTS, "");
     assert.equal(defaults.ports.find(p => p.target === 18989).published, "18989");
     assert.deepEqual(defaults.tmpfs, ["/tmp:rw,noexec,nosuid,size=16m"]);
     const listener = net.createServer();
@@ -59,9 +61,10 @@ async function publishedOriginSmoke() {
     assert.equal(custom.ports.find(p => p.target === 18989).host_ip, "127.0.0.1");
     assert.equal(custom.ports.find(p => p.target === 18765).published, "18765");
     assert.equal(compose({ port, origin: "https://gateway.example.test" }).environment.GATEWAY_PUBLIC_ORIGIN, "https://gateway.example.test");
-    fs.writeFileSync(overrideFile, `services:\n  gateway:\n    image: ${JSON.stringify(image)}\n    container_name: ${JSON.stringify(container)}\n    restart: "no"\n    ports: !override\n      - "127.0.0.1:${port}:18989"\n      - "127.0.0.1::18765"\n`, { mode: 0o600 });
-    composePort = port; composeStarted = true;
-    composeRun(["up", "-d", "--no-build", "--pull", "never"], { port, override: true });
+    assert.equal(compose({ probeHosts: "gateway.default,gateway.default.svc.cluster.example:18989" }).environment.GATEWAY_ALLOWED_PROBE_HOSTS, "gateway.default,gateway.default.svc.cluster.example:18989");
+    fs.writeFileSync(overrideFile, `services:\n  gateway:\n    image: ${JSON.stringify(image)}\n    container_name: ${JSON.stringify(container)}\n    restart: "no"\n    networks:\n      default:\n        aliases:\n          - gemini-app2api\n    ports: !override\n      - "127.0.0.1:${port}:18989"\n      - "127.0.0.1::18765"\n`, { mode: 0o600 });
+    composePort = port; composeProbeHosts = "gateway.default"; composeStarted = true;
+    composeRun(["up", "-d", "--no-build", "--pull", "never"], { port, probeHosts: composeProbeHosts, override: true });
     const hostConfig = JSON.parse(docker("inspect", "--format", "{{json .HostConfig}}", container));
     assert.equal(hostConfig.ReadonlyRootfs, true); assert.equal(hostConfig.Init, true);
     assert.ok(hostConfig.CapDrop.includes("ALL"));
@@ -93,11 +96,29 @@ async function publishedOriginSmoke() {
       req.setTimeout(3000, () => req.destroy(new Error("Forged-Host check timed out")));
     });
     assert.equal(forged.status, 403); assert.equal(JSON.parse(forged.body).error.code, "HOST_REJECTED");
+    const allowedProbe = await new Promise((resolve, reject) => {
+      const req = http.get(origin + "/health", { headers: { Host: "gateway.default" } }, res => {
+        res.resume();
+        res.once("error", reject);
+        res.once("end", () => resolve(res.statusCode));
+      });
+      req.once("error", reject);
+      req.setTimeout(3000, () => req.destroy(new Error("Custom-probe check timed out")));
+    });
+    assert.equal(allowedProbe, 200);
     assert.equal((await request("/health", { headers: { "X-Forwarded-Host": "attacker.invalid" } })).status, 200);
     const login = await request("/admin/api/login", {
       method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ password }),
     });
     assert.equal(login.status, 200);
+    const localhostOrigin = "http://localhost:" + port;
+    const localhostLogin = await fetch(localhostOrigin + "/admin/api/login", {
+      method: "POST",
+      headers: { Origin: localhostOrigin, "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+      signal: AbortSignal.timeout(3000),
+    });
+    assert.equal(localhostLogin.status, 200); await localhostLogin.text();
     const cookie = login.headers.get("set-cookie")?.split(";")[0], session = await login.json();
     assert.ok(cookie); assert.ok(session.csrf);
     const headers = { Cookie: cookie, Origin: origin, "Content-Type": "application/json", "X-CSRF-Token": session.csrf };
@@ -112,13 +133,52 @@ async function publishedOriginSmoke() {
     const noCsrf = await patch(missingCsrf);
     assert.equal(noCsrf.status, 403); assert.equal((await noCsrf.json()).error.code, "CSRF_REJECTED");
     const valid = await patch(headers); assert.equal(valid.status, 200); await valid.text();
+    const keyResponse = await request("/admin/api/keys", {
+      method: "POST", headers, body: JSON.stringify({ label: "compose-sibling-smoke" }),
+    });
+    assert.equal(keyResponse.status, 201);
+    const createdKey = await keyResponse.json();
+    assert.ok(createdKey.id && createdKey.key);
+    const composeNetwork = Object.keys(JSON.parse(docker("inspect", "--format", "{{json .NetworkSettings.Networks}}", container)))[0];
+    assert.ok(composeNetwork);
+    const siblingReport = JSON.parse(docker("run", "--rm", "--network", composeNetwork, "-e", "SMOKE_API_KEY=" + createdKey.key, image, "node", "-e", `
+      (async () => {
+        const assert = require('node:assert/strict');
+        let h1;
+        for (let i = 0; i < 15; i++) {
+          try { h1 = await fetch('http://gateway:18989/health'); break; } catch { await new Promise(r => setTimeout(r, 200)); }
+        }
+        assert.equal(h1?.status, 200);
+        const h2 = await fetch('http://gemini-app2api:18989/health');
+        assert.equal(h2.status, 200);
+        const ready = await fetch('http://gemini-app2api:18989/ready');
+        assert.equal(ready.status, 503);
+        const unauthed = await fetch('http://gemini-app2api:18989/v1/models');
+        assert.equal(unauthed.status, 401);
+        assert.equal((await unauthed.json()).error.code, 'INVALID_API_KEY');
+        const authed = await fetch('http://gemini-app2api:18989/v1/models', {
+          headers: { Authorization: 'Bearer ' + process.env.SMOKE_API_KEY },
+        });
+        assert.equal(authed.status, 200);
+        const models = await authed.json();
+        assert.ok(Array.isArray(models.data) && models.data.length > 0);
+        const admin = await fetch('http://gemini-app2api:18989/admin/');
+        assert.equal(admin.status, 403);
+        assert.equal((await admin.json()).error.code, 'HOST_REJECTED');
+        console.log(JSON.stringify({ ok: true, models: models.data.length }));
+      })().catch((err) => { console.error(err); process.exit(1); });
+    `));
+    assert.equal(siblingReport.ok, true);
+    const revoked = await request("/admin/api/keys/" + createdKey.id, { method: "DELETE", headers });
+    assert.equal(revoked.status, 200); await revoked.text();
     return { network: "compose-dedicated-bridge", publishedPort: port, health: 200, internalHealth: 200,
       emptyAccounts: true, modelRequests: 0, actualComposeUp: true, tmpfsMounted: true, tmpfsBytes: tmp.bytes,
       composeNonRoot: true, composeReadOnly: true, composeDroppedCapabilities: true, composeNoNewPrivileges: true,
-      adminLogin: 200, sameOriginMutation: 200, hostRejected: true, originRejected: true, csrfRequired: true,
-      unauthenticatedApiRejected: true, composeDefaults: true, composePortDerivedOrigin: true, composeHttpsOverride: true };
+      siblingAuthenticatedApi: true, adminLogin: 200, sameOriginMutation: 200, hostRejected: true,
+      originRejected: true, csrfRequired: true, unauthenticatedApiRejected: true,
+      composeDefaults: true, composePortDerivedOrigin: true, composeHttpsOverride: true };
   } finally {
-    if (composeStarted) composeRun(["down", "--volumes", "--remove-orphans", "--timeout", "10"], { port: composePort, override: true });
+    if (composeStarted) composeRun(["down", "--volumes", "--remove-orphans", "--timeout", "10"], { port: composePort, probeHosts: composeProbeHosts, override: true });
     fs.rmSync(temporary, { recursive: true, force: true });
   }
 }
