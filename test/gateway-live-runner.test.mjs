@@ -37,7 +37,7 @@ for (const caseName of [
       assert.equal(report.verified, true);
       assert.deepEqual(
         report.resolvedModes,
-        caseName === "text" ? [8] : caseName.endsWith('-sse') ? [null, null] : [8, 8],
+        caseName === "text" ? [8] : caseName.endsWith('-sse') ? [null, 8] : [8, 8],
       );
       assert.equal(report.nativeModeEvidenceComplete, !caseName.endsWith('-sse'));
       assert.equal(report.calls, caseName === "text" ? 0 : 1);

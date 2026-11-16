@@ -244,7 +244,7 @@ for (const [name, api, stream] of [
     assert.equal(report.executions, 1);
     assert.equal(report.followedCallerResult, true);
     assert.deepEqual(report.httpStatuses, [200, 200]);
-    assert.deepEqual(report.resolvedModes, stream ? [null, null] : [8, 8]);
+    assert.deepEqual(report.resolvedModes, stream ? [null, 8] : [8, 8]);
     assert.equal(report.nativeModeEvidenceComplete, !stream);
     assert.equal(f.seen.length, 2);
   });

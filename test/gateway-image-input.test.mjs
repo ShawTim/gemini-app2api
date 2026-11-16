@@ -181,8 +181,8 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
   for (const responses of [false, true]) for (const stream of [false, true]) {
     const body = responses ? { input: [{ role: 'user', content: [{ type: 'input_text', text: 'inspect synthetic image' }, { type: 'input_image', image_url: url(PNG) }] }] } : { messages: [user([{ type: 'text', text: 'inspect synthetic image' }, image()])] };
     const res = await f.api(responses ? '/v1/responses' : '/v1/chat/completions', { method: 'POST', body: { model: 'gemini-argon', stream, ...body } });
-    // SSE headers commit with incremental output, before resolved-mode verification.
-    assert.equal(res.status, 200); assert.equal(res.headers.get('x-native-mode'), stream ? null : '8');
+    // Short (<2048B) SSE answers hold headers behind the prefix gate until completion, preserving resolved-mode header.
+    assert.equal(res.status, 200); assert.equal(res.headers.get('x-native-mode'), '8');
     const output = await res.text(); assert.match(output, /Synthetic image answer/); assert.match(output, /gemini-argon/);
     if (stream) assert.match(output, responses ? /response\.completed/ : /data: \[DONE\]/);
   }
