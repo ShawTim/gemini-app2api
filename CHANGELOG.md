@@ -2,6 +2,14 @@
 
 Release notes for Gemini App2API.
 
+## 1.3.4 — 2026-11-17
+
+### Kernel directory locking, shutdown hardening, OpenAI compatibility & CI chaos gates
+- Replaced pathname/PID-only `runtime.lock` reclamation in `src/gateway/state.mjs` with OS kernel `flock(2)` open-file-description directory locking (Linux `/usr/bin/flock` / `/bin/flock` and macOS `/usr/bin/perl`, static `node:child_process` import supporting Node `>=22.0.0`), failing closed (`503 STATE_LOCK_UNAVAILABLE`) when kernel locking is unavailable, guarding live legacy (`<= v1.3.3`) same-host PID-only owners via open-descriptor checks, rejecting unsafe or non-PID lock objects, automatically reclaiming dead `0600` PID `runtime.lock` files left behind by `SIGKILL` or PID-reused container restarts, and enforcing descriptor identity on `unlock()` while holding the directory lock.
+- Hardened `src/gateway-server.mjs` signal and cleanup lifecycles by switching `SIGINT` / `SIGTERM` / `SIGHUP` to persistent listeners (`process.on`) and forcing bounded nonzero exits when startup or shutdown cleanup rejects or hits the 7-second watchdog timer.
+- Expanded inert OpenAI ecosystem compatibility in `src/openai-contract.mjs`, `src/tool-protocol.mjs`, and `src/gateway/app.mjs` to accept `user`, `metadata` (up to 16 entries, Unicode code-point and UTF-8 byte limits), `stop`, `n: 1`, `service_tier`, `logit_bias`, `verbosity`, `modalities: ["text"]`, `truncation`, `stream_options` (`{ include_usage }`, `{}`, `null`), `store` (`false`, `null`), and `messages[].name` cleanly outside `buildCanonicalPrompt()` and native wire requests, while reporting offending parameter paths in `error.param` (up to 160 characters) without reflecting supplied values.
+- Locked regressions into permanent CI chaos, concurrency, and real-SDK gates across `scripts/docker-smoke.mjs`, `scripts/sdk-smoke.mjs`, `test/gateway-foundation.test.mjs`, `test/gateway-startup.test.mjs`, `test/gateway-ignored-options.test.mjs`, `test/openai-contract.test.mjs`, and `test/sdk/smoke.py`.
+
 ## 1.3.3 — 2026-11-16
 
 ### Docker Compose cross-container networking and authority validation
