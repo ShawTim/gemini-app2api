@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import OpenAI from 'openai';
 import { NativeDirectProvider, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse } from '../src/native-provider.mjs';
+import { errorPayload } from '../src/gateway/app.mjs';
 import { PROMPT_MAX_BYTES, buildCanonicalPrompt } from '../src/openai-contract.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 
@@ -10,7 +11,7 @@ const flatTool = { type: 'function', ...tool.function };
 const user = { role: 'user', content: 'hello' };
 const call = (id = 'call_one') => ({ id, type: 'function', function: { name: 'lookup', arguments: '{"key":"fixture"}' } });
 const history = [user, { role: 'assistant', content: null, tool_calls: [call()] }, { role: 'tool', tool_call_id: 'call_one', content: 'CALLER_OUTPUT' }];
-const invalid = (fn, code = 'UNSUPPORTED_PARAMETER') => assert.throws(fn, e => e.status >= 400 && e.status < 500 && e.code === code && e.type === 'invalid_request_error' && !e.message.includes('secret'));
+const invalid = (fn, code = 'UNSUPPORTED_PARAMETER', param = undefined) => assert.throws(fn, e => e.status >= 400 && e.status < 500 && e.code === code && e.type === 'invalid_request_error' && !e.message.includes('secret') && (param === undefined || e.param === param));
 function response() {
   return { status: null, headers: {}, chunks: [], writeHead(status, headers) { this.status = status; this.headers = headers; }, write(chunk) { this.chunks.push(chunk); }, end(chunk) { if (chunk !== undefined) this.chunks.push(chunk); }, text() { return this.chunks.join(''); } };
 }
@@ -30,10 +31,20 @@ test('Chat canonical normalization preserves model, system/developer, text block
 });
 
 test('Chat rejects unsupported keys, invalid images/roles/types/settings and ambiguous tool results', () => {
-  for (const key of ['n', 'stop', 'user', 'metadata', 'session_id', 'continuation']) invalid(() => normalizeChatRequest({ messages: [user], [key]: 'secret' }));
-  invalid(() => normalizeChatRequest({ messages: [user], store: true }), 'UNSUPPORTED_STORE');
-  invalid(() => normalizeChatRequest({ messages: [user], parallel_tool_calls: 'false' }), 'INVALID_PARALLEL_TOOL_CALLS');
-  invalid(() => normalizeChatRequest({ messages: [{ ...user, name: 'secret' }] }));
+  for (const key of ['session_id', 'continuation', 'unexpected_vendor_flag']) invalid(() => normalizeChatRequest({ messages: [user], [key]: 'secret' }), 'UNSUPPORTED_PARAMETER', key);
+  for (const badN of [0, 2, 'secret']) invalid(() => normalizeChatRequest({ messages: [user], n: badN }), 'UNSUPPORTED_PARAMETER', 'n');
+  invalid(() => normalizeChatRequest({ messages: [user], modalities: ['audio'] }), 'UNSUPPORTED_PARAMETER', 'modalities');
+  invalid(() => normalizeChatRequest({ messages: [user], service_tier: 'secret' }), 'UNSUPPORTED_PARAMETER', 'service_tier');
+  invalid(() => normalizeChatRequest({ messages: [user], user: 123 }), 'INVALID_USER', 'user');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: 'secret' }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], stop: 123 }), 'INVALID_STOP', 'stop');
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { '1': 'secret' } }), 'INVALID_LOGIT_BIAS', 'logit_bias');
+  invalid(() => normalizeChatRequest({ messages: [user], verbosity: 'secret' }), 'INVALID_VERBOSITY', 'verbosity');
+  invalid(() => normalizeChatRequest({ messages: [user], store: true }), 'UNSUPPORTED_STORE', 'store');
+  invalid(() => normalizeChatRequest({ messages: [user], parallel_tool_calls: 'false' }), 'INVALID_PARALLEL_TOOL_CALLS', 'parallel_tool_calls');
+  invalid(() => normalizeChatRequest({ messages: [{ ...user, name: 123 }] }), 'INVALID_MESSAGE_NAME', 'messages.name');
+  invalid(() => normalizeChatRequest({ messages: [{ ...user, extra_field: 'secret' }] }), 'UNSUPPORTED_PARAMETER', 'messages.extra_field');
+  assert.deepEqual(normalizeChatRequest({ messages: [{ ...user, name: 'alice' }], user: 'sess_1', metadata: { app: 'openclaw' }, stop: ['END'], n: 1, service_tier: 'auto', logit_bias: { '42': -5 }, verbosity: 'medium', modalities: ['text'], store: null, stream_options: null }), normalizeChatRequest({ messages: [user] }));
   invalid(() => normalizeChatRequest({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'secret' } }] }] }), 'UNSUPPORTED_IMAGE_URL');
   invalid(() => normalizeChatRequest({ messages: [{ role: 'unknown', content: 'secret' }] }), 'UNSUPPORTED_ROLE');
   invalid(() => normalizeChatRequest({ messages: [{ role: 'user', content: null }] }), 'INVALID_MESSAGE_CONTENT');
@@ -77,7 +88,9 @@ test('Responses supports consecutive function calls with separate results and re
   invalid(() => normalizeResponsesRequest({ input: [...input, input.at(-1)], tools: [flatTool] }), 'INVALID_TOOL_RESULT');
 });
 test('Responses rejects unsupported keys/types/legacy shapes rather than dropping them', () => {
-  for (const key of ['messages', 'previous_response_id', 'conversation', 'metadata', 'response_format', 'stream_options', 'truncation']) invalid(() => normalizeResponsesRequest({ input: 'hi', [key]: 'secret' }));
+  for (const key of ['messages', 'previous_response_id', 'conversation', 'response_format', 'stream_options']) invalid(() => normalizeResponsesRequest({ input: 'hi', [key]: 'secret' }), 'UNSUPPORTED_PARAMETER', key);
+  invalid(() => normalizeResponsesRequest({ input: 'hi', truncation: 'secret' }), 'UNSUPPORTED_PARAMETER', 'truncation');
+  assert.equal(normalizeResponsesRequest({ input: 'hi', user: 'u1', metadata: { k: 'v' }, service_tier: 'auto', truncation: 'auto', store: null }).userPrompt, 'hi');
   invalid(() => normalizeResponsesRequest({ input: 'hi', store: true }), 'UNSUPPORTED_STORE');
   assert.equal(normalizeResponsesRequest({ input: 'hi', reasoning_effort: 'high' }).body.thinking_level, 2);
   invalid(() => normalizeResponsesRequest({ input: 'hi', tools: [tool] }));
@@ -346,4 +359,113 @@ test('official OpenAI JS SDK accumulates SSE url_citation annotations and round-
   const chatReplay = await client.chat.completions.create({ model: 'gemini-argon', messages: [user, chatJson.choices[0].message, { role: 'user', content: 'follow up' }] });
   assert.equal(chatReplay.choices[0].message.content, 'Example answer');
   assert.equal(requests.length, 4);
+});
+
+test('inert OpenAI compatibility fields enforce exact boundary limits, preserve prompt equality and propagate long error.param', () => {
+  // 1. user boundary (256 UTF-8 bytes vs 257 / surrogate)
+  normalizeChatRequest({ messages: [user], user: 'u'.repeat(256) });
+  normalizeChatRequest({ messages: [user], user: '界'.repeat(85) + 'a' });
+  invalid(() => normalizeChatRequest({ messages: [user], user: 'u'.repeat(257) }), 'INVALID_USER', 'user');
+  invalid(() => normalizeChatRequest({ messages: [user], user: '界'.repeat(86) }), 'INVALID_USER', 'user');
+  invalid(() => normalizeChatRequest({ messages: [user], user: '\ud800' }), 'INVALID_USER', 'user');
+
+  // 2. metadata boundaries (16 keys, 64-char keys, 512 Unicode code points / 2048 UTF-8 bytes)
+  const maxMeta = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [
+    `k${String(i).padStart(63, 'x').slice(-63)}`,
+    i === 0 ? '中'.repeat(512) : i === 1 ? '😀'.repeat(512) : i === 2 ? true : i === 3 ? 42.5 : i === 4 ? null : 'v',
+  ]));
+  normalizeChatRequest({ messages: [user], metadata: maxMeta });
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { ...maxMeta, extra: '1' } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { ['k'.repeat(65)]: 'v' } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { '': 'v' } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { k: '中'.repeat(513) } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { k: '😀'.repeat(513) } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { k: NaN } }), 'INVALID_REQUEST');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { k: ['arr'] } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { k: { nested: 1 } } }), 'INVALID_METADATA', 'metadata');
+  invalid(() => normalizeChatRequest({ messages: [user], metadata: { k: '\ud800' } }), 'INVALID_METADATA', 'metadata');
+
+  // 3. stop boundaries (16 strings, <= 256 UTF-8 bytes each)
+  normalizeChatRequest({ messages: [user], stop: Array.from({ length: 16 }, () => 's'.repeat(256)) });
+  invalid(() => normalizeChatRequest({ messages: [user], stop: Array.from({ length: 17 }, (_, i) => `s${i}`) }), 'INVALID_STOP', 'stop');
+  invalid(() => normalizeChatRequest({ messages: [user], stop: 's'.repeat(257) }), 'INVALID_STOP', 'stop');
+
+  // 4. logit_bias boundaries (256 entries, 1..32 char keys, finite -100..100)
+  const maxBias = Object.fromEntries(Array.from({ length: 256 }, (_, i) => [String(i), i % 2 === 0 ? -100 : 100]));
+  normalizeChatRequest({ messages: [user], logit_bias: maxBias });
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { ...maxBias, '9999': 1 } }), 'INVALID_LOGIT_BIAS', 'logit_bias');
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { '1': -101 } }), 'INVALID_LOGIT_BIAS', 'logit_bias');
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { '1': 101 } }), 'INVALID_LOGIT_BIAS', 'logit_bias');
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { '1': NaN } }), 'INVALID_REQUEST');
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { '1': true } }), 'INVALID_LOGIT_BIAS', 'logit_bias');
+  invalid(() => normalizeChatRequest({ messages: [user], logit_bias: { ['k'.repeat(33)]: 0 } }), 'INVALID_LOGIT_BIAS', 'logit_bias');
+
+  // 5. message.name boundaries (1..128 Unicode chars, no ASCII control chars)
+  normalizeChatRequest({ messages: [{ ...user, name: 'a'.repeat(128) }] });
+  normalizeChatRequest({ messages: [{ ...user, name: '名'.repeat(128) }] });
+  for (const badName of ['', 'a'.repeat(129), '名'.repeat(129), 'a\nb', 'a\x00b', 'a\x7fb']) {
+    invalid(() => normalizeChatRequest({ messages: [{ ...user, name: badName }] }), 'INVALID_MESSAGE_NAME', 'messages.name');
+  }
+
+  // 6. stream_options: {} allowed even when non-streaming, invalid keys/usage rejected
+  assert.equal(normalizeChatRequest({ messages: [user], stream_options: {} }).stream_options, undefined);
+  assert.equal(normalizeChatRequest({ messages: [user], stream: true, stream_options: {} }).stream_options, undefined);
+  invalid(() => normalizeChatRequest({ messages: [user], stream_options: { extra: true } }), 'UNSUPPORTED_PARAMETER', 'stream_options.extra');
+  invalid(() => normalizeChatRequest({ messages: [user], stream_options: { include_usage: true } }), 'INVALID_STREAM_OPTIONS', 'stream_options');
+
+  // 7. Nested error.param up to 160 chars is preserved through errorPayload without truncation or value reflection
+  const longKey = 'x'.repeat(64);
+  let captured;
+  try {
+    normalizeChatRequest({
+      messages: [
+        user,
+        { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{"key":"a"}', [longKey]: 'SENSITIVE' } }] },
+        { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+      ],
+      tools: [tool],
+    });
+  } catch (err) {
+    captured = err;
+  }
+  assert.ok(captured);
+  assert.equal(captured.param, 'messages.tool_calls.function.' + longKey);
+  const payload = errorPayload(captured);
+  assert.equal(payload.error.param, 'messages.tool_calls.function.' + longKey);
+  assert.equal(JSON.stringify(payload).includes('SENSITIVE'), false);
+  invalid(() => normalizeResponsesRequest({ input: 'hi', reasoning: { extra_secret: '1' } }), 'UNSUPPORTED_PARAMETER', 'reasoning.extra_secret');
+  invalid(() => normalizeResponsesRequest({ input: [{ role: 'user', content: 'hi', extra_secret: '1' }] }), 'UNSUPPORTED_PARAMETER', 'input.extra_secret');
+  invalid(() => normalizeResponsesRequest({ tools: [flatTool], input: [{ type: 'function_call', name: 'lookup', call_id: 'c1', arguments: '{}', parsed_arguments: {} }] }), 'UNSUPPORTED_PARAMETER', 'input.parsed_arguments');
+  assert.equal(errorPayload({ code: 'UNSUPPORTED_PARAMETER', status: 400, param: 'p'.repeat(160) }).error.param, 'p'.repeat(160));
+  assert.equal(errorPayload({ code: 'UNSUPPORTED_PARAMETER', status: 400, param: 'p'.repeat(161) }).error.param, null);
+
+  // 8. Full canonical prompt byte-for-byte invariance with all inert OpenAI fields supplied
+  const bareChat = normalizeChatRequest({ model: 'gemini-argon', messages: [user] });
+  const richChat = normalizeChatRequest({
+    model: 'gemini-argon',
+    user: 'user-secret-tag',
+    metadata: { trace: 'trace-secret' },
+    stop: ['STOP_TOKEN'],
+    n: 1,
+    service_tier: 'priority',
+    logit_bias: { '10': -5 },
+    verbosity: 'high',
+    modalities: ['text'],
+    store: null,
+    stream_options: {},
+    messages: [{ ...user, name: 'alice_operator' }],
+  });
+  assert.deepEqual(buildCanonicalPrompt(richChat), buildCanonicalPrompt(bareChat));
+
+  const bareResp = normalizeResponsesRequest({ model: 'gemini-argon', input: 'hello' }).body;
+  const richResp = normalizeResponsesRequest({
+    model: 'gemini-argon',
+    user: 'resp-user-tag',
+    metadata: { trace: 'resp-trace' },
+    service_tier: 'flex',
+    truncation: 'auto',
+    store: null,
+    input: 'hello',
+  }).body;
+  assert.deepEqual(buildCanonicalPrompt(richResp), buildCanonicalPrompt(bareResp));
 });

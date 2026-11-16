@@ -1,5 +1,5 @@
 // Real Linux Docker smoke with synthetic credentials only; never uses Google.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -62,7 +62,7 @@ async function publishedOriginSmoke() {
     assert.equal(custom.ports.find(p => p.target === 18765).published, "18765");
     assert.equal(compose({ port, origin: "https://gateway.example.test" }).environment.GATEWAY_PUBLIC_ORIGIN, "https://gateway.example.test");
     assert.equal(compose({ probeHosts: "gateway.default,gateway.default.svc.cluster.example:18989" }).environment.GATEWAY_ALLOWED_PROBE_HOSTS, "gateway.default,gateway.default.svc.cluster.example:18989");
-    fs.writeFileSync(overrideFile, `services:\n  gateway:\n    image: ${JSON.stringify(image)}\n    container_name: ${JSON.stringify(container)}\n    restart: "no"\n    networks:\n      default:\n        aliases:\n          - gemini-app2api\n    ports: !override\n      - "127.0.0.1:${port}:18989"\n      - "127.0.0.1::18765"\n`, { mode: 0o600 });
+    fs.writeFileSync(overrideFile, `services:\n  gateway:\n    image: ${JSON.stringify(image)}\n    container_name: ${JSON.stringify(container)}\n    networks:\n      default:\n        aliases:\n          - gemini-app2api\n    ports: !override\n      - "127.0.0.1:${port}:18989"\n      - "127.0.0.1::18765"\n`, { mode: 0o600 });
     composePort = port; composeProbeHosts = "gateway.default"; composeStarted = true;
     composeRun(["up", "-d", "--no-build", "--pull", "never"], { port, probeHosts: composeProbeHosts, override: true });
     const hostConfig = JSON.parse(docker("inspect", "--format", "{{json .HostConfig}}", container));
@@ -162,6 +162,24 @@ async function publishedOriginSmoke() {
         assert.equal(authed.status, 200);
         const models = await authed.json();
         assert.ok(Array.isArray(models.data) && models.data.length > 0);
+        const openclawChat = await fetch('http://gemini-app2api:18989/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + process.env.SMOKE_API_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gemini-argon',
+            user: 'openclaw-smoke',
+            stop: ['END'],
+            n: 1,
+            metadata: { client: 'openclaw' },
+            service_tier: 'auto',
+            messages: [{ role: 'user', name: 'operator', content: 'ping' }],
+          }),
+        });
+        assert.equal(openclawChat.status, 503);
+        assert.equal((await openclawChat.json()).error.code, 'NO_AVAILABLE_ACCOUNTS');
         const admin = await fetch('http://gemini-app2api:18989/admin/');
         assert.equal(admin.status, 403);
         assert.equal((await admin.json()).error.code, 'HOST_REJECTED');
@@ -171,10 +189,25 @@ async function publishedOriginSmoke() {
     assert.equal(siblingReport.ok, true);
     const revoked = await request("/admin/api/keys/" + createdKey.id, { method: "DELETE", headers });
     assert.equal(revoked.status, 200); await revoked.text();
+    // Chaos gate: SIGKILL of gateway process inside Compose container relies on shipped restart: unless-stopped and PID-reused recovery.
+    const beforeKillRestartCount = JSON.parse(docker("inspect", "--format", "{{json .RestartCount}}", container));
+    try {
+      docker("exec", container, "node", "-e", "process.kill(Number(require('fs').readFileSync('/data/runtime.lock','utf8')),'SIGKILL')");
+    } catch { /* Container may exit while exec returns. */ }
+    let restartedHealth;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      try { restartedHealth = await request("/health"); if (restartedHealth.status === 200) break; } catch { await pause(); }
+    }
+    assert.equal(restartedHealth?.status, 200); await restartedHealth.text();
+    const afterKillRestartCount = JSON.parse(docker("inspect", "--format", "{{json .RestartCount}}", container));
+    assert.ok(afterKillRestartCount >= beforeKillRestartCount + 1);
+    assert.equal(docker("logs", container).includes("STATE_IN_USE"), false);
+    await internalHealth(container);
     return { network: "compose-dedicated-bridge", publishedPort: port, health: 200, internalHealth: 200,
       emptyAccounts: true, modelRequests: 0, actualComposeUp: true, tmpfsMounted: true, tmpfsBytes: tmp.bytes,
       composeNonRoot: true, composeReadOnly: true, composeDroppedCapabilities: true, composeNoNewPrivileges: true,
-      siblingAuthenticatedApi: true, adminLogin: 200, sameOriginMutation: 200, hostRejected: true,
+      siblingAuthenticatedApi: true, composeKillRecovered: true, composeAutoRestarted: true,
+      adminLogin: 200, sameOriginMutation: 200, hostRejected: true,
       originRejected: true, csrfRequired: true, unauthenticatedApiRejected: true,
       composeDefaults: true, composePortDerivedOrigin: true, composeHttpsOverride: true };
   } finally {
@@ -198,9 +231,36 @@ try {
   const digest = () => docker("exec", name, "node", "-e",
     "console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync('/data/state.json')).digest('hex'))");
   const before = digest();
+  // Simultaneous second container sharing the same /data volume must fail closed with STATE_IN_USE while primary stays healthy.
+  const conflict = spawnSync("docker", [
+    "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+    "-v", volume + ":/data",
+    "-e", "GATEWAY_ADMIN_PASSWORD=" + password,
+    "-e", "GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:18989",
+    image,
+  ], { encoding: "utf8", timeout: 30000 });
+  assert.equal(conflict.status, 1);
+  assert.equal(JSON.parse(conflict.stderr.trim()).code, "STATE_IN_USE");
+  await internalHealth(name);
+
   docker("stop", "--time", "10", name);
   assert.equal(JSON.parse(docker("inspect", "--format", "{{json .State.ExitCode}}", name)), 0);
+  assert.deepEqual(JSON.parse(docker("run", "--rm", "-v", volume + ":/data", image, "node", "-e",
+    "console.log(JSON.stringify(require('fs').readdirSync('/data')))")), ["state.json"]);
   docker("start", name); await internalHealth(name); assert.equal(digest(), before);
+
+  const preKillPid = docker("exec", name, "node", "-e",
+    "process.stdout.write(require('fs').readFileSync('/data/runtime.lock','utf8'))");
+  assert.match(preKillPid, /^\d+$/);
+  docker("kill", "--signal=KILL", name);
+  const stalePid = docker("run", "--rm", "-v", volume + ":/data", image, "node", "-e",
+    "process.stdout.write(require('fs').readFileSync('/data/runtime.lock','utf8'))");
+  assert.equal(stalePid, preKillPid);
+  docker("start", name); await internalHealth(name); assert.equal(digest(), before);
+  const postStartPid = docker("exec", name, "node", "-e",
+    "process.stdout.write(require('fs').readFileSync('/data/runtime.lock','utf8'))");
+  assert.equal(postStartPid, preKillPid);
   docker("stop", "--time", "10", name);
   const publishedOrigin = await publishedOriginSmoke();
   console.log(JSON.stringify({ verified: true, platform: "linux-docker", network: "none", nonRoot: true,

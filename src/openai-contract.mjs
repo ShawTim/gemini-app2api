@@ -13,7 +13,7 @@ import { MAX_IMAGES, MAX_IMAGE_URL_BYTES, normalizeImageUrl, collectImageInputs 
 import { RESPONSE_TOOL_IDENTITIES, normalizeResponsesTools, responsesCallFields } from './responses-tool-namespaces.mjs';
 import { toResponsesUsage } from './openai-usage.mjs';
 
-const fail = (code, status = 400) => { throw protocolError(code, status); };
+const fail = (code, status = 400, param = null) => { throw protocolError(code, status, param); };
 export const NATIVE_MODELS = Object.freeze(['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
 // Native ModeCategory wire values: ULTRA=8, FAST=1 (Gemini 4 Hydrogen), FLASH_LITE=6. Never auto/Plus.
 export const MODEL_MODES = Object.freeze({ 'gemini-argon': 8, 'gemini-hydrogen': 1, 'gemini-flash-lite': 6 });
@@ -41,9 +41,15 @@ export const REQUEST_MAX_NON_IMAGE_BYTES = PROMPT_MAX_BYTES;
 const MAX_MESSAGES = 1024;
 const configured = Number(process.env.GEMINI_PROMPT_MAX_CHARS);
 const MAX_CHARS = Number.isSafeInteger(configured) && configured > 0 ? Math.min(configured, PROMPT_MAX_BYTES) : PROMPT_MAX_BYTES;
-function keys(value, allowed) {
+function keys(value, allowed, prefix = '') {
   if (!plainObject(value)) fail('INVALID_REQUEST');
-  if (Object.keys(value).some(key => !allowed.includes(key))) fail('UNSUPPORTED_PARAMETER');
+  const unexpected = Object.keys(value).find(key => !allowed.includes(key));
+  if (unexpected !== undefined) {
+    const safeParam = /^[A-Za-z0-9_.-]{1,64}$/.test(unexpected)
+      ? prefix ? `${prefix}.${unexpected}` : unexpected
+      : null;
+    fail('UNSUPPORTED_PARAMETER', 400, safeParam);
+  }
 }
 // Bound work before compiling schemas, cloning tools or joining text blocks.
 // This is independent of the gateway's raw HTTP body limit.
@@ -135,49 +141,49 @@ function validateReplayAnnotations(annotations, { chat = false } = {}) {
     }
   }
 }
-function content(value, { assistant = false, responses = false, user = false } = {}) {
+function content(value, { assistant = false, responses = false, user = false, prefix = 'messages.content' } = {}) {
   if (value === null && assistant) return null;
   if (typeof value === 'string') return text(value);
   if (!Array.isArray(value) || !value.length || value.length > 1024) fail('INVALID_MESSAGE_CONTENT');
   const parts = value.map(part => {
     if (plainObject(part) && part.type === (responses ? 'input_image' : 'image_url')) {
       if (!user) fail('UNSUPPORTED_IMAGE_ROLE');
-      keys(part, responses ? ['type', 'image_url', 'detail'] : ['type', 'image_url']);
-      if (!responses) keys(part.image_url, ['url', 'detail']);
+      keys(part, responses ? ['type', 'image_url', 'detail'] : ['type', 'image_url'], prefix);
+      if (!responses) keys(part.image_url, ['url', 'detail'], `${prefix}.image_url`);
       const url = responses ? part.image_url : part.image_url.url;
       const detail = responses ? part.detail : part.image_url.detail;
       return { type: 'image_url', image_url: { url: normalizeImageUrl(url, detail), detail: 'auto' } };
     }
-    keys(part, responses ? ['type', 'text', 'annotations', 'logprobs', 'parsed'] : ['type', 'text']);
-    if (part.parsed !== undefined && (part.parsed !== null || !assistant)) fail('UNSUPPORTED_PARAMETER');
+    keys(part, responses ? ['type', 'text', 'annotations', 'logprobs', 'parsed'] : ['type', 'text'], prefix);
+    if (part.parsed !== undefined && (part.parsed !== null || !assistant)) fail('UNSUPPORTED_PARAMETER', 400, `${prefix}.parsed`);
     if (!(responses ? ['input_text', 'output_text', 'text'] : ['text']).includes(part.type)) fail('UNSUPPORTED_CONTENT_TYPE');
     if (part.annotations !== undefined) {
       if (!assistant || !['output_text', 'text'].includes(part.type)) fail('UNSUPPORTED_ANNOTATIONS');
       validateReplayAnnotations(part.annotations, { chat: false });
     }
-    if (part.logprobs !== undefined && part.logprobs !== null && (!Array.isArray(part.logprobs) || part.logprobs.length)) fail('UNSUPPORTED_PARAMETER');
+    if (part.logprobs !== undefined && part.logprobs !== null && (!Array.isArray(part.logprobs) || part.logprobs.length)) fail('UNSUPPORTED_PARAMETER', 400, `${prefix}.logprobs`);
     return { type: 'text', text: text(part.text) };
   });
   return parts.some(part => part.type === 'image_url') ? parts : parts.map(part => part.text).join('');
 }
 function settings(body) {
   const model = body.model === undefined ? 'gemini-argon' : body.model;
-  if (typeof model !== 'string') fail('UNSUPPORTED_MODEL');
+  if (typeof model !== 'string') fail('UNSUPPORTED_MODEL', 400, 'model');
   const alias = model.startsWith('models/') ? model.slice(7) : model;
-  if (!NATIVE_MODELS.includes(alias)) fail('UNSUPPORTED_MODEL');
+  if (!NATIVE_MODELS.includes(alias)) fail('UNSUPPORTED_MODEL', 400, 'model');
   const thinking = thinkingSettings(body);
-  if (body.stream !== undefined && typeof body.stream !== 'boolean') fail('INVALID_STREAM');
-  if (body.native_search !== undefined && typeof body.native_search !== 'boolean') fail('INVALID_NATIVE_SEARCH');
+  if (body.stream !== undefined && typeof body.stream !== 'boolean') fail('INVALID_STREAM', 400, 'stream');
+  if (body.native_search !== undefined && typeof body.native_search !== 'boolean') fail('INVALID_NATIVE_SEARCH', 400, 'native_search');
   return { model: alias, thinking_level: thinking, stream: body.stream ?? false, ...(body.native_search === true ? { native_search: true } : {}) };
 }
 // Known sampling/format hints are inert and deliberately omitted from the
 // canonical body, prompt and native request. Token hints remain disclosed below.
 function compatibility(payload, responses = false) {
-  if (payload.store !== undefined && payload.store !== false) fail('UNSUPPORTED_STORE');
-  if (payload.parallel_tool_calls !== undefined && typeof payload.parallel_tool_calls !== 'boolean') fail('INVALID_PARALLEL_TOOL_CALLS');
+  if (payload.store !== undefined && payload.store !== false && payload.store !== null) fail('UNSUPPORTED_STORE', 400, 'store');
+  if (payload.parallel_tool_calls !== undefined && typeof payload.parallel_tool_calls !== 'boolean') fail('INVALID_PARALLEL_TOOL_CALLS', 400, 'parallel_tool_calls');
   let reasoning;
   if (payload.reasoning !== undefined) {
-    keys(payload.reasoning, ['summary', 'effort']);
+    keys(payload.reasoning, ['summary', 'effort'], 'reasoning');
     if (payload.reasoning.summary !== undefined && (responses ? !['none', 'auto', 'concise', 'detailed'].includes(payload.reasoning.summary) : payload.reasoning.summary !== 'none')) fail('UNSUPPORTED_REASONING');
     // Responses summary modes beyond none are accepted but no summary text is produced.
     reasoning = { ...(payload.reasoning.summary === undefined || (responses && payload.reasoning.summary !== 'none') ? {} : {summary:'none'}), ...(payload.reasoning.effort === undefined ? {} : {effort:payload.reasoning.effort}) };
@@ -237,9 +243,67 @@ export function buildCanonicalPrompt(body, resolvedImages) {
   if (body.native_search && Buffer.byteLength(prompt) > 16 * 1024) fail('NATIVE_SEARCH_PROMPT_TOO_LARGE', 413);
   return { messages: [{ role: 'user', content: prompt }], images, toolCount: body.tools.length };
 }
+const SERVICE_TIERS = new Set(['auto', 'default', 'flex', 'priority', 'scale']);
+const VERBOSITY_VALUES = new Set(['low', 'medium', 'high']);
+const TRUNCATION_VALUES = new Set(['auto', 'disabled']);
+function validBoundedUtf8(value, maxBytes) {
+  return typeof value === 'string' && Buffer.from(value).toString('utf8') === value && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+function validBoundedChars(value, maxChars, maxBytes = maxChars * 4) {
+  return validBoundedUtf8(value, maxBytes) && Array.from(value).length <= maxChars;
+}
+function validateInertOpenAIFields(payload, { responses = false } = {}) {
+  if (payload.user !== undefined && payload.user !== null && !validBoundedUtf8(payload.user, 256)) {
+    fail('INVALID_USER', 400, 'user');
+  }
+  if (payload.metadata !== undefined && payload.metadata !== null) {
+    if (!plainObject(payload.metadata)) fail('INVALID_METADATA', 400, 'metadata');
+    const entries = Object.entries(payload.metadata);
+    if (entries.length > 16) fail('INVALID_METADATA', 400, 'metadata');
+    for (const [k, v] of entries) {
+      if (!k.length || !validBoundedChars(k, 64, 256)) fail('INVALID_METADATA', 400, 'metadata');
+      const ok = v === null || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v)) || validBoundedChars(v, 512, 2048);
+      if (!ok) fail('INVALID_METADATA', 400, 'metadata');
+    }
+  }
+  if (payload.service_tier !== undefined && payload.service_tier !== null && (typeof payload.service_tier !== 'string' || !SERVICE_TIERS.has(payload.service_tier))) {
+    fail('UNSUPPORTED_PARAMETER', 400, 'service_tier');
+  }
+  if (responses) {
+    if (payload.truncation !== undefined && payload.truncation !== null && (typeof payload.truncation !== 'string' || !TRUNCATION_VALUES.has(payload.truncation))) {
+      fail('UNSUPPORTED_PARAMETER', 400, 'truncation');
+    }
+    return;
+  }
+  if (payload.n !== undefined && payload.n !== null && payload.n !== 1) fail('UNSUPPORTED_PARAMETER', 400, 'n');
+  if (payload.stop !== undefined && payload.stop !== null) {
+    if (Array.isArray(payload.stop)) {
+      if (payload.stop.length > 16 || payload.stop.some(s => !validBoundedUtf8(s, 256))) fail('INVALID_STOP', 400, 'stop');
+    } else if (!validBoundedUtf8(payload.stop, 256)) {
+      fail('INVALID_STOP', 400, 'stop');
+    }
+  }
+  if (payload.logit_bias !== undefined && payload.logit_bias !== null) {
+    if (!plainObject(payload.logit_bias)) fail('INVALID_LOGIT_BIAS', 400, 'logit_bias');
+    const entries = Object.entries(payload.logit_bias);
+    if (entries.length > 256 || entries.some(([k, v]) => !k.length || k.length > 32 || typeof v !== 'number' || !Number.isFinite(v) || v < -100 || v > 100)) {
+      fail('INVALID_LOGIT_BIAS', 400, 'logit_bias');
+    }
+  }
+  if (payload.verbosity !== undefined && payload.verbosity !== null && (typeof payload.verbosity !== 'string' || !VERBOSITY_VALUES.has(payload.verbosity))) {
+    fail('INVALID_VERBOSITY', 400, 'verbosity');
+  }
+  if (payload.modalities !== undefined && payload.modalities !== null) {
+    if (!Array.isArray(payload.modalities) || payload.modalities.length !== 1 || payload.modalities[0] !== 'text') {
+      fail('UNSUPPORTED_PARAMETER', 400, 'modalities');
+    }
+  }
+}
+
 export function normalizeChatRequest(payload) {
-  keys(payload, ['model', 'messages', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'stream_options', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed', 'logprobs', 'top_logprobs', 'response_format']);
+  keys(payload, ['model', 'messages', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'stream_options', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed', 'logprobs', 'top_logprobs', 'response_format', 'user', 'metadata', 'stop', 'n', 'service_tier', 'logit_bias', 'verbosity', 'modalities']);
   requestBudget(payload);
+  validateInertOpenAIFields(payload);
   const compat = compatibility(payload);
   const resolved = settings(payload);
   const response_format = normalizeChatResponseFormat(payload.response_format);
@@ -255,12 +319,17 @@ export function normalizeChatRequest(payload) {
   if (!Array.isArray(payload.messages) || !payload.messages.length || payload.messages.length > MAX_MESSAGES) fail('MESSAGES_REQUIRED');
   const pending = new Set(), seen = new Set();
   const messages = payload.messages.map(message => {
-    keys(message, ['role', 'content', 'tool_calls', 'tool_call_id', 'refusal', 'parsed', 'annotations']);
+    keys(message, ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'refusal', 'parsed', 'annotations'], 'messages');
     const role = message.role;
     if (!['system', 'developer', 'user', 'assistant', 'tool'].includes(role)) fail('UNSUPPORTED_ROLE');
+    if (message.name !== undefined && message.name !== null) {
+      if (!message.name.length || !validBoundedChars(message.name, 128, 512) || /[\u0000-\u001f\u007f]/.test(message.name)) {
+        fail('INVALID_MESSAGE_NAME', 400, 'messages.name');
+      }
+    }
     // SDK stream accumulators attach null parsing/refusal metadata on replay.
     // Only inert null is accepted; structured/refusal content is unsupported.
-    for (const key of ['refusal', 'parsed']) if (message[key] !== undefined && (role !== 'assistant' || message[key] !== null)) fail('UNSUPPORTED_PARAMETER');
+    for (const key of ['refusal', 'parsed']) if (message[key] !== undefined && (role !== 'assistant' || message[key] !== null)) fail('UNSUPPORTED_PARAMETER', 400, `messages.${key}`);
     if (message.annotations !== undefined) {
       if (role !== 'assistant') fail('UNSUPPORTED_ANNOTATIONS');
       validateReplayAnnotations(message.annotations, { chat: true });
@@ -273,7 +342,7 @@ export function normalizeChatRequest(payload) {
     if (role === 'assistant' && message.tool_calls !== undefined) {
       if (!Array.isArray(message.tool_calls) || !message.tool_calls.length || message.tool_calls.length > 32) fail('INVALID_TOOL_CALL');
       normalized.tool_calls = message.tool_calls.map(call => {
-        keys(call, ['id', 'type', 'function']); keys(call.function, ['name', 'arguments']);
+        keys(call, ['id', 'type', 'function'], 'messages.tool_calls'); keys(call.function, ['name', 'arguments'], 'messages.tool_calls.function');
         const callId = id(call.id);
         if (call.type !== 'function' || seen.has(callId)) fail('INVALID_TOOL_CALL');
         const args = parseBoundedJson(call.function.arguments);
@@ -292,18 +361,22 @@ export function normalizeChatRequest(payload) {
   if (pending.size) fail('PENDING_TOOL_CALLS');
   const body = { ...resolved, ...compat, ...(response_format ? { response_format } : {}), messages, tools: JSON.parse(JSON.stringify(tools)), tool_choice: plainObject(choice) ? { type: 'function', function: { name: policy.forced } } : choice };
   if (payload[RESPONSE_TOOL_IDENTITIES]) body[RESPONSE_TOOL_IDENTITIES] = payload[RESPONSE_TOOL_IDENTITIES];
-  if (payload.stream_options !== undefined) {
-    keys(payload.stream_options, ['include_usage']);
-    if (!resolved.stream || typeof payload.stream_options.include_usage !== 'boolean') fail('INVALID_STREAM_OPTIONS');
-    body.stream_options = { include_usage: payload.stream_options.include_usage };
+  if (payload.stream_options !== undefined && payload.stream_options !== null) {
+    if (!plainObject(payload.stream_options)) fail('INVALID_STREAM_OPTIONS', 400, 'stream_options');
+    keys(payload.stream_options, ['include_usage'], 'stream_options');
+    if (payload.stream_options.include_usage !== undefined) {
+      if (!resolved.stream || typeof payload.stream_options.include_usage !== 'boolean') fail('INVALID_STREAM_OPTIONS', 400, 'stream_options');
+      body.stream_options = { include_usage: payload.stream_options.include_usage };
+    }
   }
   buildCanonicalPrompt(body); // Validate budgets BEFORE any account reservation.
   return body;
 }
 
 export function normalizeResponsesRequest(payload) {
-  keys(payload, ['model', 'input', 'instructions', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'temperature', 'top_p', 'max_output_tokens', 'text']);
+  keys(payload, ['model', 'input', 'instructions', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'temperature', 'top_p', 'max_output_tokens', 'text', 'user', 'metadata', 'service_tier', 'truncation']);
   requestBudget(payload);
+  validateInertOpenAIFields(payload, { responses: true });
   const compat = compatibility(payload, true);
   const resolved = settings(payload);
   const response_format = normalizeResponsesText(payload.text);
@@ -315,8 +388,8 @@ export function normalizeResponsesRequest(payload) {
   for (const item of input) {
     if (!plainObject(item)) fail('INVALID_INPUT_ITEM');
     if (item.type === 'function_call') {
-      keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'arguments', 'parsed_arguments']);
-      if (item.parsed_arguments !== undefined && item.parsed_arguments !== null) fail('UNSUPPORTED_PARAMETER');
+      keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'arguments', 'parsed_arguments'], 'input');
+      if (item.parsed_arguments !== undefined && item.parsed_arguments !== null) fail('UNSUPPORTED_PARAMETER', 400, 'input.parsed_arguments');
       if (item.id !== undefined) id(item.id);
       if (item.status !== undefined && item.status !== 'completed') fail('INVALID_INPUT_STATUS');
       const call = { id: id(item.call_id), type: 'function', function: { name: callName(item.name, item.namespace), arguments: item.arguments } };
@@ -324,19 +397,19 @@ export function normalizeResponsesRequest(payload) {
       if (previous?.role === 'assistant') (previous.tool_calls ??= []).push(call);
       else messages.push({ role: 'assistant', content: null, tool_calls: [call] });
     } else if (item.type === 'function_call_output') {
-      keys(item, ['type', 'id', 'call_id', 'output']);
+      keys(item, ['type', 'id', 'call_id', 'output'], 'input');
       if (item.id !== undefined) id(item.id);
       messages.push({ role: 'tool', tool_call_id: id(item.call_id), content: text(item.output) });
     } else if (item.type === 'input_text') {
-      keys(item, ['type', 'text']); messages.push({ role: 'user', content: text(item.text) });
+      keys(item, ['type', 'text'], 'input'); messages.push({ role: 'user', content: text(item.text) });
     } else if (item.type === 'input_image') {
-      messages.push({ role: 'user', content: content([item], { user: true, responses: true }) });
+      messages.push({ role: 'user', content: content([item], { user: true, responses: true, prefix: 'input' }) });
     } else {
-      keys(item, ['type', 'id', 'status', 'role', 'content']);
+      keys(item, ['type', 'id', 'status', 'role', 'content'], 'input');
       if (item.type !== undefined && item.type !== 'message') fail('UNSUPPORTED_INPUT_TYPE');
       if (item.id !== undefined) id(item.id);
       if (item.status !== undefined && (item.role !== 'assistant' || item.status !== 'completed')) fail('INVALID_INPUT_STATUS');
-      messages.push({ role: item.role, content: content(item.content, { assistant: item.role === 'assistant', user: item.role === 'user', responses: true }) });
+      messages.push({ role: item.role, content: content(item.content, { assistant: item.role === 'assistant', user: item.role === 'user', responses: true, prefix: 'input.content' }) });
     }
   }
   const { include: _include, ...inertCompat } = compat;

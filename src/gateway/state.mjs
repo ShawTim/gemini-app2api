@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 export function fault(code, status = 400) {
   return Object.assign(new Error(code), { code, status });
@@ -153,12 +154,181 @@ function maskKey(secret) {
     ? `${secret.slice(0, 6)}••••••${secret.slice(-4)}`
     : "••••••••";
 }
+function tryAcquireDirFlock(dirFd, customHelper = null) {
+  let result;
+  if (customHelper !== null) {
+    if (!customHelper || typeof customHelper.command !== "string") {
+      return "unsupported";
+    }
+    result = spawnSync(customHelper.command, customHelper.args ?? [], {
+      stdio: ["ignore", "ignore", "ignore", dirFd],
+      timeout: 5000,
+    });
+  } else if (process.platform === "linux") {
+    result = spawnSync("/usr/bin/flock", ["-n", "-E", "75", "3"], {
+      stdio: ["ignore", "ignore", "ignore", dirFd],
+      timeout: 5000,
+    });
+    if (result.error?.code === "ENOENT") {
+      result = spawnSync("/bin/flock", ["-n", "-E", "75", "3"], {
+        stdio: ["ignore", "ignore", "ignore", dirFd],
+        timeout: 5000,
+      });
+    }
+  } else if (process.platform === "darwin") {
+    result = spawnSync(
+      "/usr/bin/perl",
+      [
+        "-e",
+        "use Fcntl qw(:flock); use Errno qw(EWOULDBLOCK EAGAIN); open my $fh, q(<&=), 3 or exit 2; flock($fh, LOCK_EX | LOCK_NB) and exit 0; exit(($! == EWOULDBLOCK || $! == EAGAIN) ? 75 : 3);",
+      ],
+      { stdio: ["ignore", "ignore", "ignore", dirFd], timeout: 5000 },
+    );
+  } else {
+    return "unsupported";
+  }
+  if (result.error?.code === "ENOENT") return "unsupported";
+  if (!result.error && !result.signal && result.status === 0) return "acquired";
+  if (!result.error && !result.signal && result.status === 75) return "contended";
+  return "failed";
+}
+function isLiveLegacyPidOwner(pid, stat, file) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH" || error?.code === "EPERM") return false;
+    return true;
+  }
+  if (process.platform === "linux") {
+    try {
+      const pstat = fs.statSync(`/proc/${pid}`);
+      if (
+        typeof process.getuid === "function" &&
+        pstat.uid !== process.getuid()
+      ) {
+        return false;
+      }
+      const statText = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const rparen = statText.lastIndexOf(")");
+      const stateChar =
+        rparen >= 0 ? statText.slice(rparen + 2, rparen + 3) : "";
+      if (stateChar === "Z" || stateChar === "X") return false;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ESRCH") return false;
+      return true;
+    }
+    try {
+      const fds = fs.readdirSync(`/proc/${pid}/fd`);
+      for (const entry of fds) {
+        try {
+          const fdStat = fs.statSync(`/proc/${pid}/fd/${entry}`);
+          if (fdStat.dev === stat.dev && fdStat.ino === stat.ino) return true;
+        } catch {}
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ESRCH") return false;
+      return true;
+    }
+    try {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      if (!cmdline) return false;
+      return cmdline
+        .split("\0")
+        .filter(Boolean)
+        .some((arg) => /(?:^|\/)gemini-gateway$|gateway-server\.mjs/.test(arg));
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ESRCH") return false;
+      return true;
+    }
+  }
+  if (process.platform === "darwin") {
+    const lsof = spawnSync(
+      "/usr/sbin/lsof",
+      ["-n", "-P", "-w", "-a", "-p", String(pid), "--", file],
+      { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (!lsof.error && lsof.status === 0 && lsof.stdout.trim().length > 0) {
+      return true;
+    }
+    const ps = spawnSync(
+      "/bin/ps",
+      ["-p", String(pid), "-o", "uid=,stat=,command="],
+      { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (ps.error || ps.signal) return true;
+    const trimmed = (ps.stdout ?? "").trim();
+    if (!trimmed) return false;
+    const match = trimmed.match(/^(\d+)\s+(\S+)\s*(.*)$/);
+    if (!match) return true;
+    const [, uidStr, stateStr, command] = match;
+    if (
+      typeof process.getuid === "function" &&
+      Number(uidStr) !== process.getuid()
+    ) {
+      return false;
+    }
+    if (
+      /[ZX]/.test(stateStr) ||
+      !command ||
+      /^(?:\([^)]+\)|<defunct>|<exiting>)$/.test(command.trim())
+    ) {
+      return false;
+    }
+    return /(?:^|\/)gemini-gateway\b|gateway-server\.mjs/.test(command);
+  }
+  return true;
+}
+function verifyAndClearStalePidFile(file) {
+  const readFlags =
+    fs.constants.O_RDONLY |
+    (fs.constants.O_NOFOLLOW ?? 0) |
+    (fs.constants.O_NONBLOCK ?? 0);
+  let staleFd;
+  try {
+    staleFd = fs.openSync(file, readFlags);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw fault("STATE_IN_USE", 503);
+  }
+  try {
+    const stat = fs.fstatSync(staleFd);
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+      (stat.mode & 0o077) ||
+      stat.size === 0 ||
+      stat.size > 64
+    ) {
+      throw fault("STATE_IN_USE", 503);
+    }
+    const raw = fs.readFileSync(staleFd, "utf8").trim();
+    if (!/^[1-9][0-9]{0,9}$/.test(raw)) {
+      throw fault("STATE_IN_USE", 503);
+    }
+    const pid = Number(raw);
+    if (!Number.isSafeInteger(pid)) {
+      throw fault("STATE_IN_USE", 503);
+    }
+    if (pid !== process.pid && isLiveLegacyPidOwner(pid, stat, file)) {
+      throw fault("STATE_IN_USE", 503);
+    }
+  } finally {
+    fs.closeSync(staleFd);
+  }
+  try {
+    fs.unlinkSync(file);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw fault("STATE_IN_USE", 503);
+  }
+}
 export class StateStore {
   constructor({
     directory = process.env.GATEWAY_DATA_DIR ||
       path.join(os.homedir(), ".gemini-app2api"),
     adminPassword = process.env.GATEWAY_ADMIN_PASSWORD,
     defaultProfile = DEFAULT_OAUTH_PROFILE,
+    flockHelper = null,
   } = {}) {
     const fallbackProfile = resolveDefaultOAuthProfile(defaultProfile);
     this.directory = path.resolve(directory);
@@ -179,6 +349,9 @@ export class StateStore {
     }
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     checkFile(this.directory, true);
+    this.flockHelper = flockHelper;
+    this.lockFd = undefined;
+    this.pidLockIdentity = null;
     this.locked = false;
     this.closed = false;
     if (fs.existsSync(this.file)) {
@@ -218,31 +391,117 @@ export class StateStore {
     }
   }
   lock() {
-    const file = path.join(this.directory, "runtime.lock");
-    let fd;
+    if (this.locked) throw fault("STATE_IN_USE", 503);
+    let dirFd;
     try {
-      fd = fs.openSync(file, "wx", 0o600);
-      fs.writeFileSync(fd, String(process.pid));
-      this.lockFd = fd;
-      this.locked = true;
-      this.closed = false;
-    } catch {
-      if (fd !== undefined) {
-        try { fs.closeSync(fd); } catch {}
-        try { fs.unlinkSync(file); } catch {}
+      dirFd = fs.openSync(
+        this.directory,
+        fs.constants.O_RDONLY |
+          (fs.constants.O_DIRECTORY ?? 0) |
+          (fs.constants.O_NOFOLLOW ?? 0),
+      );
+    } catch (error) {
+      if (
+        error?.code === "ELOOP" ||
+        error?.code === "ENOTDIR" ||
+        error?.code === "EFTYPE"
+      ) {
+        throw fault("UNSAFE_STATE_PERMISSIONS", 503);
       }
       throw fault("STATE_IN_USE", 503);
+    }
+    try {
+      const dirStat = fs.fstatSync(dirFd);
+      if (
+        !dirStat.isDirectory() ||
+        (typeof process.getuid === "function" &&
+          dirStat.uid !== process.getuid()) ||
+        (dirStat.mode & 0o077)
+      ) {
+        throw fault("UNSAFE_STATE_PERMISSIONS", 503);
+      }
+      const flockStatus = tryAcquireDirFlock(dirFd, this.flockHelper);
+      if (flockStatus === "contended") {
+        throw fault("STATE_IN_USE", 503);
+      }
+      if (flockStatus !== "acquired") {
+        throw fault("STATE_LOCK_UNAVAILABLE", 503);
+      }
+      const file = path.join(this.directory, "runtime.lock");
+      verifyAndClearStalePidFile(file);
+      const createFlags =
+        fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        (fs.constants.O_NOFOLLOW ?? 0);
+      let pidFd;
+      let identity;
+      let createdPidFile = false;
+      try {
+        pidFd = fs.openSync(file, createFlags, 0o600);
+        createdPidFile = true;
+        fs.fchmodSync(pidFd, 0o600);
+        fs.writeFileSync(pidFd, String(process.pid));
+        fs.fsyncSync(pidFd);
+        const pidStat = fs.fstatSync(pidFd);
+        identity = { dev: pidStat.dev, ino: pidStat.ino };
+      } catch {
+        if (createdPidFile) {
+          try { fs.unlinkSync(file); } catch {}
+        }
+        throw fault("STATE_IN_USE", 503);
+      } finally {
+        if (pidFd !== undefined) {
+          try { fs.closeSync(pidFd); } catch {}
+        }
+      }
+      try {
+        fs.fsyncSync(dirFd);
+      } catch {}
+      this.lockFd = dirFd;
+      dirFd = undefined;
+      this.pidLockIdentity = identity;
+      this.locked = true;
+      this.closed = false;
+    } finally {
+      if (dirFd !== undefined) {
+        try { fs.closeSync(dirFd); } catch {}
+      }
     }
   }
   unlock() {
     this.closed = true;
-    if (this.locked) {
+    if (!this.locked) return;
+    const dirFd = this.lockFd;
+    const expected = this.pidLockIdentity;
+    const file = path.join(this.directory, "runtime.lock");
+    this.lockFd = undefined;
+    this.pidLockIdentity = null;
+    this.locked = false;
+    try {
+      let cur;
       try {
-        fs.closeSync(this.lockFd);
-      } finally {
-        this.lockFd = undefined;
-        this.locked = false;
-        fs.unlinkSync(path.join(this.directory, "runtime.lock"));
+        cur = fs.lstatSync(file);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      if (
+        cur &&
+        !cur.isSymbolicLink() &&
+        cur.isFile() &&
+        expected &&
+        cur.dev === expected.dev &&
+        cur.ino === expected.ino
+      ) {
+        try {
+          fs.unlinkSync(file);
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      }
+    } finally {
+      if (dirFd !== undefined) {
+        fs.closeSync(dirFd);
       }
     }
   }

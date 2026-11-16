@@ -45,6 +45,10 @@ try {
       { FIXTURE_KEY: f.key.key, FIXTURE_BASE: f.base },
     ),
   );
+  const seenWire = JSON.stringify(f.seen);
+  for (const marker of ["sdk-user-1", "python-sdk", "sdk_caller", "中文"]) {
+    assert.equal(seenWire.includes(marker), false, `inert Python SDK marker leaked to wire: ${marker}`);
+  }
 } finally {
   await f.close();
 }

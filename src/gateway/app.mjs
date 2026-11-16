@@ -188,10 +188,18 @@ export function errorPayload(error) {
   const toolProtocolReason = (code === 'MALFORMED_TOOL_CALL' || previousCode === 'MALFORMED_TOOL_CALL') &&
     ['opening_fence', 'closing_fence'].includes(toolReason) ? toolReason : null;
   const terminal = code === 'GENERATION_FAILED' && error?.terminalNoOutput === true;
+  const param =
+    typeof error?.param === "string" &&
+    /^[A-Za-z0-9_.\[\]-]{1,160}$/.test(error.param)
+      ? error.param
+      : null;
   return {
     error: {
       message: terminal ? 'Generation ended without output. Gateway recovery is exhausted; this turn has failed.'
-        : code === 'MALFORMED_TOOL_CALL' && toolProtocolReason ? `${code}: invalid ${toolProtocolReason} layout. No tool call was released.` : code,
+        : code === 'MALFORMED_TOOL_CALL' && toolProtocolReason ? `${code}: invalid ${toolProtocolReason} layout. No tool call was released.`
+        : code === 'UNSUPPORTED_PARAMETER' && param ? `UNSUPPORTED_PARAMETER: ${param}`
+        : code === 'UNSUPPORTED_MODEL' ? 'UNSUPPORTED_MODEL: supported models are gemini-argon, gemini-hydrogen, gemini-flash-lite'
+        : code,
       type:
         terminal ? "server_error" : error?.status === 401
           ? "authentication_error"
@@ -199,7 +207,7 @@ export function errorPayload(error) {
           : error?.status < 500
             ? "invalid_request_error"
             : "server_error",
-      param: null,
+      param,
       code,
       ...(terminal ? { terminal: true, retryable: false, client_action: 'stop_turn',
         upstream_code: error.upstreamCode, upstream_status: error.upstreamStatus } : {}),
@@ -245,8 +253,12 @@ async function readJson(req, limit) {
   }
 }
 function only(obj, keys) {
-  if (Object.keys(obj).some((k) => !keys.includes(k)))
-    throw fault("UNSUPPORTED_PARAMETER");
+  const unexpected = Object.keys(obj).find((k) => !keys.includes(k));
+  if (unexpected !== undefined) {
+    const error = fault("UNSUPPORTED_PARAMETER");
+    if (/^[A-Za-z0-9_.-]{1,64}$/.test(unexpected)) error.param = unexpected;
+    throw error;
+  }
 }
 export function createGateway({
   store,

@@ -20,7 +20,8 @@
 | `QUOTA_REFRESH_THROTTLED` / `SUBSCRIPTION_REFRESH_THROTTLED` | `429` | 同一帳戶在 `30` 秒內已完成過額度或訂閱查詢時，不重複發起新查詢（若前一查詢仍在進行中，則共用同一個 Promise）。 | `30` 秒節流視窗到期（單次查詢另有 `15` 秒期限）。 | [`accounts.mjs`](../src/gateway/accounts.mjs) |
 | `PROFILE_CHANGE_REQUIRES_EMPTY_ACCOUNTS` | `409` | 已存有任何帳戶紀錄時，拒絕更換 OAuth client profile，避免憑證與既有 refresh token 不一致。 | 先移除既有帳戶紀錄後再匯入新 profile。 | [`state.mjs`](../src/gateway/state.mjs) |
 | `ACCOUNT_LIMIT` / `KEY_LIMIT` | `409` | 帳戶總數上限 `64`（含停用帳戶）；API key 紀錄上限 `256`（含已撤銷紀錄，列表僅顯示有效金鑰）。 | 移除不再需要的帳戶紀錄，或初始化新 state。 | [`state.mjs`](../src/gateway/state.mjs) |
-| `STATE_IN_USE` | `503` | 同一 `GATEWAY_DATA_DIR` 已被另一個執行中的程序持有排他 `runtime.lock`。此為啟動／目錄級別保護，並非單一 API 請求鎖。 | 原持有程序正常關閉釋放鎖檔。 | [`state.mjs`](../src/gateway/state.mjs) |
+| `STATE_IN_USE` | `503` | 同一 `GATEWAY_DATA_DIR` 已被另一個執行中的程序持有系統核心目錄鎖（或同主機上尚未升級之 `<= v1.3.3` 舊版程序持有 PID 鎖），或 `runtime.lock` 為不安全／異常檔案物件（symlink、hardlink、FIFO、非 PID 內容、錯誤擁有者／權限）；此為啟動／目錄級別保護，並非單一 API 請求鎖。 | 原持有程序關閉釋放鎖檔（`SIGKILL` 或同核心鎖世代容器重啟遺留的死亡程序 `0600` PID `runtime.lock` 會在啟動時自動回收；跨容器由 `<= v1.3.3` 共卷升級前須先停止舊容器）。 | [`state.mjs`](../src/gateway/state.mjs) |
+| `STATE_LOCK_UNAVAILABLE` | `503` | 主機或容器缺少必要的系統核心 `flock(2)` 工具（Linux `/usr/bin/flock` 或 `/bin/flock`，macOS `/usr/bin/perl`），無法建立防競爭目錄鎖。閘道採 fail-closed 原則拒絕降級為不安全的純 PID 鎖。 | 在具備對應 `flock` 工具的支援環境執行。 | [`state.mjs`](../src/gateway/state.mjs) |
 
 ### 明確不採用的人為限制（Non-locks by Design）
 

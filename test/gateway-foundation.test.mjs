@@ -677,3 +677,287 @@ test("default OAuth profile enables fresh installs and heals legacy null-profile
     );
   }
 });
+
+test("runtime lock uses kernel directory locking across threads/processes, races safely, fails closed on unsafe locks, and preserves unlock ownership", async (t) => {
+  const { spawn, spawnSync } = await import("node:child_process");
+  const { Worker } = await import("node:worker_threads");
+  const { pathToFileURL } = await import("node:url");
+  const stateModuleUrl = pathToFileURL(
+    path.resolve(import.meta.dirname, "../src/gateway/state.mjs"),
+  ).href;
+  const dir = root();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const s = new StateStore({ directory: dir, adminPassword: "fixture-password-not-real" });
+  const other = new StateStore({ directory: dir });
+  const lockFile = path.join(dir, "runtime.lock");
+
+  // 1. Dead PID & same-PID (reused container PID) stale runtime.lock files are reclaimed and unlock leaves clean dir.
+  const dead = spawnSync(process.execPath, ["-e", ""], { env: {} }).pid;
+  fs.writeFileSync(lockFile, String(dead), { mode: 0o600 });
+  s.lock();
+  assert.equal(fs.readFileSync(lockFile, "utf8"), String(process.pid));
+  s.unlock();
+  assert.deepEqual(fs.readdirSync(dir), ["state.json"]);
+
+  fs.writeFileSync(lockFile, String(process.pid), { mode: 0o600 });
+  s.lock();
+  assert.equal(fs.readFileSync(lockFile, "utf8"), String(process.pid));
+
+  // 2. Worker thread cannot acquire the lock while main thread holds it, and can once released.
+  const runWorkerLock = () =>
+    new Promise((resolve, reject) => {
+      const worker = new Worker(
+        `
+        import { parentPort, workerData } from "node:worker_threads";
+        import { StateStore } from ${JSON.stringify(stateModuleUrl)};
+        const store = new StateStore({ directory: workerData.dir });
+        try {
+          store.lock();
+          store.unlock();
+          parentPort.postMessage({ ok: true });
+        } catch (error) {
+          parentPort.postMessage({ ok: false, code: error?.code ?? null });
+        }
+        `,
+        { eval: true, workerData: { dir } },
+      );
+      worker.once("message", resolve);
+      worker.once("error", reject);
+    });
+  assert.deepEqual(await runWorkerLock(), { ok: false, code: "STATE_IN_USE" });
+
+  // 3. Stale/repeated unlock() never steals or deletes a later holder's runtime.lock.
+  s.unlock();
+  other.lock();
+  const lockStat = fs.lstatSync(lockFile);
+  s.unlock();
+  assert.equal(fs.existsSync(lockFile), true);
+  assert.equal(fs.lstatSync(lockFile).ino, lockStat.ino);
+  assert.throws(() => new StateStore({ directory: dir }).lock(), (e) => e.code === "STATE_IN_USE");
+  other.unlock();
+  assert.deepEqual(await runWorkerLock(), { ok: true });
+
+  // 4. Live external child holding StateStore.lock() blocks parent until SIGKILL, then parent auto-reclaims stale file.
+  const holder = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+      import { StateStore } from ${JSON.stringify(stateModuleUrl)};
+      const st = new StateStore({ directory: process.argv[1] });
+      st.lock();
+      process.stdout.write("LOCKED\\n");
+      setInterval(() => {}, 10000);
+      `,
+      dir,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  t.after(() => { try { holder.kill("SIGKILL"); } catch {} });
+  await new Promise((resolve, reject) => {
+    let out = "";
+    holder.stdout.on("data", (c) => {
+      out += c;
+      if (out.includes("LOCKED\n")) resolve();
+    });
+    holder.once("exit", (code) => reject(new Error(`holder exited early: ${code}`)));
+  });
+  assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+  holder.kill("SIGKILL");
+  await new Promise((resolve) => holder.once("exit", resolve));
+  assert.equal(fs.existsSync(lockFile), true);
+  s.lock();
+  s.unlock();
+  assert.deepEqual(fs.readdirSync(dir), ["state.json"]);
+
+  // 5. 4-way concurrent reclaim race on a stale runtime.lock yields exactly 1 winner and 3 STATE_IN_USE losers.
+  fs.writeFileSync(lockFile, String(dead), { mode: 0o600 });
+  const racers = Array.from({ length: 4 }, () =>
+    spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+        import { StateStore } from ${JSON.stringify(stateModuleUrl)};
+        const st = new StateStore({ directory: process.argv[1] });
+        process.send({ type: "ready" });
+        process.once("message", (msg) => {
+          if (msg !== "go") return;
+          try {
+            st.lock();
+            process.send({ type: "result", ok: true, pid: process.pid });
+          } catch (error) {
+            process.send({ type: "result", ok: false, code: error?.code ?? null });
+            process.exit(0);
+          }
+        });
+        `,
+        dir,
+      ],
+      { stdio: ["ignore", "pipe", "pipe", "ipc"] },
+    ),
+  );
+  t.after(() => {
+    for (const r of racers) {
+      try { r.kill("SIGKILL"); } catch {}
+    }
+  });
+  const results = await new Promise((resolve, reject) => {
+    const out = [];
+    let readyCount = 0;
+    for (const r of racers) {
+      r.on("message", (msg) => {
+        if (msg?.type === "ready") {
+          readyCount++;
+          if (readyCount === racers.length) {
+            for (const target of racers) target.send("go");
+          }
+        } else if (msg?.type === "result") {
+          out.push({ child: r, ...msg });
+          if (out.length === racers.length) resolve(out);
+        }
+      });
+      r.once("error", reject);
+    }
+  });
+  const winners = results.filter((r) => r.ok);
+  const losers = results.filter((r) => !r.ok);
+  assert.equal(winners.length, 1);
+  assert.equal(losers.length, 3);
+  assert.ok(losers.every((r) => r.code === "STATE_IN_USE"));
+  assert.equal(fs.readFileSync(lockFile, "utf8"), String(winners[0].pid));
+  winners[0].child.kill("SIGKILL");
+  await new Promise((resolve) => winners[0].child.once("exit", resolve));
+  s.lock();
+  s.unlock();
+
+  // 6. Symlink, hardlink, permissive mode, oversized lock, and FIFO all fail closed without unlinking targets.
+  const target = path.join(dir, "do-not-delete.txt");
+  fs.writeFileSync(target, String(dead), { mode: 0o600 });
+  fs.symlinkSync(target, lockFile);
+  assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+  assert.equal(fs.existsSync(target), true);
+  fs.unlinkSync(lockFile);
+
+  fs.linkSync(target, lockFile);
+  assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+  assert.equal(fs.existsSync(lockFile), true);
+  fs.unlinkSync(lockFile);
+  fs.unlinkSync(target);
+
+  fs.writeFileSync(lockFile, String(dead), { mode: 0o644 });
+  assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+  assert.equal(fs.existsSync(lockFile), true);
+  fs.unlinkSync(lockFile);
+
+  fs.writeFileSync(lockFile, "1".repeat(100), { mode: 0o600 });
+  assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+  assert.equal(fs.existsSync(lockFile), true);
+  fs.unlinkSync(lockFile);
+
+  const fifo = spawnSync("mkfifo", ["-m", "0600", lockFile]);
+  if (fifo.status === 0) {
+    const startedAt = Date.now();
+    assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+    assert.ok(Date.now() - startedAt < 1000, "FIFO lock must not block");
+    assert.equal(fs.existsSync(lockFile), true);
+    fs.unlinkSync(lockFile);
+  }
+
+  // 7. Missing or unusable kernel flock helper fails closed (STATE_LOCK_UNAVAILABLE) without PID fallback.
+  const noHelper = new StateStore({
+    directory: dir,
+    flockHelper: { command: "/nonexistent/flock-binary", args: [] },
+  });
+  assert.throws(
+    () => noHelper.lock(),
+    (e) => e.code === "STATE_LOCK_UNAVAILABLE" && e.status === 503,
+  );
+  assert.equal(fs.existsSync(lockFile), false);
+  const unsupportedHelper = new StateStore({ directory: dir, flockHelper: false });
+  assert.throws(
+    () => unsupportedHelper.lock(),
+    (e) => e.code === "STATE_LOCK_UNAVAILABLE" && e.status === 503,
+  );
+  assert.equal(fs.existsSync(lockFile), false);
+
+  // 8. Live pre-flock legacy PID-only holder holding runtime.lock open blocks lock(); dead PID or invalid PID content fails closed properly.
+  const legacyHolder = spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+      const fs = require("node:fs");
+      const fd = fs.openSync(process.argv[1], "wx", 0o600);
+      fs.writeFileSync(fd, String(process.pid));
+      process.stdout.write("LEGACY_LOCKED\\n");
+      setInterval(() => {}, 10000);
+      `,
+      lockFile,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  t.after(() => { try { legacyHolder.kill("SIGKILL"); } catch {} });
+  await new Promise((resolve, reject) => {
+    let out = "";
+    legacyHolder.stdout.on("data", (c) => {
+      out += c;
+      if (out.includes("LEGACY_LOCKED\n")) resolve();
+    });
+    legacyHolder.once("exit", (code) => reject(new Error(`legacy holder exited early: ${code}`)));
+  });
+  assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+  assert.equal(fs.readFileSync(lockFile, "utf8"), String(legacyHolder.pid));
+  legacyHolder.kill("SIGKILL");
+  await new Promise((resolve) => legacyHolder.once("exit", resolve));
+  s.lock();
+  s.unlock();
+
+  for (const badContent of ["", "not-a-pid"]) {
+    fs.writeFileSync(lockFile, badContent, { mode: 0o600 });
+    assert.throws(() => s.lock(), (e) => e.code === "STATE_IN_USE");
+    assert.equal(fs.existsSync(lockFile), true);
+    fs.unlinkSync(lockFile);
+  }
+
+  // 9. In-lock inode replacement leaves the swapped runtime.lock untouched when unlock() runs.
+  s.lock();
+  const swapFile = path.join(dir, "runtime.lock.swap");
+  fs.writeFileSync(swapFile, "99999", { mode: 0o600 });
+  const replacedIno = fs.lstatSync(swapFile).ino;
+  assert.notEqual(replacedIno, fs.lstatSync(lockFile).ino);
+  fs.renameSync(swapFile, lockFile);
+  s.unlock();
+  assert.equal(fs.existsSync(lockFile), true);
+  assert.equal(fs.lstatSync(lockFile).ino, replacedIno);
+  fs.unlinkSync(lockFile);
+
+  // 10. Repeated lock/unlock and failed attempts leak zero file descriptors and enforce O_CLOEXEC.
+  const fdDir = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+  const countFds = () => (fs.existsSync(fdDir) ? fs.readdirSync(fdDir).length : null);
+  const beforeFds = countFds();
+  for (let i = 0; i < 10; i++) {
+    s.lock();
+    if (i === 0) {
+      const heldFd = s.lockFd;
+      assert.equal(Number.isInteger(heldFd) && heldFd > 2, true);
+      const cloexec = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          "try{require('fs').fstatSync(Number(process.argv[1]));process.exit(2)}catch(e){process.exit(e.code==='EBADF'?0:3)}",
+          String(heldFd),
+        ],
+        { stdio: "ignore" },
+      );
+      assert.equal(cloexec.status, 0, "dirFd must have O_CLOEXEC and not leak into child processes");
+    }
+    assert.throws(() => other.lock(), (e) => e.code === "STATE_IN_USE");
+    assert.throws(() => noHelper.lock(), (e) => e.code === "STATE_LOCK_UNAVAILABLE");
+    s.unlock();
+  }
+  const afterFds = countFds();
+  if (beforeFds !== null) assert.equal(afterFds, beforeFds);
+});

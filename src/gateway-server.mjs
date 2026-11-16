@@ -1,9 +1,34 @@
 #!/usr/bin/env node
 /** Product entry. Does not import the legacy server, IPC bridge or account store. */
+import fs from "node:fs";
 import { StateStore, validateSettings, fault } from "./gateway/state.mjs";
 import { createGateway, parseProbeHosts } from "./gateway/app.mjs";
 import { loadLocalEnvironment } from "./gateway/environment.mjs";
 import { parseRoutingAccountIds } from './gateway/routing-policy.mjs';
+
+async function closeBounded(instance, timeoutMs = 7000) {
+  if (!instance) return { ok: true, timedOut: false };
+  let timer;
+  let timedOut = false;
+  const closing = Promise.resolve()
+    .then(() => instance.close())
+    .then(() => ({ ok: true }))
+    .catch(() => ({ ok: false }));
+  try {
+    const result = await Promise.race([
+      closing,
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve({ ok: false });
+        }, timeoutMs);
+      }),
+    ]);
+    return { ok: result.ok && !timedOut, timedOut };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 let store, app;
 try {
@@ -98,17 +123,66 @@ try {
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
-    await app.close();
-    store.unlock();
+    let closeResult = { ok: true, timedOut: false };
+    let unlockFailed = false;
+    try {
+      closeResult = await closeBounded(app, 7000);
+    } finally {
+      try {
+        store.unlock();
+      } catch {
+        unlockFailed = true;
+      }
+    }
+    if (!closeResult.ok || unlockFailed) {
+      const code = closeResult.timedOut
+        ? "SHUTDOWN_TIMEOUT"
+        : unlockFailed
+          ? "UNLOCK_FAILED"
+          : "CLOSE_FAILED";
+      try {
+        fs.writeSync(
+          2,
+          JSON.stringify({ event: "gateway.shutdown_failed", code }) + "\n",
+        );
+      } catch {}
+      process.exit(1);
+    }
   };
-  process.once("SIGINT", () => void shutdown());
-  process.once("SIGTERM", () => void shutdown());
+  const onSignal = () => {
+    void shutdown();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  process.on("SIGHUP", onSignal);
 } catch (error) {
-  if (app) await app.close().catch(() => {});
-  store?.unlock();
-  const code = /^[A-Z0-9_]+$/.test(error.code ?? "")
+  const startupClose = await closeBounded(app, 7000);
+  let startupUnlockFailed = false;
+  try {
+    store?.unlock();
+  } catch {
+    startupUnlockFailed = true;
+  }
+  const code = /^[A-Z0-9_]+$/.test(error?.code ?? "")
     ? error.code
     : "STARTUP_FAILED";
-  console.error(JSON.stringify({ event: "gateway.start_failed", code }));
+  try {
+    fs.writeSync(
+      2,
+      JSON.stringify({
+        event: "gateway.start_failed",
+        code,
+        ...(startupUnlockFailed ? { unlockFailed: true } : {}),
+        ...(!startupClose.ok
+          ? {
+              cleanupCode: startupClose.timedOut
+                ? "SHUTDOWN_TIMEOUT"
+                : "CLOSE_FAILED",
+            }
+          : {}),
+      }) + "\n",
+    );
+  } catch {}
   process.exitCode = 1;
+  if (!startupClose.ok || startupUnlockFailed) process.exit(1);
 }

@@ -9,14 +9,15 @@ import { compilePromptTools, validatePromptToolArguments } from './prompt-tool-s
 
 export const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 export class ProtocolError extends Error {
-  constructor(code, status = 400) {
+  constructor(code, status = 400, param = null) {
     super(status >= 500 || status === 429 || status === 499 ? 'Native response failed verification' : 'Unsupported or invalid request');
     this.code = code; this.status = status;
+    this.param = typeof param === 'string' ? param : null;
     this.type = status === 429 ? 'rate_limit_error' : status >= 500 || status === 499 ? 'api_error' : 'invalid_request_error';
   }
 }
-export const protocolError = (code, status = 400) => new ProtocolError(code, status);
-const fail = (code, status = 400) => { throw protocolError(code, status); };
+export const protocolError = (code, status = 400, param = null) => new ProtocolError(code, status, param);
+const fail = (code, status = 400, param = null) => { throw protocolError(code, status, param); };
 
 /** Bounded JSON parser: rejects duplicate keys, non-finite numbers and deep or
  * oversized trees, rather than silently overwriting ambiguous arguments. */

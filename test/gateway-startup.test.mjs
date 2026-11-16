@@ -7,6 +7,7 @@ import path from "node:path";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { pathToFileURL } from "node:url";
 import { StateStore } from "../src/gateway/state.mjs";
 const password = "synthetic-startup-password";
 function state(t) {
@@ -223,4 +224,128 @@ test('entry validates and applies GATEWAY_ALLOWED_PROBE_HOSTS', async (t) => {
   }
   running.child.kill('SIGTERM');
   assert.deepEqual(await running.exited, [0, null]);
+});
+
+test('entry auto-recovers stale runtime.lock after SIGKILL and releases lock cleanly on SIGHUP', async (t) => {
+  const directory = state(t);
+  const first = await launch(t, directory);
+  assert.equal(first.event.event, 'gateway.started');
+  assert.equal(fs.existsSync(path.join(directory, 'runtime.lock')), true);
+
+  first.child.kill('SIGKILL');
+  const [code, signal] = await first.exited;
+  assert.equal(code, null);
+  assert.equal(signal, 'SIGKILL');
+  assert.equal(fs.existsSync(path.join(directory, 'runtime.lock')), true);
+
+  const recovered = await launch(t, directory);
+  assert.equal(recovered.event.event, 'gateway.started');
+  assert.equal((await fetch(recovered.event.origin + '/health')).status, 200);
+
+  recovered.child.kill('SIGHUP');
+  assert.deepEqual(await recovered.exited, [0, null]);
+  assert.equal(fs.existsSync(path.join(directory, 'runtime.lock')), false);
+});
+
+test('repeated SIGTERM and SIGINT during in-flight connection drain do not bypass shutdown or leak runtime.lock', async (t) => {
+  const directory = state(t);
+  const running = await launch(t, directory);
+  const port = Number(new URL(running.event.origin).port);
+  const socket = net.connect(port, '127.0.0.1');
+  t.after(() => socket.destroy());
+  await once(socket, 'connect');
+  await new Promise((resolve) => {
+    socket.write(
+      `POST /admin/api/login HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: ${running.event.origin}\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{"password":`,
+      resolve,
+    );
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  running.child.kill('SIGTERM');
+  await new Promise((r) => setTimeout(r, 100));
+  running.child.kill('SIGINT');
+  await new Promise((r) => setTimeout(r, 100));
+  running.child.kill('SIGTERM');
+  assert.deepEqual(await running.exited, [0, null]);
+  assert.equal(fs.existsSync(path.join(directory, 'runtime.lock')), false);
+  assert.deepEqual(fs.readdirSync(directory), ['state.json']);
+});
+
+test('startup failure forces nonzero exit and unlocks state even when close() rejects or hangs with surviving handles', async (t) => {
+  const runFault = async (faultMode) => {
+    const directory = state(t);
+    const loaderDir = state(t);
+    const loaderFile = path.join(loaderDir, 'fault-loader.mjs');
+    fs.writeFileSync(
+      loaderFile,
+      `
+      import http from 'node:http';
+      setInterval(() => {}, 60000);
+      http.Server.prototype.listen = function () {
+        queueMicrotask(() => this.emit('error', Object.assign(new Error('EADDRINUSE'), { code: 'EADDRINUSE' })));
+        return this;
+      };
+      http.Server.prototype.close = function () {
+        if (process.env.SYNTHETIC_CLOSE_FAULT === 'throw') throw new Error('SYNTHETIC_CLOSE_REJECTED');
+        return this;
+      };
+      `,
+      { mode: 0o600 },
+    );
+    const envDir = state(t);
+    const envFile = path.join(envDir, '.env');
+    fs.writeFileSync(envFile, '# synthetic\n', { mode: 0o600 });
+    const env = { ...process.env };
+    for (const name of Object.keys(env)) {
+      if (name.startsWith('GATEWAY_') || name === 'PORT') delete env[name];
+    }
+    const startedAt = Date.now();
+    const child = spawn(
+      process.execPath,
+      [`--import=${pathToFileURL(loaderFile).href}`, 'src/gateway-server.mjs'],
+      {
+        env: {
+          ...env,
+          GATEWAY_DATA_DIR: directory,
+          GATEWAY_ENV_FILE: envFile,
+          GATEWAY_ADMIN_PASSWORD: password,
+          PORT: '0',
+          SYNTHETIC_CLOSE_FAULT: faultMode,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    });
+    let errors = '';
+    child.stderr.on('data', (chunk) => { errors += chunk; });
+    const [code, signal] = await Promise.race([
+      once(child, 'exit'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${faultMode} cleanup hung`)), 12000)),
+    ]);
+    return { elapsedMs: Date.now() - startedAt, code, signal, errors, directory };
+  };
+
+  const rejected = await runFault('throw');
+  assert.equal(rejected.code, 1);
+  assert.equal(rejected.signal, null);
+  assert.ok(rejected.elapsedMs < 3000, `rejected cleanup took too long: ${rejected.elapsedMs}ms`);
+  assert.deepEqual(JSON.parse(rejected.errors.trim()), {
+    event: 'gateway.start_failed',
+    code: 'EADDRINUSE',
+    cleanupCode: 'CLOSE_FAILED',
+  });
+  assert.equal(fs.existsSync(path.join(rejected.directory, 'runtime.lock')), false);
+
+  const hung = await runFault('hang');
+  assert.equal(hung.code, 1);
+  assert.equal(hung.signal, null);
+  assert.ok(hung.elapsedMs >= 6500 && hung.elapsedMs < 11000, `hung watchdog timing unexpected: ${hung.elapsedMs}ms`);
+  assert.deepEqual(JSON.parse(hung.errors.trim()), {
+    event: 'gateway.start_failed',
+    code: 'EADDRINUSE',
+    cleanupCode: 'SHUTDOWN_TIMEOUT',
+  });
+  assert.equal(fs.existsSync(path.join(hung.directory, 'runtime.lock')), false);
 });
