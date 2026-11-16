@@ -136,14 +136,16 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     if (!started && identity) meta = { ...meta, ...identity };
     if (!stream || started) return;
     started = true;
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
-      'X-Gemini-Usage': 'estimated',
-      'X-Requested-Thinking-Level': String(meta.requestedThinkingLevel ?? ''),
-      ...(Number.isSafeInteger(meta.thinkingLevel) ? { 'X-Thinking-Level': String(meta.thinkingLevel) } : {}),
-      ...(Number.isSafeInteger(meta.resolvedModeCategory) ? { 'X-Native-Mode': String(meta.resolvedModeCategory) } : {}),
-      ...(meta.requestedReasoningEffort === undefined ? {} : { 'X-Reasoning-Effort': meta.requestedReasoningEffort }),
-      ...(meta.ignoredTokenParameters?.length ? { 'X-Gemini-Token-Limit': 'not-enforced', 'X-Gemini-Ignored-Parameters': meta.ignoredTokenParameters.join(', ') } : {}) });
-    res.flushHeaders?.();
+    if (!res.headersSent) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
+        'X-Gemini-Usage': 'estimated',
+        'X-Requested-Thinking-Level': String(meta.requestedThinkingLevel ?? ''),
+        ...(Number.isSafeInteger(meta.thinkingLevel) ? { 'X-Thinking-Level': String(meta.thinkingLevel) } : {}),
+        ...(Number.isSafeInteger(meta.resolvedModeCategory) ? { 'X-Native-Mode': String(meta.resolvedModeCategory) } : {}),
+        ...(meta.requestedReasoningEffort === undefined ? {} : { 'X-Reasoning-Effort': meta.requestedReasoningEffort }),
+        ...(meta.ignoredTokenParameters?.length ? { 'X-Gemini-Token-Limit': 'not-enforced', 'X-Gemini-Ignored-Parameters': meta.ignoredTokenParameters.join(', ') } : {}) });
+      res.flushHeaders?.();
+    }
     if (route === 'chat') await sendChat({ role: 'assistant' });
     else { const initial = response('in_progress'); await sendResponse('response.created', { response: initial }); await sendResponse('response.in_progress', { response: initial }); }
   }
@@ -166,7 +168,10 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       const nextBytes = bytes + Buffer.byteLength(event.content);
       if (nextBytes > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
       bytes = nextBytes;
-      await start(event.response);
+      // Hold SSE headers and initial events behind the prefix gate when deferEmptyStart
+      // is enabled so a short-fragment failure never commits downstream headers before retry.
+      const holdPrefix = stream && deferEmptyStart && !started && !publishedLength && nextBytes < PREFIX_BYTES;
+      if (!holdPrefix) await start(event.response);
       content += event.content;
       if (!stream) return;
       // Hold a tiny prefix back until real output exists, so an interruption

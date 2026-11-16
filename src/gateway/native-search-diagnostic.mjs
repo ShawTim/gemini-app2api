@@ -31,6 +31,7 @@ const fail = (code, extra = {}) => ({
     "OAUTH_REFRESH_FAILED",
     "NATIVE_TURN_ABORTED",
     "NATIVE_STREAM_RESET",
+    "NATIVE_UPSTREAM_UNAVAILABLE",
   ].includes(code),
   citations: [],
   webSources: [],

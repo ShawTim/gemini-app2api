@@ -199,6 +199,7 @@ export function errorPayload(error) {
         : code === 'MALFORMED_TOOL_CALL' && toolProtocolReason ? `${code}: invalid ${toolProtocolReason} layout. No tool call was released.`
         : code === 'UNSUPPORTED_PARAMETER' && param ? `UNSUPPORTED_PARAMETER: ${param}`
         : code === 'UNSUPPORTED_MODEL' ? 'UNSUPPORTED_MODEL: supported models are gemini-argon, gemini-hydrogen, gemini-flash-lite'
+        : code === 'NATIVE_UPSTREAM_UNAVAILABLE' ? 'NATIVE_UPSTREAM_UNAVAILABLE: upstream Google service temporarily unavailable (HTTP 503 / gRPC UNAVAILABLE)'
         : code,
       type:
         terminal ? "server_error" : error?.status === 401
@@ -482,7 +483,7 @@ export function createGateway({
         catch (error) {
           // Only content the caller actually received commits this turn. A held
           // tiny prefix is still replaceable by one retry.
-          error.responseStarted = delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
+          error.responseStarted = res.headersSent === true || delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
           if (!error.responseStarted && !error.unverifiedOutput && delivery.retryableShortfall) error.shortOutput = true;
           const evidence = safeNativeEvidence(error.nativeEvidence);
           const failure = { accountId: acc, status: Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502,

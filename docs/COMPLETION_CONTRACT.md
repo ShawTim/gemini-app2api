@@ -116,6 +116,7 @@ The Status column lists internal failure status and, where applicable, the publi
 |---|---|---|---|---|
 | Upstream early EOF / reset | `NATIVE_STREAM_CLOSED_EARLY`, `NATIVE_STREAM_RESET` | Internal `502` → zero-output Chat `422` / Responses `400` | gateway | **D** via `GENERATION_FAILED`; partial output per §0 |
 | Connection / stream failure | `NATIVE_CONNECTION_FAILED`, `NATIVE_STREAM_FAILED` | Internal `502` → zero-output Chat `422` / Responses `400` | gateway | **D** via `GENERATION_FAILED` |
+| Upstream service unavailable | `NATIVE_UPSTREAM_UNAVAILABLE` | `503` (or `200` partial SSE with `incomplete: true` once committed) | operator / upstream | **D** — bounded failover runs when configured with eligible accounts and uncommitted downstream headers before returning `503` |
 | Transport timeout | `NATIVE_TRANSPORT_TIMEOUT` → `NATIVE_TURN_TIMEOUT` | Internal `504` → zero-output Chat `422` / Responses `400` | gateway | **D** via `GENERATION_FAILED` |
 | Protocol abnormality | `NATIVE_HTTP_REJECTED`, `NATIVE_INVALID_STATUS`, `NATIVE_FRAME_REJECTED`, `NATIVE_READER_BUSY` | `502` | gateway | **D** |
 | Deadline / turn timeout | `NATIVE_TURN_TIMEOUT` (internal `REQUEST_DEADLINE`) | Internal `504` → zero-output Chat `422` / Responses `400` | gateway | **D** via `GENERATION_FAILED`; never misreported as context overflow |

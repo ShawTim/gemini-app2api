@@ -20,7 +20,7 @@ const provider = { sessions: new Map(), async runTurn(account, body, onDelta) {
   if (spec.headers) await onDelta({ start: true, response: identity });
   if (spec.text !== undefined) await onDelta({ content: spec.text, response: identity });
   if (!spec.code) return { ...identity, content: spec.text ?? 'SYNTHETIC_OK', calls: [] };
-  const error = Object.assign(fault(spec.code, spec.status), { nativeEvidence: { phase: 'read', upstreamHttpStatus: 200, grpcStatus: null, observedMode: 8 } });
+  const error = Object.assign(fault(spec.code, spec.status), { nativeEvidence: { phase: 'read', upstreamHttpStatus: 200, grpcStatus: null, observedMode: 8, ...(spec.evidence ?? {}) } });
   if (spec.partial) error.partialResult = { ...identity, content: spec.partial, calls: [] };
   throw error;
 } };
@@ -49,10 +49,19 @@ try {
     cases++;
   }
   // Exclusions: client validation, quota, caller cancellation and unrelated defects.
-  for (const [code, status] of [['NATIVE_QUOTA_EXHAUSTED', 429], ['REQUEST_CANCELLED', 499], ['NATIVE_AUTH_FAILED', 503], ['INVALID_NATIVE_RESPONSE', 502]]) {
-    spec = { code, status, headers: false };
+  for (const [code, status, evidenceExtra] of [
+    ['NATIVE_QUOTA_EXHAUSTED', 429, {}],
+    ['REQUEST_CANCELLED', 499, {}],
+    ['NATIVE_AUTH_FAILED', 503, {}],
+    ['NATIVE_UPSTREAM_UNAVAILABLE', 503, { evidence: { phase: 'end', upstreamHttpStatus: 200, grpcStatus: 14 } }],
+    ['INVALID_NATIVE_RESPONSE', 502, {}],
+  ]) {
+    spec = { code, status, headers: false, ...evidenceExtra };
+    const before = attempts;
     const res = await request('chat', false), body = await res.json();
-    assert.equal(res.status, status); assert.equal(body.error.code, code); assert.equal(body.error.terminal, undefined); cases++;
+    assert.equal(res.status, status); assert.equal(body.error.code, code); assert.equal(body.error.terminal, undefined);
+    if (code === 'NATIVE_UPSTREAM_UNAVAILABLE') assert.equal(attempts - before, 2, 'bounded account recovery runs before 503 surface');
+    cases++;
   }
   spec = { code: 'NATIVE_STREAM_CLOSED_EARLY', status: 502, headers: true };
   const invalid = await request('chat', false, { invalid_field: true }); assert.equal(invalid.status, 400); assert.equal((await invalid.json()).error.code, 'UNSUPPORTED_PARAMETER'); cases++;

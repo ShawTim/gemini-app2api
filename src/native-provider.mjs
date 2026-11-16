@@ -88,6 +88,7 @@ function safeFailure(error) {
   if (error?.code === 'NATIVE_QUOTA_EXHAUSTED') return protocolError('NATIVE_QUOTA_EXHAUSTED', 429);
   if (error?.code === 'NATIVE_PERMISSION_OR_AUTH') return protocolError('NATIVE_PERMISSION_OR_AUTH', 403);
   if (error?.code === 'NATIVE_CREDENTIAL_REQUIRED') return protocolError('NATIVE_CREDENTIAL_REQUIRED', 503);
+  if (error?.code === 'NATIVE_UPSTREAM_UNAVAILABLE') return protocolError('NATIVE_UPSTREAM_UNAVAILABLE', 503);
   if (error?.code === 'ACCOUNT_LOGIN_REQUIRED') return protocolError('ACCOUNT_LOGIN_REQUIRED', 401);
   if (error?.code === 'OAUTH_REFRESH_FAILED') return protocolError('OAUTH_REFRESH_FAILED', 502);
   if (error?.code === 'REQUEST_CANCELLED') return protocolError('NATIVE_TURN_ABORTED', 499);
@@ -129,7 +130,7 @@ export class NativeDirectProvider {
     });
     if (!report.ok) {
       const status = ['NATIVE_RATE_LIMITED','NATIVE_QUOTA_EXHAUSTED'].includes(report.errorCode) ? 429
-        : report.errorCode === 'NATIVE_CREDENTIAL_REQUIRED' ? 503
+        : ['NATIVE_CREDENTIAL_REQUIRED', 'NATIVE_UPSTREAM_UNAVAILABLE'].includes(report.errorCode) ? 503
         : report.errorCode === 'NATIVE_TURN_TIMEOUT' ? 504
         : report.errorCode === 'NATIVE_TURN_ABORTED' ? 499
         : report.errorCode === 'ACCOUNT_LOGIN_REQUIRED' ? 401
@@ -365,6 +366,7 @@ export class NativeDirectProvider {
           if (event.httpStatus === 401 || grpc === 16) fail('NATIVE_AUTH_REJECTED');
           if (event.httpStatus === 403 || grpc === 7) fail('NATIVE_PERMISSION_REJECTED');
           if (event.httpStatus === 200 && grpc === 9) fail('NATIVE_PRECONDITION_REQUIRED');
+          if (event.httpStatus === 503 || grpc === 14) fail('NATIVE_UPSTREAM_UNAVAILABLE', 503);
           if (event.httpStatus !== 200 || (grpc !== null && grpc !== undefined && grpc !== 0)) fail('NATIVE_TURN_FAILED');
           break;
         } else fail('INVALID_NATIVE_EVENT');

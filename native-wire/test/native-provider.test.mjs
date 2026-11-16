@@ -140,10 +140,12 @@ test('nonmonotonic, malformed, native-tool, duplicate evidence and frame budgets
 });
 
 test('safe error classifications and no retry for auth, rate-limit or permission failure', async () => {
-  for (const [grpc, code, status] of [[8, 'NATIVE_RATE_LIMITED', 429], [16, 'NATIVE_AUTH_REJECTED', 502], [7, 'NATIVE_PERMISSION_REJECTED', 502]]) {
+  for (const [grpc, code, status] of [[8, 'NATIVE_RATE_LIMITED', 429], [16, 'NATIVE_AUTH_REJECTED', 502], [7, 'NATIVE_PERMISSION_REJECTED', 502], [14, 'NATIVE_UPSTREAM_UNAVAILABLE', 503]]) {
     const { p, state } = fixture([event(frame()), end(grpc)]);
     await rejects(p.runTurn('a', request()), code, status); assert.equal(state.opened, 1); assert.equal(state.cancelled, 1);
   }
+  await rejects(fixture([end(14)]).p.runTurn('a', request()), 'NATIVE_UPSTREAM_UNAVAILABLE', 503);
+  await rejects(fixture([end(0, 503)]).p.runTurn('a', request()), 'NATIVE_UPSTREAM_UNAVAILABLE', 503);
   const { p, state } = fixture([], { auth: async () => { throw new Error('fixture-token raw secrets'); } });
   await rejects(p.runTurn('a', request()), 'NATIVE_AUTH_FAILED', 503); assert.equal(state.opened, 0);
 });

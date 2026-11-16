@@ -2,7 +2,7 @@
 import http2 from "node:http2";
 import {GrpcMessageReader,frameGrpcMessage} from "../../native-wire/robin-current.mjs";
 export const QUOTA_ORIGIN = "https://robinfrontend-pa.googleapis.com";
-export const QUOTA_RPC = "/$rpc/assistant.mobile.robin.RobinService/GetUsageInfo";
+export const QUOTA_RPC = "/assistant.mobile.robin.RobinService/GetUsageInfo";
 const failure=(code,status=502)=>Object.assign(new Error(code),{code,status});
 export async function fetchGoogleUsageInfo(accessToken,{signal,timeoutMs=10000,connect=http2.connect}={}) {
   if(typeof accessToken!=="string"||!accessToken||accessToken.length>65536||/\s/.test(accessToken))throw failure("QUOTA_CREDENTIAL_REQUIRED",401);

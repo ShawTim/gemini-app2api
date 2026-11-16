@@ -19,7 +19,7 @@ import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './native-response-lim
 import { observeNative } from './native-diagnostic.mjs';
 export const NATIVE_ORIGIN = "https://robinfrontend-pa.googleapis.com";
 export const NATIVE_RPC =
-  "/$rpc/assistant.mobile.robin.RobinService/ProcessQuery";
+  "/assistant.mobile.robin.RobinService/ProcessQuery";
 // ProcessQuery compatibility snapshot checked against native 1.135.1.1291.
 // A protocol constant, not a runtime App dependency or copied device identity.
 export const NATIVE_COMPATIBILITY_VERSION = "1.135.1.1291";
@@ -211,21 +211,28 @@ export function openDirectTurn(
   const status = (headers) => {
     if (headers["grpc-message"] !== undefined)
       grpcMessage = decodeGrpcMessage(headers["grpc-message"]);
-    if (headers[":status"] !== undefined) {
+    if (headers[":status"] !== undefined)
       httpStatus = Number(headers[":status"]);
-      if (httpStatus === 429) return fail("NATIVE_QUOTA_EXHAUSTED", 429);
-      if ([401, 403].includes(httpStatus))
-        return fail("NATIVE_PERMISSION_OR_AUTH", httpStatus);
-      if (httpStatus !== 200) return fail("NATIVE_HTTP_REJECTED");
-    }
     if (headers["grpc-status"] !== undefined) {
-      grpcStatus = Number(headers["grpc-status"]);
-      if (!Number.isInteger(grpcStatus) || grpcStatus < 0 || grpcStatus > 16)
+      const parsed = Number(headers["grpc-status"]);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 16)
         return fail("NATIVE_INVALID_STATUS");
-      if (grpcStatus === 8) return fail("NATIVE_QUOTA_EXHAUSTED", 429);
-      if ([7, 16].includes(grpcStatus))
-        return fail("NATIVE_PERMISSION_OR_AUTH", 403);
+      grpcStatus = parsed;
     }
+    if (httpStatus === 429 || grpcStatus === 8)
+      return fail("NATIVE_QUOTA_EXHAUSTED", 429);
+    if ([401, 403].includes(httpStatus) || [7, 16].includes(grpcStatus))
+      return fail(
+        "NATIVE_PERMISSION_OR_AUTH",
+        [401, 403].includes(httpStatus) ? httpStatus : 403,
+      );
+    if (httpStatus === 503) {
+      if (grpcStatus !== null && grpcStatus !== 0 && grpcStatus !== 14)
+        return fail("NATIVE_TURN_FAILED");
+      return fail("NATIVE_UPSTREAM_UNAVAILABLE", 503);
+    }
+    if (httpStatus !== null && httpStatus !== 200)
+      return fail("NATIVE_HTTP_REJECTED");
   };
   timer = setTimeout(() => { note('transport_deadline'); fail("NATIVE_TRANSPORT_TIMEOUT"); }, timeoutMs);
   timer.unref();

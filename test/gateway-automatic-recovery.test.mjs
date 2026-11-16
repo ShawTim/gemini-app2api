@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http2 from 'node:http2';
 import { fixture, tools, toolBlock, textFrame } from './gateway-fixture.mjs';
 import { automaticRecoveryKind, toolRecoveryInstruction } from '../src/gateway/automatic-recovery.mjs';
+import { openDirectTurn } from '../src/gateway/native-transport.mjs';
+import { frameGrpcMessage } from '../native-wire/robin-current.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 const input = { model: 'gemini-argon', messages: [{ role: 'user', content: 'Continue the synthetic lookup task.' }], tools };
 const headers = { 'X-Session-ID': 'automatic_continuity' };
@@ -228,4 +231,205 @@ for (const route of ['chat/completions', 'responses']) for (const kind of ['text
   assert.equal(attempts, 1); const row = f.app.overview().requests[0];
   assert.equal(row.providerAttempts, 1); assert.equal(row.outputIncomplete, true); assert.equal(row.errorCode, 'NATIVE_STREAM_RESET');
   assert.equal(f.app.pool.failovers.length, 0); assert.ok(f.app.pool.listSessions().every(s => !s.inFlight));
+});
+
+test('upstream gRPC 14 / HTTP 503 triggers bounded failover to healthy accounts and surfaces 503 NATIVE_UPSTREAM_UNAVAILABLE on global outage', async t => {
+  const f = await fixture(options); t.after(f.close);
+  let callIndex = 0;
+  let globalOutage = false;
+  f.app.provider.openTurn = (_token, opts) => {
+    const idx = callIndex++;
+    if (globalOutage || idx === 0) {
+      return {
+        events: (async function* () {
+          yield { type: 'end', httpStatus: 200, grpcStatus: 14 };
+        })(),
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 14, grpcMessage: '503:Service Unavailable', ended: true, receivedBytes: 0, requestBytes: 64 }),
+        cancel() {},
+      };
+    }
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame('Recovered from upstream 503', opts.modeCategory, opts.thinkingLevel) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+
+  // 1. Single-account gRPC 14 outage fails over automatically to second healthy account.
+  const ok = await send(f, { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }] });
+  assert.equal(ok.status, 200);
+  const okBody = await ok.json();
+  assert.equal(okBody.choices[0].message.content, 'Recovered from upstream 503');
+  assert.equal(ok.headers.get('x-gemini-recovery-errors'), 'NATIVE_UPSTREAM_UNAVAILABLE');
+  assert.equal(ok.headers.get('x-gemini-provider-attempts'), '2');
+  const okRow = f.app.overview().requests[0];
+  assert.equal(okRow.providerFailures[0].code, 'NATIVE_UPSTREAM_UNAVAILABLE');
+  assert.equal(okRow.providerFailures[0].status, 503);
+  assert.equal(okRow.providerFailures[0].nativeEvidence.grpcStatus, 14);
+  assert.equal(okRow.providerFailures[0].nativeEvidence.upstreamMessage, '503:Service Unavailable');
+
+  // 2. Global upstream outage surfaces 503 NATIVE_UPSTREAM_UNAVAILABLE after exhausting bounded failover.
+  globalOutage = true;
+  const outage = await send(f, { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }] });
+  assert.equal(outage.status, 503);
+  const outageBody = await outage.json();
+  assert.equal(outageBody.error.code, 'NATIVE_UPSTREAM_UNAVAILABLE');
+  assert.equal(outageBody.error.type, 'server_error');
+  assert.match(outageBody.error.message, /HTTP 503 \/ gRPC UNAVAILABLE/);
+  assert.equal(outage.headers.get('x-gemini-provider-attempts'), '4');
+  const outageRow = f.app.overview().requests[0];
+  assert.equal(outageRow.status, 503);
+  assert.equal(outageRow.errorCode, 'NATIVE_UPSTREAM_UNAVAILABLE');
+  assert.equal(outageRow.nativeEvidence.grpcStatus, 14);
+});
+
+test('real HTTP/2 503/gRPC 14 matrix covers general failover, automatic recovery, Responses, SSE, conflicting 503+13, and headersSent retry boundary', async t => {
+  let behavior;
+  const h2Server = http2.createServer();
+  h2Server.on('stream', (stream) => {
+    stream.on('error', () => {});
+    stream.resume();
+    stream.on('end', () => {
+      const next = behavior();
+      if (next.http503) {
+        stream.respond({
+          ':status': 503,
+          'grpc-status': String(next.grpcStatus ?? 14),
+          'grpc-message': encodeURIComponent(next.message ?? '503:Service Unavailable'),
+        });
+        stream.end();
+        return;
+      }
+      stream.respond({ ':status': 200, 'content-type': 'application/grpc' }, { waitForTrailers: true });
+      stream.on('wantTrailers', () => {
+        stream.sendTrailers({
+          'grpc-status': String(next.grpcStatus ?? 0),
+          ...(next.message ? { 'grpc-message': encodeURIComponent(next.message) } : {}),
+        });
+      });
+      if (next.text !== undefined) {
+        stream.end(frameGrpcMessage(textFrame(next.text, next.mode ?? 8, 2)));
+      } else {
+        stream.end();
+      }
+    });
+  });
+  await new Promise((resolve) => h2Server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => h2Server.close(resolve)));
+  const connect = () => http2.connect(`http://127.0.0.1:${h2Server.address().port}`);
+
+  for (const cfg of [
+    { name: 'general-failover', allowFailover: true, allowAutomaticRecovery: false },
+    { name: 'automatic-recovery', allowFailover: false, allowAutomaticRecovery: true },
+  ]) {
+    for (const route of ['chat/completions', 'responses']) {
+      for (const stream of [false, true]) {
+        const f = await fixture({ accountCount: 3, allowFailover: cfg.allowFailover, allowAutomaticRecovery: cfg.allowAutomaticRecovery });
+        t.after(f.close);
+        let activeRes = null;
+        let step1HeadersSent = null;
+        f.app.server.prependListener('request', (_req, res) => { activeRes = res; });
+        const origOpen = (token, opts) => openDirectTurn(token, opts, { connect });
+        f.app.provider.openTurn = (token, opts) => {
+          const turn = origOpen(token, opts);
+          const wrapIter = async function* () {
+            for await (const ev of turn.events) {
+              if (ev.type === 'end' && step === 2) step1HeadersSent = activeRes?.headersSent;
+              yield ev;
+            }
+          };
+          return { ...turn, events: wrapIter() };
+        };
+        let step = 0;
+        // Attempt 1: HTTP 503 + gRPC 14; Attempt 2: short fragment < 2048B + gRPC 14 (deferred SSE headers allow retry); Attempt 3: clean recovery.
+        behavior = () => {
+          const i = step++;
+          if (i === 0) return { http503: true, grpcStatus: 14 };
+          if (i === 1) return { grpcStatus: 14, message: '503:Service Unavailable', text: 'DISCARDED_SHORT_FRAGMENT' };
+          return { grpcStatus: 0, text: `OK_${cfg.name}_${route}_${stream}` };
+        };
+        const body = route === 'responses'
+          ? { model: 'gemini-argon', input: 'Hello', stream }
+          : { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }], stream };
+        const res = await f.api('/v1/' + route, { method: 'POST', body });
+        assert.equal(res.status, 200, `${cfg.name}/${route}/${stream}`);
+        if (stream) assert.equal(step1HeadersSent, false, 'short prefix must not commit SSE headers prematurely');
+        const raw = await res.text();
+        assert.match(raw, new RegExp(`OK_${cfg.name}_${route}_${stream}`));
+        assert.doesNotMatch(raw, /DISCARDED_SHORT_FRAGMENT|NATIVE_UPSTREAM_UNAVAILABLE/);
+        if (!stream) assert.equal(res.headers.get('x-gemini-provider-attempts'), '3');
+        assert.equal(f.app.overview().requests[0].providerAttempts, 3);
+        assert.equal(f.app.overview().requests[0].providerFailures[0].nativeEvidence.upstreamHttpStatus, 503);
+        assert.equal(f.app.overview().requests[0].providerFailures[0].nativeEvidence.grpcStatus, 14);
+      }
+    }
+
+    // Conflicting HTTP 503 + gRPC 13 stays 502 NATIVE_TURN_FAILED without recovering under automaticRecovery, and respects allowFailover=false.
+    const fConflict = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: true });
+    t.after(fConflict.close);
+    fConflict.app.provider.openTurn = (token, opts) => openDirectTurn(token, opts, { connect });
+    behavior = () => ({ http503: true, grpcStatus: 13, message: 'Internal edge fault' });
+    const conflictRes = await fConflict.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }] },
+    });
+    assert.equal(conflictRes.status, 502);
+    assert.equal((await conflictRes.json()).error.code, 'NATIVE_TURN_FAILED');
+    assert.equal(fConflict.app.overview().requests[0].providerAttempts, 1);
+
+    // Headers-sent boundary: if res.headersSent is already true when a <2048B fragment ends with gRPC 14, retry MUST stop immediately.
+    for (const route of ['chat/completions', 'responses']) {
+      const fCommitted = await fixture({ accountCount: 2, allowFailover: cfg.allowFailover, allowAutomaticRecovery: cfg.allowAutomaticRecovery });
+      t.after(fCommitted.close);
+      let activeRes = null;
+      fCommitted.app.server.prependListener('request', (_req, res) => { activeRes = res; });
+      let attempts = 0;
+      fCommitted.app.provider.openTurn = () => {
+        attempts++;
+        return {
+          events: (async function* () {
+            yield { type: 'frame', bytes: textFrame('COMMITTED_SHORT_PREFIX', 8, 2) };
+            // Simulate downstream HTTP headers already flushed before interruption while publishedBytes === 0.
+            activeRes.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            yield { type: 'end', httpStatus: 200, grpcStatus: 14 };
+          })(),
+          getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 14, grpcMessage: '503:Service Unavailable', ended: true, receivedBytes: 32, requestBytes: 64 }),
+          cancel() {},
+        };
+      };
+      const body = route === 'responses'
+        ? { model: 'gemini-argon', input: 'Hello', stream: true }
+        : { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }], stream: true };
+      const committedRes = await fCommitted.api('/v1/' + route, { method: 'POST', body });
+      assert.equal(committedRes.status, 200, `${cfg.name}/${route} headersSent stops retry`);
+      const wire = await committedRes.text();
+      assert.match(wire, /COMMITTED_SHORT_PREFIX/);
+      assert.match(wire, /NATIVE_UPSTREAM_UNAVAILABLE/);
+      assert.equal(attempts, 1, `${cfg.name}/${route} must never open attempt 2 once headersSent=true`);
+
+      // Also verify >= 2048B committed output stops retry cleanly with gRPC 14 partial incomplete SSE.
+      const fLong = await fixture({ accountCount: 2, allowFailover: cfg.allowFailover, allowAutomaticRecovery: cfg.allowAutomaticRecovery });
+      t.after(fLong.close);
+      let longAttempts = 0;
+      fLong.app.provider.openTurn = () => {
+        longAttempts++;
+        return {
+          events: (async function* () {
+            yield { type: 'frame', bytes: textFrame('LONG_PREFIX_' + 'x'.repeat(2050), 8, 2) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 14 };
+          })(),
+          getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 14, grpcMessage: '503:Service Unavailable', ended: true, receivedBytes: 2100, requestBytes: 64 }),
+          cancel() {},
+        };
+      };
+      const longRes = await fLong.api('/v1/' + route, { method: 'POST', body });
+      assert.equal(longRes.status, 200);
+      const longWire = await longRes.text();
+      assert.match(longWire, /LONG_PREFIX_/);
+      assert.match(longWire, /NATIVE_UPSTREAM_UNAVAILABLE/);
+      assert.equal(longAttempts, 1);
+    }
+  }
 });

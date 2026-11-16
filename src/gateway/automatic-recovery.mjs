@@ -22,10 +22,17 @@ export function automaticRecoveryKind(error, model) {
   if (isExplicitQuotaFailure(error)) return 'quota';
   if (isVerifiedEmptyResponse(error, model)) return 'empty_response';
   const e = error?.nativeEvidence;
-  if (!e || error?.status !== 502 || e.nativeRefusalPresent === true ||
+  if (!e || ![502, 503].includes(error?.status) || e.nativeRefusalPresent === true ||
       (e.fallback !== undefined && e.fallback !== 0) || (e.downgradeReason !== undefined && e.downgradeReason !== 0)) return null;
   const expected = MODEL_MODES[model];
   if (expected === undefined || (e.observedMode !== null && e.observedMode !== undefined && e.observedMode !== 0 && e.observedMode !== expected)) return null;
+  if (error.code === 'NATIVE_UPSTREAM_UNAVAILABLE' && error.status === 503 &&
+      ['open', 'read', 'decode', 'end'].includes(e.phase) &&
+      ((e.upstreamHttpStatus === 503 && (e.grpcStatus === null || e.grpcStatus === 0 || e.grpcStatus === 14)) ||
+       ((e.upstreamHttpStatus === null || e.upstreamHttpStatus === 200) && e.grpcStatus === 14))) {
+    return 'transport';
+  }
+  if (error.status !== 502) return null;
   if (TRANSPORT_ERRORS.has(error.code) && ['open', 'read', 'decode', 'end'].includes(e.phase) &&
       (e.upstreamHttpStatus === null || e.upstreamHttpStatus === 200) && (e.grpcStatus === null || e.grpcStatus === 0)) return 'transport';
   const completed = e.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 && e.wireEnded === true &&

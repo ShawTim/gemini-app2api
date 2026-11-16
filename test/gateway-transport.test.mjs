@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http2 from "node:http2";
 import { openDirectTurn, NATIVE_COMPATIBILITY_VERSION } from "../src/gateway/native-transport.mjs";
+import { NativeDirectProvider } from "../src/native-provider.mjs";
+import { automaticRecoveryKind } from "../src/gateway/automatic-recovery.mjs";
 import {
   GrpcMessageReader,
   frameGrpcMessage,
@@ -83,6 +85,7 @@ for (const [status, code] of [
   [429, "NATIVE_QUOTA_EXHAUSTED"],
   [401, "NATIVE_PERMISSION_OR_AUTH"],
   [403, "NATIVE_PERMISSION_OR_AUTH"],
+  [503, "NATIVE_UPSTREAM_UNAVAILABLE"],
 ])
   test("real local HTTP2 status classification " + status, async (t) => {
     const connect = await serverFor(t, (stream) => {
@@ -178,6 +181,101 @@ test("real local HTTP2 captures the decoded Google error header without interpre
   } finally {
     turn.cancel();
   }
+});
+
+test("HTTP 200 with trailer gRPC 14 captures UNAVAILABLE evidence cleanly", async (t) => {
+  const connect = await serverFor(t, (stream) => {
+    stream.on("error", () => {});
+    stream.resume();
+    stream.respond(
+      { ":status": 200, "content-type": "application/grpc" },
+      { waitForTrailers: true },
+    );
+    stream.on("wantTrailers", () =>
+      stream.sendTrailers({
+        "grpc-status": "14",
+        "grpc-message": encodeURIComponent("503:Service Unavailable"),
+      }),
+    );
+    stream.end();
+  });
+  const turn = openDirectTurn(
+    "synthetic-token",
+    { messages: [{ role: "user", content: "Synthetic query" }] },
+    { connect },
+  );
+  try {
+    for await (const e of turn.events) if (e.type === "end") break;
+    assert.equal(turn.getSafeStatus().httpStatus, 200);
+    assert.equal(turn.getSafeStatus().grpcStatus, 14);
+    assert.equal(turn.getSafeStatus().grpcMessage, "503:Service Unavailable");
+  } finally {
+    turn.cancel();
+  }
+});
+
+test("combined HTTP 503 and gRPC headers preserve gRPC evidence and enforce conflict precedence through provider", async (t) => {
+  let responseHeaders;
+  const connect = await serverFor(t, (stream) => {
+    stream.on("error", () => {});
+    stream.resume();
+    stream.on("end", () => {
+      stream.respond(responseHeaders);
+      stream.end();
+    });
+  });
+  const provider = new NativeDirectProvider(
+    { getValidAccessToken: async () => "synthetic-token" },
+    {
+      openTurn: (token, options) =>
+        openDirectTurn(token, options, { connect }),
+      timeoutMs: 1000,
+    },
+  );
+
+  // HTTP 503 + gRPC 14 preserves grpcStatus: 14 and qualifies as recoverable transport outage.
+  responseHeaders = {
+    ":status": 503,
+    "grpc-status": "14",
+    "grpc-message": encodeURIComponent("503:Service Unavailable"),
+  };
+  await assert.rejects(
+    provider.runTurn("synthetic", {
+      model: "gemini-argon",
+      messages: [{ role: "user", content: "Synthetic query" }],
+    }),
+    (err) => {
+      assert.equal(err.code, "NATIVE_UPSTREAM_UNAVAILABLE");
+      assert.equal(err.status, 503);
+      assert.equal(err.nativeEvidence.upstreamHttpStatus, 503);
+      assert.equal(err.nativeEvidence.grpcStatus, 14);
+      assert.equal(err.nativeEvidence.upstreamMessage, "503:Service Unavailable");
+      assert.equal(automaticRecoveryKind(err, "gemini-argon"), "transport");
+      return true;
+    },
+  );
+
+  // Conflicting HTTP 503 + gRPC 13 (INTERNAL) preserves grpcStatus: 13 and must not recover as 503 unavailable.
+  responseHeaders = {
+    ":status": 503,
+    "grpc-status": "13",
+    "grpc-message": encodeURIComponent("Internal edge error"),
+  };
+  await assert.rejects(
+    provider.runTurn("synthetic", {
+      model: "gemini-argon",
+      messages: [{ role: "user", content: "Synthetic query" }],
+    }),
+    (err) => {
+      assert.equal(err.code, "NATIVE_TURN_FAILED");
+      assert.equal(err.status, 502);
+      assert.equal(err.nativeEvidence.upstreamHttpStatus, 503);
+      assert.equal(err.nativeEvidence.grpcStatus, 13);
+      assert.equal(err.nativeEvidence.upstreamMessage, "Internal edge error");
+      assert.equal(automaticRecoveryKind(err, "gemini-argon"), null);
+      return true;
+    },
+  );
 });
 
 test("configured native deadline is sent as bounded standard gRPC milliseconds", async (t) => {

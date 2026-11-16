@@ -161,7 +161,7 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
         stream.respond({ ':status': 200, 'x-goog-upload-status': 'final' }); stream.end(blobId);
       });
     } else {
-      assert.equal(pathname, '/$rpc/assistant.mobile.robin.RobinService/ProcessQuery');
+      assert.equal(pathname, '/assistant.mobile.robin.RobinService/ProcessQuery');
       assert.equal(headers.authorization, 'Bearer synthetic-access');
       const reader = new GrpcMessageReader(), frames = [];
       stream.on('data', bytes => frames.push(...reader.push(bytes)));

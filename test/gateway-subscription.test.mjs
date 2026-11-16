@@ -36,7 +36,7 @@ test('subscription decoder rejects ambiguous malformed fields; safe snapshots ca
 
 test('subscription request uses established empty GetUsageInfo request without asserting a client tier', () => {
   assert.deepEqual(buildSubscriptionRequest(), Buffer.alloc(0));
-  assert.equal(SUBSCRIPTION_RPC, '/$rpc/assistant.mobile.robin.RobinService/GetUsageInfo');
+  assert.equal(SUBSCRIPTION_RPC, '/assistant.mobile.robin.RobinService/GetUsageInfo');
 });
 
 function transport(emit) {
