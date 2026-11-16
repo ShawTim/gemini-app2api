@@ -47,3 +47,5 @@ oauth-tokens*.json
 
 # Local private notes
 docs/internal/
+AGENTS.md
+GEMINI.md

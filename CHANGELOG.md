@@ -5,7 +5,7 @@ Release notes for Gemini App2API.
 ## 1.3.5 — 2026-11-17
 
 ### Canonical RobinService gRPC paths & upstream 503 failover
-- Switched all shipped `RobinService` HTTP/2 gRPC endpoints (`ProcessQuery`, `GetUsageInfo`, `GetTermsOfServiceVersion`, and `AcceptTermsOfService`) across `src/gateway/native-transport.mjs`, `src/gateway/quota-transport.mjs`, `src/gateway/subscription-transport.mjs`, and `src/gateway/terms.mjs` from the WebChannel `/$rpc/` prefix to canonical `/assistant.mobile.robin.RobinService/...` gRPC `:path` values after Google's ESF disabled `application/grpc` streaming on `/$rpc/`, restoring live generation across `gemini-argon`, `gemini-hydrogen`, and `gemini-flash-lite`.
+- Switched all shipped `RobinService` HTTP/2 gRPC endpoints (`ProcessQuery`, `GetUsageInfo`, `GetTermsOfServiceVersion`, and `AcceptTermsOfService`) across `src/gateway/native-transport.mjs`, `src/gateway/quota-transport.mjs`, `src/gateway/subscription-transport.mjs`, and `src/gateway/terms.mjs` from the unreferenced `httpURLPattern` (`/$rpc/...`) descriptor literal to the canonical `/assistant.mobile.robin.RobinService/...` `:path` constructed by `Gemini.app` (`1.135.1.1291`) `GRPCStreamingTransportImpl` / `GRPC2` transports, restoring live generation across `gemini-argon`, `gemini-hydrogen`, and `gemini-flash-lite`.
 - Classified genuine upstream HTTP `503` and empty `grpc-status: 14` (`UNAVAILABLE`) responses as `503 NATIVE_UPSTREAM_UNAVAILABLE` with bounded pre-header account failover and SSE header hold before output starts.
 
 ## 1.3.4 — 2026-11-17

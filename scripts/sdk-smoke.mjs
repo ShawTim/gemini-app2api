@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 /** Official Python SDK and published examples, only through isolated gateway fixtures. */
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { fixture, toolBlock } from "../test/gateway-fixture.mjs";
+const venvPython = path.resolve(import.meta.dirname, "../.venv/bin/python");
 async function python(args, env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.env.PYTHON || "python3", args, {
-      env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      process.env.PYTHON || (fs.existsSync(venvPython) ? venvPython : "python3"),
+      args,
+      {
+        env: { ...process.env, ...env },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let output = "";
     const timer = setTimeout(() => child.kill(), 60000);
     child.stdout.on("data", (b) => {

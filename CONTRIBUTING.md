@@ -4,10 +4,13 @@ Requires Node.js 22+ on Linux or macOS. Install development dependencies with `n
 
 ## Running the test suites
 
-- **Product regression suite**: Run `node scripts/run-offline-product.mjs --list` then `--run` (also `npm test` / `npm run test:product`). It stages curated source files, isolates `HOME` and configuration, and executes a fixed 66-file manifest against synthetic fixtures.
-- **Current-contract suite**: Run `npm run test:current-contract` (`node scripts/run-current-contract.mjs --run`) for delivery, namespace, context-window, and zero-output termination contracts.
-- **Admin & browser suites**: Run `npm run test:admin` for static VM/contract checks and `npm run test:browser` for Playwright end-to-end console verification.
-- **Release hygiene check**: Run `npm run test:release` (`node scripts/check-release.mjs`) to verify the curated file list, Docker runtime boundary, and secret/path guards.
+Tests are explicitly separated into two groups:
+
+1. **Group 1 — Pre-release offline & E2E gate (`npm run test:prerelease`)**: Runs `test:current-contract`, `test:product` (66-file isolated manifest via `node scripts/run-offline-product.mjs --run`), `test:browser` (Playwright console E2E), `test:python` (Python SDK smoke), `docker build` + `test:docker` (real Linux container & Compose smoke), and `test:release` (`node scripts/check-release.mjs`). Intended to run once before cutting a release rather than on every routine local edit.
+   - Individual offline suites remain callable via `npm test`, `npm run test:current-contract`, `npm run test:admin`, `npm run test:browser`, `npm run test:python`, `npm run test:docker`, and `npm run test:release`.
+2. **Group 2 — Live upstream verification (`npm run test:live`)**: Opt-in real-account verification (`GATEWAY_LIVE_CONFIRM=owned-accounts-only`). Never run automatically; execute only with explicit operator approval (and on demand whenever requested, independent of release timing).
+
+For local managed deployments, run `npm run internal:deploy` after committing changes to stage and deploy the committed source to the local gateway (`http://127.0.0.1:49688`).
 
 Read [test execution boundaries](docs/TEST_EXECUTION_SAFETY.md) and [current-contract coverage](docs/CURRENT_CONTRACT_TESTS.md) before adding or modifying tests. Tests must use synthetic state and mocked native transport only — never real account credentials, Keychain state, or live Google model calls.
 

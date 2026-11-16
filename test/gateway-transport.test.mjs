@@ -26,6 +26,7 @@ test("product transport sends exactly three native frames and half-closes prompt
   let frames,
     ended = false;
   const connect = await serverFor(t, (stream, headers) => {
+    assert.equal(headers[":path"], "/assistant.mobile.robin.RobinService/ProcessQuery");
     assert.equal(headers["grpc-timeout"], "180000m");
     assert.equal(headers["user-agent"], "gemini-app2api/1.0");
     assert.equal(headers["x-client-pctx"], undefined);

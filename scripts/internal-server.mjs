@@ -13,6 +13,7 @@ export const COMMANDS = Object.freeze([
   "start",
   "stop",
   "restart",
+  "deploy",
   "status",
   "rollback",
   "supervise",
@@ -532,6 +533,71 @@ export function createLocalController({
     await stop();
     return start();
   }
+  async function deploy() {
+    let c = loadControl();
+    let commit = "local";
+    try {
+      const head = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (/^[0-9a-f]{7,40}$/i.test(head)) commit = head;
+    } catch {}
+    const { runtimeHash } = await import(
+      pathToFileURL(path.join(root, "scripts/live-acceptance.mjs"))
+    );
+    const hash = runtimeHash();
+    const target = path.join(
+      root,
+      "artifacts/internal-server",
+      `source-${commit}-${hash.slice(0, 12)}`,
+    );
+    if (!exists(target)) {
+      execFileSync(
+        process.execPath,
+        [path.join(root, "scripts/export-release.mjs"), target],
+        { cwd: root, stdio: ["ignore", "ignore", "ignore"] },
+      );
+    }
+    await verifySource({ ...c, source: target, runtimeSha256: hash });
+    if (c.source === target && c.runtimeSha256 === hash && c.sourceCommit === commit) {
+      const current = await status();
+      if (current.running && current.healthStatus === 200)
+        return { ...current, deployed: true, unchanged: true };
+    }
+    await stop();
+    c = loadControl();
+    const previous = {
+      source: c.source,
+      runtimeSha256: c.runtimeSha256,
+      sourceCommit: c.sourceCommit,
+    };
+    Object.assign(c, {
+      previousSource: previous.source,
+      previousRuntimeSha256: previous.runtimeSha256,
+      previousSourceCommit: previous.sourceCommit,
+      source: target,
+      runtimeSha256: hash,
+      sourceCommit: commit,
+    });
+    saveControl(c);
+    try {
+      return { ...(await start()), deployed: true };
+    } catch (error) {
+      try {
+        const revert = loadControl();
+        Object.assign(revert, {
+          source: previous.source,
+          runtimeSha256: previous.runtimeSha256,
+          sourceCommit: previous.sourceCommit || "previous-runtime",
+        });
+        saveControl(revert);
+        await start();
+      } catch {}
+      throw error;
+    }
+  }
   async function rollback() {
     let c = loadControl();
     if (!c.previousSource || !c.previousRuntimeSha256)
@@ -732,7 +798,7 @@ export function createLocalController({
     fail("CONTROLLER_BUSY");
   };
   return { start: serialized(start), stop: serialized(stop), restart: serialized(restart),
-    status, rollback: serialized(rollback), supervise, verifyDeployment,
+    deploy: serialized(deploy), status, rollback: serialized(rollback), supervise, verifyDeployment,
     withDeploymentLock: (fn) => serialized(fn)() };
 }
 if (
