@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { writeChatResponse, writeResponsesResponse, toChatAnnotations } from '../openai-contract.mjs';
 import { protocolError as fault } from '../tool-protocol.mjs';
 import { responsesCallFields } from '../responses-tool-namespaces.mjs';
-import { toResponsesUsage } from '../openai-usage.mjs';
+import { toResponsesUsage, estimateUsage as estimateTokenUsage } from '../openai-usage.mjs';
 const MAX = 8 * 1024 * 1024;
 // Hold the very first text fragment instead of flushing it immediately. An
 // interrupted turn that produced only this tiny prefix has not shown the caller
@@ -69,12 +69,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // Ordinary upstream responses carry no token accounting. Usage is therefore a
   // labelled estimate over the caller request and the delivered output, never a
   // value read from Google.
-  const CHARS_PER_TOKEN = 3.5;
-  const estimateUsage = (outputBytes = bytes) => {
-    const prompt = Math.ceil((Number.isFinite(promptChars) ? promptChars : 0) / CHARS_PER_TOKEN);
-    const completion = Math.ceil(outputBytes / CHARS_PER_TOKEN);
-    return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion, estimated: true };
-  };
+  const estimateUsage = (outputBytes = bytes) => estimateTokenUsage({ promptChars, outputBytes });
   const output = [];
   const sendWire = chunk => write(res, chunk, signal, writeTimeoutMs);
   const responseId = () => meta.id.startsWith('resp_') ? meta.id : 'resp_' + meta.id.replace(/^chatcmpl-/, '');

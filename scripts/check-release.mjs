@@ -62,6 +62,7 @@ for (const name of [
   "src/admin-v2/index.html",
   "src/admin-v2/app.js",
   "src/admin-v2/styles.css",
+  "extensions/pi/index.js",
   "LICENSE",
 ])
   assert(names.has(name), "missing runtime asset: " + name);
@@ -87,7 +88,9 @@ for (const name of files.filter(
     } else
       assert(
         specifier.startsWith("node:") ||
-          (name.startsWith("examples/") && specifier === "openai"),
+          (name.startsWith("examples/") && specifier === "openai") ||
+          (name === "extensions/pi/index.js" &&
+            specifier === "@earendil-works/pi-ai"),
         "unexpected runtime dependency: " + name + " -> " + specifier,
       );
   }

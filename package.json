@@ -9,6 +9,11 @@
   },
   "type": "module",
   "main": "src/gateway/app.mjs",
+  "pi": {
+    "extensions": [
+      "./extensions/pi/index.js"
+    ]
+  },
   "files": [
     "bin/gemini-gateway",
     ".env.example",
@@ -41,6 +46,7 @@
     "native-wire/protobuf.mjs",
     "native-wire/robin-current.mjs",
     "native-wire/oauth-loopback.mjs",
+    "extensions/pi/",
     "docs/API_SUPPORT.md",
     "docs/COMPLETION_CONTRACT.md",
     "docs/ACCOUNT_LIFECYCLE.md",

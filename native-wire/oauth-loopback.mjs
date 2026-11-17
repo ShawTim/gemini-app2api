@@ -100,13 +100,68 @@ export async function startLoopbackLogin(config, dependencies = {}) {
     used = true; tokenController.abort(); clearTimeout(timer); server.closeAllConnections(); server.close();
     rejectDone(Object.assign(new Error('Login closed or timed out'), { code }));
   }
+  async function completeCallbackUrl(rawInput) {
+    if (typeof rawInput !== 'string' || !rawInput.length || rawInput.length > 4096) {
+      throw Object.assign(new Error('Invalid callback URL'), { code: 'INVALID_CALLBACK_URL' });
+    }
+    let parsed;
+    try {
+      const trimmed = rawInput.trim();
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        parsed = new URL(trimmed);
+      } else {
+        const queryIndex = trimmed.indexOf('?');
+        const query = queryIndex >= 0 ? trimmed.slice(queryIndex) : '?' + trimmed;
+        parsed = new URL(query, 'http://127.0.0.1');
+      }
+    } catch {
+      throw Object.assign(new Error('Invalid callback URL format'), { code: 'INVALID_CALLBACK_URL' });
+    }
+    if (used) {
+      throw Object.assign(new Error('Login already completed or closed'), { code: 'LOGIN_ALREADY_USED' });
+    }
+    const paramState = parsed.searchParams.get('state');
+    if (!safeEqual(paramState, state)) {
+      throw Object.assign(new Error('Invalid or expired login state'), { code: 'INVALID_LOGIN_STATE' });
+    }
+    const code = parsed.searchParams.get('code');
+    if (parsed.searchParams.has('error')) {
+      used = true; clearTimeout(timer);
+      try { server.closeAllConnections(); } catch {}
+      server.close();
+      const declError = Object.assign(new Error('User login not completed'), { code: 'LOGIN_DECLINED' });
+      rejectDone(declError);
+      throw declError;
+    }
+    if (!code) {
+      throw Object.assign(new Error('Callback URL is missing authorization code'), { code: 'INVALID_CALLBACK_URL' });
+    }
+    used = true;
+    try {
+      const body = new URLSearchParams({ grant_type: 'authorization_code', client_id: config.clientId, redirect_uri: redirectUri, code, code_verifier: verifier });
+      if (config.clientSecret) body.set('client_secret', config.clientSecret);
+      const tokens = await tokenRequest(body, config, tokenDependencies);
+      if (tokenController.signal.aborted) throw Object.assign(new Error('Login aborted'), { code: 'LOGIN_ABORTED' });
+      clearTimeout(timer);
+      try { server.closeAllConnections(); } catch {} 
+      server.close();
+      resolveDone(tokens);
+      return tokens;
+    } catch (error) {
+      clearTimeout(timer);
+      try { server.closeAllConnections(); } catch {} 
+      server.close();
+      rejectDone(error);
+      throw error;
+    }
+  }
   const abort = () => close();
   dependencies.signal?.addEventListener('abort', abort, { once: true });
   const cleanup = () => dependencies.signal?.removeEventListener('abort', abort);
   done.then(cleanup, cleanup);
   timer = setTimeout(() => close('LOGIN_TIMEOUT'), config.loginTimeoutMs ?? 10 * 60 * 1000);
   if (dependencies.signal?.aborted) close();
-  return { authorizationUrl: url.href, redirectUri, done, close };
+  return { authorizationUrl: url.href, redirectUri, done, close, completeCallbackUrl };
 }
 
 export async function refreshNativeCredential(config, refreshToken, dependencies = {}) {

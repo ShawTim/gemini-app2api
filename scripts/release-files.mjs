@@ -8,6 +8,7 @@ import { productTests } from "./offline-product-tests.mjs";
 export const root = path.resolve(import.meta.dirname, "..");
 export const releaseWalkDirs = [
   "src/gateway",
+  "extensions/pi",
   "test/browser",
   "test/sdk",
   "examples",
@@ -201,7 +202,7 @@ export function checkPackageScripts(scripts, files) {
   for (const [script, command] of Object.entries(scripts)) {
     const references =
       command.match(
-        /\b(?:src|test|native-wire|scripts|examples|bin)\/[A-Za-z0-9_./*{}-]+/g,
+        /\b(?:src|test|native-wire|scripts|examples|extensions|bin)\/[A-Za-z0-9_./*{}-]+/g,
       ) || [];
     for (const reference of references) {
       const pattern = new RegExp(

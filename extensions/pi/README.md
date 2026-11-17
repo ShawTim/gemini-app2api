@@ -1,0 +1,65 @@
+# Google Gemini App Provider Extension for Pi
+
+Native in-process provider extension for `@earendil-works/pi-coding-agent` (`pi`). Connects directly to Gemini's native HTTP/2 endpoint (`ProcessQuery`) inside the Pi process—no separate HTTP gateway server, Docker container, or extra npm dependencies required.
+
+> **Disclaimer**: Unofficial interoperability software. Not affiliated with, endorsed by, or sponsored by Google. You must authenticate personally with your own eligible Google account.
+
+## Installation
+
+### Option 1: Install as a Pi package from Git
+
+```bash
+pi install git:github.com/ShawTim/gemini-app2api
+```
+
+### Option 2: Load from a local clone
+
+```bash
+git clone https://github.com/ShawTim/gemini-app2api.git
+cd gemini-app2api
+pi -e ./extensions/pi
+```
+
+Or add the extension path to your Pi settings (`~/.pi/agent/settings.json`):
+
+```json
+{
+  "extensions": ["/path/to/gemini-app2api/extensions/pi"]
+}
+```
+
+## Authentication (`/login gemini-app`)
+
+Credentials are stored and refreshed exclusively through Pi's built-in `CredentialStore` (`auth.json` with file locking).
+
+Run inside Pi:
+
+```text
+/login gemini-app
+```
+
+The login flow supports both local desktop and headless SSH environments simultaneously:
+
+1. **Desktop / Local Browser**: Opens (or prints) the Google OAuth consent URL and listens on a random ephemeral loopback port (`127.0.0.1:0`). Completing sign-in in the browser finishes automatically.
+2. **Headless / SSH**: Open the printed authorization URL in a browser on another machine. After approving sign-in, copy the final `http://localhost:...` redirect URL from your browser's address bar and paste it into Pi's prompt.
+
+Optional environment overrides if using your own OAuth desktop client:
+
+- `GEMINI_OAUTH_CLIENT_ID`
+- `GEMINI_OAUTH_CLIENT_SECRET`
+
+## Models
+
+| Model ID | Display Name | Context Window | Max Output | Capabilities |
+| :--- | :--- | ---: | ---: | :--- |
+| `gemini-argon` | Gemini Argon | 128,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
+| `gemini-hydrogen` | Gemini Hydrogen | 512,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
+| `gemini-flash-lite` | Gemini Flash Lite | 128,000 | 8,192 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
+
+> **Quota Tip**: `gemini-hydrogen` consumes significantly less rolling window quota than `gemini-argon` and responds faster, making it ideal for multi-step coding and tool-calling loops. Reserve `gemini-argon` for complex architecture or deep reasoning tasks.
+>
+> **Usage Accounting**: Token counters reported in Pi are local character-based estimates over message text (`~3.5` chars/token, excluding image payloads and tool schemas) rather than official Google token counts.
+
+## Commands
+
+- `/gemini-quota` — Fetches and displays your signed-in account's rolling usage percentages and reset timestamps.
