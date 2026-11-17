@@ -469,3 +469,27 @@ test('inert OpenAI compatibility fields enforce exact boundary limits, preserve 
   }).body;
   assert.deepEqual(buildCanonicalPrompt(richResp), buildCanonicalPrompt(bareResp));
 });
+
+test('canonical prompt places gateway tool protocol after caller system prompt and appends recency reminder only when tools are enabled', () => {
+  const callerSystem = { role: 'system', content: 'caller system prompt' };
+  const enabledPrompt = buildCanonicalPrompt(normalizeChatRequest({
+    model: 'gemini-argon',
+    messages: [callerSystem, user],
+    tools: [tool],
+    tool_choice: 'auto',
+  })).messages[0].content;
+  assert.ok(enabledPrompt.includes('caller system prompt'));
+  assert.ok(enabledPrompt.includes('# Available Local Tools'));
+  assert.ok(enabledPrompt.indexOf('caller system prompt') < enabledPrompt.indexOf('# Available Local Tools'));
+  assert.ok(enabledPrompt.includes('[Tool Protocol Reminder]'));
+  assert.ok(enabledPrompt.includes('`lookup`'));
+  assert.ok(enabledPrompt.endsWith('in your visible assistant response.'));
+
+  for (const disabledBody of [
+    normalizeChatRequest({ model: 'gemini-argon', messages: [callerSystem, user] }),
+    normalizeChatRequest({ model: 'gemini-argon', messages: [callerSystem, user], tools: [tool], tool_choice: 'none' }),
+  ]) {
+    const disabledPrompt = buildCanonicalPrompt(disabledBody).messages[0].content;
+    assert.equal(disabledPrompt.includes('[Tool Protocol Reminder]'), false);
+  }
+});

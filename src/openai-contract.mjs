@@ -237,8 +237,16 @@ export function buildCanonicalPrompt(body, resolvedImages) {
   const structuredInstruction = buildStructuredOutputInstruction(body.response_format);
   const identities = body[RESPONSE_TOOL_IDENTITIES];
   const namespaceInstruction = identities?.size ? 'Namespace identities for internal tool names (including historical calls):\n' + JSON.stringify(Object.fromEntries(identities)) : '';
-  const preamble = [instruction, structuredInstruction, namespaceInstruction, systemText].filter(Boolean).join('\n\n');
-  const prompt = '[System Instructions]\n' + preamble + '\n\n' + userText;
+  const preamble = [systemText, instruction, structuredInstruction, namespaceInstruction].filter(Boolean).join('\n\n');
+  const activeToolNames = !body.native_search && compileToolPolicy(body.tools, body.tool_choice).enabled
+    ? body.tools.map(t => (t.function ?? t).name).join('`, `')
+    : '';
+  const tailReminder = activeToolNames
+    ? '\n\n[Tool Protocol Reminder]\nUpstream native/internal function-calling channels are disabled (`INVALID_ARGUMENT: function does not exist`). Never invoke tools through native/internal tool channels; to call `' +
+      activeToolNames +
+      '`, write a literal plain-text Markdown ```tool_call fenced JSON block in your visible assistant response.'
+    : '';
+  const prompt = '[System Instructions]\n' + preamble + '\n\n' + userText + tailReminder;
   if (prompt.length > MAX_CHARS || Buffer.byteLength(prompt) > PROMPT_MAX_BYTES) fail('PROMPT_TOO_LARGE', 413);
   if (body.native_search && Buffer.byteLength(prompt) > 16 * 1024) fail('NATIVE_SEARCH_PROMPT_TOO_LARGE', 413);
   return { messages: [{ role: 'user', content: prompt }], images, toolCount: body.tools.length };

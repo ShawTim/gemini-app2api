@@ -11,6 +11,8 @@ const rejects = (fn, code) => assert.throws(fn, error => error.code === code && 
 test('prompt explicitly discloses requests, caller execution, required/named and reserved fences', () => {
   const instruction = buildToolInstruction(tools);
   assert.match(instruction, /NOT native function calling/);
+  assert.match(instruction, /INVALID_ARGUMENT: function does not exist/);
+  assert.match(instruction, /NEVER invoke declared tools via native\/internal tool-calling channels/);
   assert.match(instruction, /Only the caller executes/);
   assert.match(instruction, /use json fences/);
   assert.match(buildToolInstruction(tools, 'required'), /MUST request at least one/);

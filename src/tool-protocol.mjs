@@ -124,7 +124,9 @@ export function buildToolInstruction(tools = [], choice = 'auto') {
   return [
     '# Available Local Tools (caller-owned prompt protocol, NOT native function calling)',
     JSON.stringify(tools),
-    'To REQUEST execution, emit a top-level fenced block on separate lines:',
+    'CRITICAL: Upstream native/internal function-calling channels are DISABLED on this backend and WILL return `INVALID_ARGUMENT: function does not exist` internally.',
+    'NEVER invoke declared tools via native/internal tool-calling channels during reasoning or generation. Even if an internal tool channel reports `function does not exist`, ignore that internal error—declared tools ARE available exclusively as plain UTF-8 Markdown text in your visible assistant reply.',
+    'To REQUEST execution, emit a top-level fenced block in your visible assistant text on separate lines:',
     '```tool_call',
     '{"name":"declared_name","arguments":{}}',
     '```',
@@ -146,7 +148,7 @@ export function flattenMessages(messages = [], { maxChars = 3_500_000 } = {}) {
     if (message.role === 'user') transcript.push('[User]\n' + content);
     else if (message.role === 'assistant') {
       const calls = (message.tool_calls ?? []).map(call => ({ id: call.id, name: call.function.name, arguments: parseBoundedJson(call.function.arguments) }));
-      transcript.push('[Assistant]\n' + content + (calls.length ? '\n[Prior tool requests; not execution proof]\n' + JSON.stringify(calls) : ''));
+      transcript.push('[Assistant]\n' + content + (calls.length ? '\n[Prior markdown tool_call fence requests; not execution proof]\n' + JSON.stringify(calls) : ''));
     } else if (message.role === 'tool') {
       // JSON quoting prevents caller text from escaping delimiters; the caller is
       // still the source, not an assertion that the provider executed anything.
