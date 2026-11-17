@@ -34,6 +34,7 @@ export class Accounts {
       subscriptionFetch = fetchGoogleSubscription,
       termsAccept = acceptGoogleMainTerms,
       termsTimeoutMs = 35000,
+      refreshRetryDelayMs = 150,
       now = () => Date.now(),
     } = {},
   ) {
@@ -53,6 +54,8 @@ export class Accounts {
     this.termsAccept = termsAccept;
     if (!Number.isSafeInteger(termsTimeoutMs) || termsTimeoutMs < 1 || termsTimeoutMs > 35000) throw new TypeError('Invalid terms timeout');
     this.termsTimeoutMs = termsTimeoutMs;
+    if (!Number.isSafeInteger(refreshRetryDelayMs) || refreshRetryDelayMs < 0 || refreshRetryDelayMs > 5000) throw new TypeError('Invalid refresh retry delay');
+    this.refreshRetryDelayMs = refreshRetryDelayMs;
     this.termsPending = new Map();
     this.termsControllers = new Map();
     this.termsClosed = false;
@@ -625,24 +628,44 @@ export class Accounts {
     if (!a.refreshToken) throw fault("ACCOUNT_LOGIN_REQUIRED", 401);
     const config = this.config(), refreshToken = a.refreshToken;
     const ownsCurrentGrant = () => !this.closed && this.store.data.accounts.includes(a) && a.refreshToken === refreshToken;
+    const AUTH_REVOKED_CODES = ["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"];
     const task = (async () => {
       try {
-        const tokens = await this.#raceShutdown(
-          this.refresh(config, refreshToken, { signal: this.shutdownController.signal }),
-          () => fault("OAUTH_REFRESH_FAILED", 502),
-        );
-        if (typeof tokens?.accessToken !== "string" || !tokens.accessToken) throw fault("INVALID_REFRESH_RESPONSE", 502);
-        if (ownsCurrentGrant()) {
-          if (tokens.refreshToken) { a.refreshToken = tokens.refreshToken; this.store.save(); }
-          this.access.set(id, { token: tokens.accessToken, expiresAt: Date.now() + Math.max(60, Number(tokens.expiresInSeconds) || 3600) * 1000 });
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const tokens = await this.#raceShutdown(
+              this.refresh(config, refreshToken, { signal: this.shutdownController.signal }),
+              () => fault("OAUTH_REFRESH_FAILED", 502),
+            );
+            if (typeof tokens?.accessToken !== "string" || !tokens.accessToken) throw fault("INVALID_REFRESH_RESPONSE", 502);
+            if (ownsCurrentGrant()) {
+              if (tokens.refreshToken) { a.refreshToken = tokens.refreshToken; this.store.save(); }
+              this.access.set(id, { token: tokens.accessToken, expiresAt: Date.now() + Math.max(60, Number(tokens.expiresInSeconds) || 3600) * 1000 });
+            }
+            return tokens.accessToken;
+          } catch (e) {
+            if (AUTH_REVOKED_CODES.includes(e?.code)) {
+              if (ownsCurrentGrant()) { a.status = "auth_error"; this.access.delete(id); this.store.save(); }
+              throw fault("NATIVE_PERMISSION_OR_AUTH", 401);
+            }
+            const nonRetryable = e?.code === "invalid_scope" ||
+              e?.code === "INVALID_REFRESH_RESPONSE" ||
+              /\(HTTP 4(?:0[0-79]|1\d|2[0-8]|[3-9]\d)\)/.test(String(e?.message ?? ""));
+            if (nonRetryable || attempt === 1 || this.closed || this.shutdownController.signal.aborted || !ownsCurrentGrant()) {
+              throw fault("OAUTH_REFRESH_FAILED", 502);
+            }
+            if (this.refreshRetryDelayMs > 0) {
+              let retryTimer;
+              await this.#raceShutdown(
+                new Promise((resolve) => {
+                  retryTimer = setTimeout(resolve, this.refreshRetryDelayMs);
+                }),
+                () => fault("OAUTH_REFRESH_FAILED", 502),
+              ).finally(() => clearTimeout(retryTimer));
+            }
+            if (!ownsCurrentGrant()) throw fault("OAUTH_REFRESH_FAILED", 502);
+          }
         }
-        return tokens.accessToken;
-      } catch (e) {
-        if (["invalid_grant", "invalid_client", "unauthorized_client", "access_denied"].includes(e.code)) {
-          if (ownsCurrentGrant()) { a.status = "auth_error"; this.access.delete(id); this.store.save(); }
-          throw fault("NATIVE_PERMISSION_OR_AUTH", 401);
-        }
-        throw fault("OAUTH_REFRESH_FAILED", 502);
       } finally {
         if (this.pending.get(id) === task) this.pending.delete(id);
       }

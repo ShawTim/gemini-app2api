@@ -433,3 +433,63 @@ test('real HTTP/2 503/gRPC 14 matrix covers general failover, automatic recovery
     }
   }
 });
+
+test('pre-commit 502 OAUTH_REFRESH_FAILED fails over to a healthy account under automaticRecovery while 401 auth errors do not', async t => {
+  // Non-streaming JSON + streaming SSE failover from transient OAUTH_REFRESH_FAILED
+  for (const stream of [false, true]) {
+    const f = await fixture({
+      accountCount: 3,
+      allowFailover: false,
+      allowAutomaticRecovery: true,
+      turns: ['Recovered on healthy account'],
+    });
+    t.after(f.close);
+    let authCalls = 0;
+    f.app.accounts.getValidAccessToken = async () => {
+      authCalls++;
+      if (authCalls === 1) {
+        throw Object.assign(new Error('OAUTH_REFRESH_FAILED'), { code: 'OAUTH_REFRESH_FAILED', status: 502 });
+      }
+      return 'synthetic-valid-token';
+    };
+    const response = await f.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }], stream },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-gemini-provider-attempts'), '2');
+    assert.equal(response.headers.get('x-gemini-failover-reason'), 'transport');
+    assert.equal(response.headers.get('x-gemini-recovery-errors'), 'OAUTH_REFRESH_FAILED');
+    const bodyText = await response.text();
+    assert.match(bodyText, /Recovered on healthy account/);
+    assert.equal(authCalls, 2);
+    assert.equal(f.seen.length, 1);
+  }
+
+  // Permanent 403/401 auth errors must NOT recover/failover under allowFailover: false
+  for (const [authCode, expectedStatus] of [
+    ['NATIVE_PERMISSION_OR_AUTH', 403],
+    ['ACCOUNT_LOGIN_REQUIRED', 401],
+  ]) {
+    const fAuth = await fixture({
+      accountCount: 3,
+      allowFailover: false,
+      allowAutomaticRecovery: true,
+      turns: ['Must not execute'],
+    });
+    t.after(fAuth.close);
+    let blockedCalls = 0;
+    fAuth.app.accounts.getValidAccessToken = async () => {
+      blockedCalls++;
+      throw Object.assign(new Error(authCode), { code: authCode, status: expectedStatus });
+    };
+    const denied = await fAuth.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Hello' }], stream: false },
+    });
+    assert.equal(denied.status, expectedStatus);
+    assert.equal((await denied.json()).error.code, authCode);
+    assert.equal(blockedCalls, 1);
+    assert.equal(fAuth.seen.length, 0);
+  }
+});

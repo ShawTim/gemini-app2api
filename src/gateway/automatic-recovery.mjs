@@ -21,11 +21,21 @@ export function toolRecoveryInstruction(code) {
 export function automaticRecoveryKind(error, model) {
   if (isExplicitQuotaFailure(error)) return 'quota';
   if (isVerifiedEmptyResponse(error, model)) return 'empty_response';
+  const expected = MODEL_MODES[model];
+  if (expected === undefined) return null;
   const e = error?.nativeEvidence;
+  if (error?.code === 'OAUTH_REFRESH_FAILED' && error?.status === 502) {
+    if (!e) return 'transport';
+    if (e.phase === 'auth' && e.upstreamHttpStatus === null && e.grpcStatus === null &&
+        e.nativeRefusalPresent !== true && (e.fallback === undefined || e.fallback === 0) &&
+        (e.downgradeReason === undefined || e.downgradeReason === 0)) {
+      return 'transport';
+    }
+    return null;
+  }
   if (!e || ![502, 503].includes(error?.status) || e.nativeRefusalPresent === true ||
       (e.fallback !== undefined && e.fallback !== 0) || (e.downgradeReason !== undefined && e.downgradeReason !== 0)) return null;
-  const expected = MODEL_MODES[model];
-  if (expected === undefined || (e.observedMode !== null && e.observedMode !== undefined && e.observedMode !== 0 && e.observedMode !== expected)) return null;
+  if (e.observedMode !== null && e.observedMode !== undefined && e.observedMode !== 0 && e.observedMode !== expected) return null;
   if (error.code === 'NATIVE_UPSTREAM_UNAVAILABLE' && error.status === 503 &&
       ['open', 'read', 'decode', 'end'].includes(e.phase) &&
       ((e.upstreamHttpStatus === 503 && (e.grpcStatus === null || e.grpcStatus === 0 || e.grpcStatus === 14)) ||

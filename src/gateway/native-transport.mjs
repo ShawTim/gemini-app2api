@@ -106,6 +106,13 @@ export function openDirectTurn(
     queued = 0;
   const items = [],
     reader = new GrpcMessageReader({ maxBytes: RESPONSE_LIMITS.frameBytes });
+  const detachSocketListeners = () => {
+    const current = socket;
+    socket = null;
+    if (!current) return;
+    try { current.removeListener?.('end', socketEnd); } catch {}
+    try { current.removeListener?.('close', socketClose); } catch {}
+  };
   const connectionEnded = (kind) => {
     if (closed || ended || connectionEnd) return;
     // Node's socketOnClose() locally closes unfinished streams with CANCEL.
@@ -113,14 +120,14 @@ export function openDirectTurn(
     const code = request?.rstCode;
     connectionEnd = { rstCode: Number.isInteger(code) ? code : 0 };
     note(`peer_connection_${kind}`, { rstCode: connectionEnd.rstCode });
+    if (kind === 'close') detachSocketListeners();
   };
   const socketEnd = () => connectionEnded('end');
   const socketClose = () => connectionEnded('close');
   const stop = () => {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
-    socket?.removeListener?.('end', socketEnd);
-    socket?.removeListener?.('close', socketClose);
+    detachSocketListeners();
     note('local_stream_close', { requestedCode: ended ? 0 : 8, rstCode: request?.rstCode });
     try {
       request?.close(ended ? http2.constants.NGHTTP2_NO_ERROR : http2.constants.NGHTTP2_CANCEL);
@@ -239,9 +246,13 @@ export function openDirectTurn(
   signal?.addEventListener("abort", abort, { once: true });
   try {
     client = connect(NATIVE_ORIGIN);
-    socket = client.socket;
-    socket?.prependOnceListener?.('end', socketEnd);
-    socket?.prependOnceListener?.('close', socketClose);
+    try {
+      socket = client.socket;
+      socket?.prependOnceListener?.('end', socketEnd);
+      socket?.prependOnceListener?.('close', socketClose);
+    } catch {
+      detachSocketListeners();
+    }
     client.on("error", () => fail("NATIVE_CONNECTION_FAILED"));
     if (diagnostic) client.on('goaway', code => note('peer_goaway', { goawayCode: code }));
     request = client.request({

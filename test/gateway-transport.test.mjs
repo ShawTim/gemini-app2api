@@ -324,3 +324,53 @@ test("configured native deadline is sent as bounded standard gRPC milliseconds",
   );
   assert.equal(called, false);
 });
+
+test("mid-stream peer TCP FIN and TCP RST do not throw ERR_HTTP2_SOCKET_UNBOUND and surface recoverable transport errors", async (t) => {
+  for (const mode of ["fin", "rst"]) {
+    let rawSocket = null;
+    const server = http2.createServer();
+    server.on("connection", (sock) => {
+      rawSocket = sock;
+    });
+    server.on("stream", (stream) => {
+      stream.on("error", () => {});
+      stream.resume();
+      stream.respond(
+        { ":status": 200, "content-type": "application/grpc" },
+        { waitForTrailers: true },
+      );
+      setImmediate(() => {
+        if (mode === "fin") rawSocket?.end();
+        else rawSocket?.destroy();
+      });
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    t.after(() => new Promise((r) => server.close(r)));
+
+    const connect = () => http2.connect(`http://127.0.0.1:${server.address().port}`);
+    const provider = new NativeDirectProvider(
+      { getValidAccessToken: async () => "synthetic-token" },
+      {
+        openTurn: (token, options) => openDirectTurn(token, options, { connect }),
+        timeoutMs: 1000,
+      },
+    );
+
+    await assert.rejects(
+      provider.runTurn("synthetic", {
+        model: "gemini-argon",
+        messages: [{ role: "user", content: `Synthetic ${mode} drop` }],
+      }),
+      (err) => {
+        assert.notEqual(err.code, "ERR_HTTP2_SOCKET_UNBOUND");
+        assert.equal(err.status, 502);
+        assert.ok(
+          ["NATIVE_STREAM_CLOSED_EARLY", "NATIVE_STREAM_RESET"].includes(err.code),
+          `Unexpected error code for ${mode}: ${err.code}`,
+        );
+        assert.equal(automaticRecoveryKind(err, "gemini-argon"), "transport");
+        return true;
+      },
+    );
+  }
+});

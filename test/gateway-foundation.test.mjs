@@ -225,6 +225,69 @@ test("rejected refresh marks account unavailable without exposing endpoint detai
   );
   assert.equal(a.list()[0].status, "auth_error");
 });
+test("transient refresh failure retries once while permanent OAuth rejection fails immediately", async (t) => {
+  // Case A: transient network failure recovers on single retry
+  {
+    const s = storeFor(t);
+    s.importProfile(syntheticProfile);
+    s.data.accounts.push({ id: "a", label: "fixture", enabled: true, status: "ready", refreshToken: "fixture" });
+    let calls = 0;
+    const a = new Accounts(s, {
+      refreshRetryDelayMs: 1,
+      refresh: async () => {
+        calls++;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return { accessToken: "RECOVERED_ACCESS", expiresInSeconds: 3600 };
+      },
+    });
+    assert.equal(await a.getValidAccessToken("a"), "RECOVERED_ACCESS");
+    assert.equal(calls, 2);
+    assert.equal(a.list()[0].status, "ready");
+    await a.close();
+  }
+  // Case B: persistent HTTP 503 retries once then throws 502 OAUTH_REFRESH_FAILED without auth_error
+  {
+    const s = storeFor(t);
+    s.importProfile(syntheticProfile);
+    s.data.accounts.push({ id: "a", label: "fixture", enabled: true, status: "ready", refreshToken: "fixture" });
+    let calls = 0;
+    const a = new Accounts(s, {
+      refreshRetryDelayMs: 1,
+      refresh: async () => {
+        calls++;
+        throw new Error("OAuth exchange rejected (HTTP 503)");
+      },
+    });
+    await assert.rejects(
+      a.getValidAccessToken("a"),
+      (e) => e.code === "OAUTH_REFRESH_FAILED" && e.status === 502,
+    );
+    assert.equal(calls, 2);
+    assert.equal(a.list()[0].status, "ready");
+    await a.close();
+  }
+  // Case C: non-retryable HTTP 400 rejection fails immediately on first attempt
+  {
+    const s = storeFor(t);
+    s.importProfile(syntheticProfile);
+    s.data.accounts.push({ id: "a", label: "fixture", enabled: true, status: "ready", refreshToken: "fixture" });
+    let calls = 0;
+    const a = new Accounts(s, {
+      refreshRetryDelayMs: 1,
+      refresh: async () => {
+        calls++;
+        throw Object.assign(new Error("OAuth exchange rejected (HTTP 400)"), { code: "OAUTH_REJECTED" });
+      },
+    });
+    await assert.rejects(
+      a.getValidAccessToken("a"),
+      (e) => e.code === "OAUTH_REFRESH_FAILED" && e.status === 502,
+    );
+    assert.equal(calls, 1);
+    assert.equal(a.list()[0].status, "ready");
+    await a.close();
+  }
+});
 test("OAuth login saves only refresh, can cancel, requires explicit profile", async (t) => {
   const s = storeFor(t),
     a = new Accounts(s);
