@@ -3,6 +3,7 @@ import { decodeGrpcMessage } from "./native-evidence.mjs";
  * Prompt tools finish one generation; caller results are new checked API turns.
  */
 import http2 from "node:http2";
+import net from "node:net";
 import crypto from "node:crypto";
 import { buildConsumerToolInitial } from "../../native-wire/consumer-tool-codec.mjs";
 import {
@@ -17,6 +18,19 @@ import { fault } from "./state.mjs";
 import { PROMPT_MAX_BYTES } from "../openai-contract.mjs";
 import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './native-response-limits.mjs';
 import { observeNative } from './native-diagnostic.mjs';
+export const MIN_CONNECT_ATTEMPT_TIMEOUT_MS = 5000;
+// Node v22 defaults Happy Eyeballs per-family attempt timeout to 250ms, which aborts
+// IPv4 connects over high-RTT VPN tunnels when IPv6 returns immediate EHOSTUNREACH.
+export function ensureConnectAttemptTimeout(minMs = MIN_CONNECT_ATTEMPT_TIMEOUT_MS) {
+  if (
+    typeof net.getDefaultAutoSelectFamilyAttemptTimeout === "function" &&
+    typeof net.setDefaultAutoSelectFamilyAttemptTimeout === "function" &&
+    net.getDefaultAutoSelectFamilyAttemptTimeout() < minMs
+  ) {
+    net.setDefaultAutoSelectFamilyAttemptTimeout(minMs);
+  }
+}
+ensureConnectAttemptTimeout();
 export const NATIVE_ORIGIN = "https://robinfrontend-pa.googleapis.com";
 export const NATIVE_RPC =
   "/assistant.mobile.robin.RobinService/ProcessQuery";

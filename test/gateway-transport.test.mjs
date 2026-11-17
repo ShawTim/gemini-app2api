@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http2 from "node:http2";
-import { openDirectTurn, NATIVE_COMPATIBILITY_VERSION } from "../src/gateway/native-transport.mjs";
+import net from "node:net";
+import {
+  openDirectTurn,
+  NATIVE_COMPATIBILITY_VERSION,
+  ensureConnectAttemptTimeout,
+  MIN_CONNECT_ATTEMPT_TIMEOUT_MS,
+} from "../src/gateway/native-transport.mjs";
 import { NativeDirectProvider } from "../src/native-provider.mjs";
 import { automaticRecoveryKind } from "../src/gateway/automatic-recovery.mjs";
 import {
@@ -373,4 +379,22 @@ test("mid-stream peer TCP FIN and TCP RST do not throw ERR_HTTP2_SOCKET_UNBOUND 
       },
     );
   }
+});
+
+test("outbound connect attempt timeout floor prevents 250ms Happy Eyeballs VPN timeouts without lowering higher user settings", (t) => {
+  const prev = net.getDefaultAutoSelectFamilyAttemptTimeout();
+  t.after(() => net.setDefaultAutoSelectFamilyAttemptTimeout(prev));
+
+  assert.ok(
+    prev >= MIN_CONNECT_ATTEMPT_TIMEOUT_MS,
+    `Expected module-load timeout floor >= ${MIN_CONNECT_ATTEMPT_TIMEOUT_MS}, got ${prev}`,
+  );
+
+  net.setDefaultAutoSelectFamilyAttemptTimeout(250);
+  ensureConnectAttemptTimeout();
+  assert.equal(net.getDefaultAutoSelectFamilyAttemptTimeout(), MIN_CONNECT_ATTEMPT_TIMEOUT_MS);
+
+  net.setDefaultAutoSelectFamilyAttemptTimeout(8000);
+  ensureConnectAttemptTimeout();
+  assert.equal(net.getDefaultAutoSelectFamilyAttemptTimeout(), 8000);
 });

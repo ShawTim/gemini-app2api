@@ -9,6 +9,7 @@ import {
   refreshNativeCredential,
 } from "../../native-wire/oauth-loopback.mjs";
 import { fault } from "./state.mjs";
+import { ensureConnectAttemptTimeout } from "./native-transport.mjs";
 import { identifyGoogleAccount, validateIdentity } from "./oauth-identity.mjs";
 import { safeAccountError } from "./native-evidence.mjs";
 import {
@@ -17,6 +18,7 @@ import {
   rejectedState,
   verifiedState,
 } from "./provider-state.mjs";
+ensureConnectAttemptTimeout();
 export class Accounts {
   #termsEntries = new Map();
   #quotaEntries = new Map();
@@ -39,6 +41,7 @@ export class Accounts {
     } = {},
   ) {
     this.store = store;
+    ensureConnectAttemptTimeout();
     this.login = login;
     this.refresh = refresh;
     this.identify = identify;
