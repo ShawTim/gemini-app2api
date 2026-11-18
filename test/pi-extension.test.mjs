@@ -1318,3 +1318,218 @@ test('completeCallbackUrl throws INVALID_CALLBACK_URL when code is missing witho
     session.close();
   }
 });
+
+// =============================================================================
+// 8. Built-in Transcript Helpers, EventStream & Legacy Context Compatibility
+// =============================================================================
+
+test('buildChatPayload falls back to built-in helpers for both legacy Context and TranscriptContext sections/deltas', async () => {
+  const model = { id: 'gemini-hydrogen', provider: 'gemini-app', api: 'gemini-app-api' };
+
+  const legacyContext = {
+    systemPrompt: 'System header',
+    tools: [
+      {
+        name: 'bash',
+        description: 'Run cmd',
+        parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'] },
+      },
+    ],
+    messages: [{ role: 'user', content: 'hi', timestamp: 1 }],
+  };
+  const legacyBuilt = await buildChatPayload(model, legacyContext, {}, {});
+  assert.deepEqual(legacyBuilt.payload.messages, [
+    { role: 'system', content: 'System header' },
+    { role: 'user', content: 'hi' },
+  ]);
+  assert.equal(legacyBuilt.payload.tools?.length, 1);
+  assert.equal(legacyBuilt.payload.tools[0].function.name, 'bash');
+
+  const transcriptContext = {
+    messages: [
+      {
+        role: 'system',
+        content: 'Base prompt',
+        sections: { workspace: 'Initial workspace', temp: 'Temporary section' },
+        toolsAdded: [
+          { name: 'read', description: 'Read file', parameters: { type: 'object' } },
+          { name: 'write', description: 'Write file', parameters: { type: 'object' } },
+        ],
+        timestamp: 1,
+      },
+      { role: 'user', content: 'first', timestamp: 2 },
+      {
+        role: 'system',
+        content: 'Updated note',
+        sections: { workspace: 'Updated workspace', temp: null, extra: 'Added section' },
+        toolsRemoved: [{ name: 'write' }],
+        toolsAdded: [{ name: 'grep', description: 'Search text', parameters: { type: 'object' } }],
+        timestamp: 3,
+      },
+      { role: 'user', content: 'second', timestamp: 4 },
+    ],
+  };
+  const transcriptBuilt = await buildChatPayload(model, transcriptContext, {}, {});
+  assert.equal(transcriptBuilt.payload.messages[0].role, 'system');
+  assert.equal(
+    transcriptBuilt.payload.messages[0].content,
+    'Base prompt\n\nUpdated note\n\nUpdated workspace\n\nAdded section',
+  );
+  assert.deepEqual(
+    transcriptBuilt.payload.tools.map((t) => t.function.name),
+    ['read', 'grep'],
+  );
+  assert.deepEqual(
+    transcriptBuilt.payload.messages.slice(1),
+    [
+      { role: 'user', content: 'first' },
+      { role: 'user', content: 'second' },
+    ],
+  );
+});
+
+test('registerGeminiAppExtension streams end-to-end when transcript helpers are undefined (pi-ai < 0.99 / GooeyPi)', async () => {
+  let registeredProvider = null;
+  const openTurnBodies = [];
+
+  registerGeminiAppExtension(
+    {
+      registerProvider: (p) => {
+        registeredProvider = p;
+      },
+      registerCommand: () => {},
+    },
+    {
+      createProvider: (def) => def,
+      createAssistantMessageEventStream: undefined,
+      getCurrentSystemPrompt: undefined,
+      getCurrentTools: undefined,
+      toToolDeclaration: undefined,
+      openTurn: (_token, config) => {
+        openTurnBodies.push(config);
+        return {
+          events: (async function* () {
+            yield { type: 'frame', bytes: buildNativeFrame('Legacy host OK', { mode: 1, complete: true }) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+          })(),
+          cancel() {},
+        };
+      },
+    },
+  );
+
+  const model = registeredProvider.models[1];
+  const stream = registeredProvider.api.streamSimple(
+    model,
+    {
+      systemPrompt: 'Legacy host system prompt',
+      tools: [
+        {
+          name: 'ls',
+          description: 'List directory',
+          parameters: { type: 'object', properties: { path: { type: 'string' } } },
+        },
+      ],
+      messages: [{ role: 'user', content: 'list cwd', timestamp: 1 }],
+    },
+    { apiKey: 'fixture-token' },
+  );
+
+  const eventTypes = [];
+  for await (const ev of stream) {
+    eventTypes.push(ev.type);
+  }
+  const finalMsg = await stream.result();
+  assert.equal(finalMsg.stopReason, 'stop');
+  assert.equal(finalMsg.content[0].text, 'Legacy host OK');
+  assert.ok(typeof finalMsg.durationMs === 'number' && finalMsg.durationMs >= 0);
+  assert.deepEqual(eventTypes, ['start', 'text_start', 'text_delta', 'text_end', 'done']);
+  assert.equal(openTurnBodies.length, 1);
+  assert.match(openTurnBodies[0].messages[0].content, /Legacy host system prompt/);
+  assert.match(openTurnBodies[0].messages[0].content, /ls/);
+});
+
+test('registerGeminiAppExtension falls back to 2-arg registerProvider(id, config) and OAuth adapter when createProvider is undefined', async () => {
+  const registeredByName = [];
+  const notifications = [];
+  const promptCalls = [];
+
+  registerGeminiAppExtension(
+    {
+      registerProvider: (id, config) => {
+        registeredByName.push({ id, config });
+      },
+      registerCommand: () => {},
+    },
+    {
+      createProvider: undefined,
+      createAssistantMessageEventStream: undefined,
+      auth: {
+        name: 'Google Gemini App',
+        login: async (interaction) => {
+          interaction.notify({ type: 'auth_url', url: 'https://accounts.example.test/auth', instructions: 'Open link' });
+          interaction.notify({ type: 'progress', message: 'Waiting for sign-in...' });
+          const manualCode = await interaction.prompt({
+            type: 'manual_code',
+            message: 'Paste redirect URL',
+          });
+          const textInput = await interaction.prompt({
+            type: 'text',
+            message: 'Enter extra info',
+            placeholder: 'optional',
+          });
+          assert.equal(manualCode, 'manual-callback-url');
+          assert.equal(textInput, 'text-value');
+          return { type: 'oauth', refresh: 'r-1', access: 'a-1', expires: 12345 };
+        },
+        refresh: async (cred) => ({ ...cred, access: 'a-refreshed', expires: 67890 }),
+      },
+      openTurn: () => ({
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame('2-arg host reply', { mode: 1, complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      }),
+    },
+  );
+
+  assert.equal(registeredByName.length, 1);
+  const { id, config } = registeredByName[0];
+  assert.equal(id, 'gemini-app');
+  assert.equal(config.api, 'gemini-app-api');
+  assert.equal(config.models.length, 3);
+  assert.equal(config.oauth.getApiKey({ access: 'cred-token' }), 'cred-token');
+
+  const cred = await config.oauth.login({
+    onAuth: (info) => notifications.push({ kind: 'auth', ...info }),
+    onProgress: (message) => notifications.push({ kind: 'progress', message }),
+    onManualCodeInput: async () => {
+      promptCalls.push('manual');
+      return 'manual-callback-url';
+    },
+    onPrompt: async (p) => {
+      promptCalls.push(`prompt:${p.message}`);
+      return 'text-value';
+    },
+  });
+  assert.equal(cred.access, 'a-1');
+  assert.deepEqual(promptCalls, ['manual', 'prompt:Enter extra info']);
+  assert.deepEqual(notifications, [
+    { kind: 'auth', url: 'https://accounts.example.test/auth', instructions: 'Open link' },
+    { kind: 'progress', message: 'Waiting for sign-in...' },
+  ]);
+
+  const refreshed = await config.oauth.refreshToken(cred);
+  assert.equal(refreshed.access, 'a-refreshed');
+
+  const result = await config
+    .streamSimple(
+      config.models[1],
+      { systemPrompt: '2-arg sys', messages: [{ role: 'user', content: 'hello', timestamp: 1 }] },
+      { apiKey: 'fixture-token' },
+    )
+    .result();
+  assert.equal(result.stopReason, 'stop');
+  assert.equal(result.content[0].text, '2-arg host reply');
+});

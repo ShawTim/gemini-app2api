@@ -88,8 +88,92 @@ function contentChars(content) {
   return 0;
 }
 
+class DefaultAssistantMessageEventStream {
+  #queue = [];
+  #waiting = [];
+  #done = false;
+  #startedAt = Date.now();
+  #startedAtMonotonic = performance.now();
+  #finalResultPromise;
+  #resolveFinalResult;
+
+  constructor() {
+    this.#finalResultPromise = new Promise((resolve) => {
+      this.#resolveFinalResult = resolve;
+    });
+  }
+
+  #time(message) {
+    if (
+      this.#done ||
+      !message ||
+      typeof message !== 'object' ||
+      message.durationMs !== undefined ||
+      message.timestamp < this.#startedAt
+    ) {
+      return;
+    }
+    message.durationMs = Math.max(0, Math.round(performance.now() - this.#startedAtMonotonic));
+  }
+
+  push(event) {
+    if (this.#done) return;
+    if (event?.type === 'done') {
+      this.#time(event.message);
+      this.#done = true;
+      this.#resolveFinalResult(event.message);
+    } else if (event?.type === 'error') {
+      this.#time(event.error);
+      this.#done = true;
+      this.#resolveFinalResult(event.error);
+    }
+    const waiter = this.#waiting.shift();
+    if (waiter) {
+      waiter({ value: event, done: false });
+    } else {
+      this.#queue.push(event);
+    }
+  }
+
+  end(result) {
+    if (result !== undefined) {
+      this.#time(result);
+      this.#done = true;
+      this.#resolveFinalResult(result);
+    } else {
+      this.#done = true;
+    }
+    while (this.#waiting.length > 0) {
+      const waiter = this.#waiting.shift();
+      waiter({ value: undefined, done: true });
+    }
+  }
+
+  async *[Symbol.asyncIterator]() {
+    while (true) {
+      if (this.#queue.length > 0) {
+        yield this.#queue.shift();
+      } else if (this.#done) {
+        return;
+      } else {
+        const next = await new Promise((resolve) => this.#waiting.push(resolve));
+        if (next.done) return;
+        yield next.value;
+      }
+    }
+  }
+
+  result() {
+    return this.#finalResultPromise;
+  }
+}
+
+export function defaultCreateAssistantMessageEventStream() {
+  return new DefaultAssistantMessageEventStream();
+}
+
 export function createGeminiStreamHandler({
-  createAssistantMessageEventStream,
+  createAssistantMessageEventStream = defaultCreateAssistantMessageEventStream,
   getCurrentSystemPrompt,
   getCurrentTools,
   toToolDeclaration,

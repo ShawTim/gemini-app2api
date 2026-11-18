@@ -279,7 +279,8 @@ test('buildPiPackage --clean removes stale .tgz tarballs in safe pack directory'
   const res = buildPiPackage({ baseRoot: root, outDir, clean: true, pack: true });
   assert.equal(fs.existsSync(staleTarball), false);
   assert.ok(res.tarball && fs.existsSync(res.tarball));
-  assert.equal(path.basename(res.tarball), 'pi-gemini-app-0.1.0.tgz');
+  const expectedMeta = JSON.parse(fs.readFileSync(path.join(root, 'extensions', 'pi', 'package-meta.json'), 'utf8'));
+  assert.equal(path.basename(res.tarball), `${expectedMeta.name}-${expectedMeta.version}.tgz`);
 });
 
 test('buildPiPackage --clean refuses unmanaged existing directory and validates before deleting prior build', (t) => {

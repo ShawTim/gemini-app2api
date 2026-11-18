@@ -121,9 +121,47 @@ export function createGeminiAppProvider({
   });
 }
 
-export function registerGeminiAppExtension(pi, dependencies) {
-  const provider = createGeminiAppProvider(dependencies);
-  pi.registerProvider(provider);
+export function registerGeminiAppExtension(pi, dependencies = {}) {
+  if (dependencies?.createProvider === undefined) {
+    const {
+      createProvider: _ignoredCreateProvider,
+      auth = createGeminiOAuthAuth(),
+      fetchGoogleUsageInfo: _ignoredFetchUsage,
+      decodeUsageInfo: _ignoredDecodeUsage,
+      ...streamDependencies
+    } = dependencies;
+    const streamHandler = createGeminiStreamHandler(streamDependencies);
+    pi.registerProvider(PROVIDER_ID, {
+      name: 'Google Gemini App',
+      baseUrl: BASE_URL,
+      api: API_ID,
+      models: MODELS,
+      streamSimple: streamHandler.streamSimple,
+      oauth: {
+        name: auth.name,
+        login: (callbacks) =>
+          auth.login({
+            signal: callbacks?.signal,
+            notify: (ev) => {
+              if (ev.type === 'auth_url') {
+                callbacks?.onAuth?.({ url: ev.url, instructions: ev.instructions });
+              } else if (ev.message) {
+                callbacks?.onProgress?.(ev.message);
+              }
+            },
+            prompt: (p) =>
+              p.type === 'manual_code' && typeof callbacks?.onManualCodeInput === 'function'
+                ? callbacks.onManualCodeInput()
+                : callbacks?.onPrompt?.({ message: p.message, placeholder: p.placeholder }),
+          }),
+        refreshToken: (cred, signal) => auth.refresh(cred, signal),
+        getApiKey: (cred) => cred.access,
+      },
+    });
+  } else {
+    const provider = createGeminiAppProvider(dependencies);
+    pi.registerProvider(provider);
+  }
 
   const fetchUsage = dependencies?.fetchGoogleUsageInfo || defaultFetchGoogleUsageInfo;
   const decodeUsage = dependencies?.decodeUsageInfo || defaultDecodeUsageInfo;

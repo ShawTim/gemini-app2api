@@ -1,18 +1,12 @@
-import {
-  createProvider,
-  createAssistantMessageEventStream,
-  getCurrentSystemPrompt,
-  getCurrentTools,
-  toToolDeclaration,
-} from '@earendil-works/pi-ai';
+import * as piAi from '@earendil-works/pi-ai';
 import { registerGeminiAppExtension } from './provider.js';
 
 export default function (pi) {
   registerGeminiAppExtension(pi, {
-    createProvider,
-    createAssistantMessageEventStream,
-    getCurrentSystemPrompt,
-    getCurrentTools,
-    toToolDeclaration,
+    createProvider: piAi.createProvider,
+    createAssistantMessageEventStream: piAi.createAssistantMessageEventStream,
+    getCurrentSystemPrompt: piAi.getCurrentSystemPrompt,
+    getCurrentTools: piAi.getCurrentTools,
+    toToolDeclaration: piAi.toToolDeclaration,
   });
 }

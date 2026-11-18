@@ -226,14 +226,106 @@ function serializeToolArguments(block) {
   }
 }
 
+function defaultContentText(content, separator = '\n') {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join(separator);
+}
+
+export function defaultGetCurrentTools(messages) {
+  const tools = new Map();
+  if (!Array.isArray(messages)) return [];
+  for (const message of messages) {
+    if (!message || message.role !== 'system') continue;
+    for (const removed of message.toolsRemoved ?? []) {
+      if (removed && typeof removed.name === 'string') {
+        tools.delete(removed.name);
+      }
+    }
+    for (const added of message.toolsAdded ?? []) {
+      if (added && typeof added.name === 'string') {
+        tools.set(added.name, added);
+      }
+    }
+  }
+  return [...tools.values()];
+}
+
+export function defaultGetCurrentSystemPrompt(messages) {
+  if (!Array.isArray(messages)) return '';
+  const contentParts = [];
+  const sections = new Map();
+  let sawSystemMessage = false;
+  for (const message of messages) {
+    if (!message || message.role !== 'system') continue;
+    sawSystemMessage = true;
+    const text = defaultContentText(message.content);
+    if (text.length > 0) contentParts.push(text);
+    if (message.sections && typeof message.sections === 'object') {
+      for (const [name, value] of Object.entries(message.sections)) {
+        if (value === null) {
+          sections.delete(name);
+        } else if (typeof value === 'string') {
+          sections.set(name, value);
+        }
+      }
+    }
+  }
+  if (!sawSystemMessage) return '';
+  const parts = [];
+  const base = contentParts.join('\n\n');
+  if (base.length > 0) parts.push(base);
+  for (const sectionText of sections.values()) {
+    if (sectionText.length > 0) parts.push(sectionText);
+  }
+  return parts.join('\n\n');
+}
+
+export function defaultToToolDeclaration(tool) {
+  const parameters =
+    tool?.parameters !== undefined
+      ? JSON.parse(JSON.stringify(tool.parameters))
+      : { type: 'object' };
+  return {
+    name: tool?.name,
+    description: tool?.description,
+    parameters,
+    ...(tool?.constrainedSampling === undefined
+      ? {}
+      : { constrainedSampling: tool.constrainedSampling }),
+  };
+}
+
+function normalizeContextMessages(context) {
+  const baseMessages = Array.isArray(context?.messages) ? context.messages : [];
+  const hasSystemPrompt =
+    typeof context?.systemPrompt === 'string' && context.systemPrompt.length > 0;
+  const hasTools = Array.isArray(context?.tools) && context.tools.length > 0;
+  if (!hasSystemPrompt && !hasTools) {
+    return baseMessages;
+  }
+  return [
+    {
+      role: 'system',
+      content: hasSystemPrompt ? context.systemPrompt : '',
+      ...(hasTools ? { toolsAdded: context.tools } : {}),
+      timestamp: 0,
+    },
+    ...baseMessages,
+  ];
+}
+
 export async function buildChatPayload(
   model,
   context,
   options = {},
   {
-    getCurrentSystemPrompt,
-    getCurrentTools,
-    toToolDeclaration,
+    getCurrentSystemPrompt = defaultGetCurrentSystemPrompt,
+    getCurrentTools = defaultGetCurrentTools,
+    toToolDeclaration = defaultToToolDeclaration,
     simple = false,
   } = {},
 ) {
@@ -241,7 +333,7 @@ export async function buildChatPayload(
     throw new TypeError('Transcript helpers getCurrentSystemPrompt, getCurrentTools, and toToolDeclaration are required');
   }
 
-  const rawMessages = Array.isArray(context?.messages) ? context.messages : [];
+  const rawMessages = normalizeContextMessages(context);
   const codec = createToolCodec();
 
   const rawTools = getCurrentTools(rawMessages) ?? [];
