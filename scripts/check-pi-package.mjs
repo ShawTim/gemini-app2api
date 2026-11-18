@@ -78,7 +78,7 @@ export async function verifyPiPackageStaging({
     assert.deepEqual(
       [...packedFiles].sort(),
       expectedFiles,
-      'Packed file list must exactly match expected 39 files',
+      'Packed file list must exactly match expected 40 files',
     );
 
     const extractRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-extract-tgz-'));
@@ -131,7 +131,7 @@ export async function verifyPiPackageStaging({
       // 5. Privacy and canonical containment/symlink check on extracted .tgz artifact
       checkFiles(packedFiles, extractedPkgDir);
 
-      // 6. Independent isolated Node ESM loader hook verification across ALL 35 extracted modules
+      // 6. Independent isolated Node ESM loader hook verification across ALL 36 extracted modules
       const realPkgRoot = fs.realpathSync(extractedPkgDir);
       const entryIndexUrl = pathToFileURL(path.join(realPkgRoot, 'extensions', 'pi', 'index.js')).href;
       const stubPiAiUrl =
@@ -198,7 +198,7 @@ export async function verifyPiPackageStaging({
         '});',
         'assert.equal(providers.length, 1);',
         'assert.equal(providers[0].id, "gemini-app");',
-        'assert.equal(providers[0].models.length, 3);',
+        'assert.equal(providers[0].models.length, 4);',
         'assert.deepEqual(commands.map((c) => c.name), ["gemini-quota"]);',
       ].join('\n');
 
@@ -291,6 +291,7 @@ export async function verifyPiPackageStaging({
         assert.match(cliResult.stdout, /gemini-argon/);
         assert.match(cliResult.stdout, /gemini-hydrogen/);
         assert.match(cliResult.stdout, /gemini-flash-lite/);
+        assert.match(cliResult.stdout, /gemini-auto/);
         cliSmoke = 'passed';
       }
 

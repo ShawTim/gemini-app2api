@@ -8,11 +8,12 @@ import { spawnSync } from 'node:child_process';
 
 import { startLoopbackLogin } from '../native-wire/oauth-loopback.mjs';
 import { normalizeChatRequest } from '../src/openai-contract.mjs';
-import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
+import { lengthDelimited as m, parse, varintField as v } from '../native-wire/protobuf.mjs';
+import { buildConsumerToolInitial } from '../native-wire/consumer-tool-codec.mjs';
 import { createGeminiOAuthAuth, resolveOAuthConfig } from '../extensions/pi/auth.js';
 import { buildChatPayload, createToolCodec, resolveThinkingLevel } from '../extensions/pi/transcript.js';
 import { createGeminiStreamHandler } from '../extensions/pi/stream.js';
-import { MODELS, registerGeminiAppExtension } from '../extensions/pi/provider.js';
+import { MODELS, filterGeminiModels, registerGeminiAppExtension } from '../extensions/pi/provider.js';
 
 const TEST_PROFILE = Object.freeze({
   clientId: '12345-fixture.apps.googleusercontent.com',
@@ -192,6 +193,7 @@ test('OAuth SSH manual callback paste races loopback server, validates state, ex
       assert.equal(accessToken, 'scoped-robin-access-token');
       throw Object.assign(new Error('Transient ToS error'), { code: 'TOS_PRECONDITION_REQUIRED' });
     },
+    fetchGoogleUsageInfo: async () => ({ payload: v(2, 2) }),
   });
 
   const before = Date.now();
@@ -252,6 +254,7 @@ test('OAuth local HTTP loopback callback wins race, aborts manual prompt, and re
       expiresInSeconds: 1800,
     }),
     acceptGoogleMainTerms: async () => ({ status: 'accepted' }),
+    fetchGoogleUsageInfo: async () => ({ payload: v(2, 2) }),
   });
 
   let authUrl;
@@ -407,6 +410,7 @@ test('OAuth login propagates non-TOS auth errors during terms verification', asy
     acceptGoogleMainTerms: async () => {
       throw Object.assign(new Error('Permission denied'), { code: 'NATIVE_PERMISSION_OR_AUTH' });
     },
+    fetchGoogleUsageInfo: async () => ({ payload: v(2, 2) }),
   });
 
   let authUrl;
@@ -1154,7 +1158,7 @@ test('/gemini-quota command fetches token via modelRegistry and formats usage ro
   );
 
   assert.equal(registeredProvider.id, 'gemini-app');
-  assert.equal(MODELS.length, 3);
+  assert.equal(MODELS.length, 4);
   assert.ok(registeredCommands.has('gemini-quota'));
 
   await registeredCommands.get('gemini-quota').handler('', {
@@ -1218,6 +1222,7 @@ test('Pi CLI offline smoke test loads ./extensions/pi and registers gemini-app m
   assert.match(result.stdout, /gemini-argon/);
   assert.match(result.stdout, /gemini-hydrogen/);
   assert.match(result.stdout, /gemini-flash-lite/);
+  assert.match(result.stdout, /gemini-auto/);
 });
 
 test('formatFriendlyError surfaces ProtocolError codes and /login hint on auth errors', async () => {
@@ -1498,7 +1503,7 @@ test('registerGeminiAppExtension falls back to 2-arg registerProvider(id, config
   const { id, config } = registeredByName[0];
   assert.equal(id, 'gemini-app');
   assert.equal(config.api, 'gemini-app-api');
-  assert.equal(config.models.length, 3);
+  assert.equal(config.models.length, 4);
   assert.equal(config.oauth.getApiKey({ access: 'cred-token' }), 'cred-token');
 
   const cred = await config.oauth.login({
@@ -1532,4 +1537,303 @@ test('registerGeminiAppExtension falls back to 2-arg registerProvider(id, config
     .result();
   assert.equal(result.stopReason, 'stop');
   assert.equal(result.content[0].text, '2-arg host reply');
+});
+
+// =============================================================================
+// 9. gemini-auto SmartModelSelection, Subscription Tier Filtering & Errors
+// =============================================================================
+
+test('gemini-auto streams with smartModelSelection=true, omits mode/thinking wire tags, and accepts dynamic resolved modes', async () => {
+  const autoInitial = buildConsumerToolInitial({
+    userText: 'hello free tier',
+    modeCategory: null,
+    thinkingLevel: null,
+    smartModelSelection: true,
+    clientMetadata: { clientType: 21, clientVersion: 'fixture', clientInstanceId: 'fixture-id', triggerType: 1, uiSource: 1 },
+  });
+  const outer = parse(autoInitial).find((f) => f.number === 1000).payload;
+  const templateBytes = parse(parse(outer).find((f) => f.number === 1001).payload).find((f) => f.number === 1).payload;
+  const templateFields = parse(templateBytes);
+  assert.equal(templateFields.some((f) => f.number === 47), false, 'requestedModeCategory must be omitted');
+  assert.equal(templateFields.some((f) => f.number === 48), false, 'requestedThinkingLevel must be omitted');
+  assert.equal(templateFields.find((f) => f.number === 56)?.payload[0], 1, 'isSmartModelSelectionEnabled must be 1');
+
+  for (const resolvedMode of [6, 1, 0, null]) {
+    const openCalls = [];
+    const handler = createGeminiStreamHandler({
+      createAssistantMessageEventStream: () => new MockEventStream(),
+      ...systemHelpers,
+      openTurn: (_token, config) => {
+        openCalls.push(config);
+        return {
+          events: (async function* () {
+            yield { type: 'frame', bytes: buildNativeFrame(`Auto reply mode=${resolvedMode}`, { mode: resolvedMode, complete: true }) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+          })(),
+          cancel() {},
+        };
+      },
+    });
+    const autoModel = MODELS.find((item) => item.id === 'gemini-auto');
+    assert.ok(autoModel);
+    const msg = await handler
+      .streamSimple(autoModel, { messages: [{ role: 'user', content: 'hi', timestamp: 1 }] }, { apiKey: 'fixture-token' })
+      .result();
+    assert.equal(msg.stopReason, 'stop');
+    assert.equal(msg.content[0].text, `Auto reply mode=${resolvedMode}`);
+    assert.equal(openCalls.length, 1);
+    assert.equal(openCalls[0].smartModelSelection, true);
+    assert.equal(openCalls[0].modeCategory, null);
+    assert.equal(openCalls[0].thinkingLevel, null);
+  }
+
+  // Verify single-shot transport recovery works for gemini-auto too
+  let attempts = 0;
+  const recoverHandler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    openTurn: () => {
+      attempts++;
+      if (attempts === 1) {
+        return {
+          events: (async function* () {
+            yield { type: 'end', httpStatus: 503, grpcStatus: 14 };
+          })(),
+          cancel() {},
+        };
+      }
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame('Auto recovered', { mode: 6, complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    },
+  });
+  const autoModel = MODELS.find((item) => item.id === 'gemini-auto');
+  const recovered = await recoverHandler
+    .streamSimple(autoModel, { messages: [{ role: 'user', content: 'retry auto', timestamp: 1 }] }, { apiKey: 'fixture-token' })
+    .result();
+  assert.equal(attempts, 2);
+  assert.equal(recovered.stopReason, 'stop');
+  assert.equal(recovered.content[0].text, 'Auto recovered');
+});
+
+test('auth.login and auth.refresh detect subscriptionTier via GetUsageInfo with non-fatal fallback', async () => {
+  const notifications = [];
+  let currentTierWire = 1; // free
+  let failUsage = false;
+
+  const auth = createGeminiOAuthAuth({
+    defaultProfile: TEST_PROFILE,
+    startLoopbackLogin: (cfg, deps) =>
+      startLoopbackLogin(cfg, {
+        ...deps,
+        fetchImpl: async () =>
+          jsonReply({
+            access_token: 'bootstrap',
+            refresh_token: 'ref-tier',
+            expires_in: 3600,
+          }),
+      }),
+    refreshNativeCredential: async () => ({
+      accessToken: 'scoped-tier-token',
+      refreshToken: null,
+      expiresInSeconds: 3600,
+    }),
+    acceptGoogleMainTerms: async () => ({ status: 'accepted' }),
+    fetchGoogleUsageInfo: async (token) => {
+      assert.equal(token, 'scoped-tier-token');
+      if (failUsage) throw Object.assign(new Error('Usage unavailable'), { code: 'QUOTA_TIMEOUT' });
+      return { payload: v(2, currentTierWire) };
+    },
+  });
+
+  let authUrl;
+  const loginPromise = auth.login({
+    signal: new AbortController().signal,
+    notify: (e) => {
+      notifications.push(e);
+      if (e.type === 'auth_url') authUrl = new URL(e.url);
+    },
+    prompt: () => new Promise(() => {}),
+  });
+  while (!authUrl) await new Promise((r) => setImmediate(r));
+  const redirect = new URL(authUrl.searchParams.get('redirect_uri'));
+  redirect.hostname = '127.0.0.1';
+  redirect.search = new URLSearchParams({
+    state: authUrl.searchParams.get('state'),
+    code: 'tier-code',
+  }).toString();
+  await fetch(redirect);
+
+  const freeCred = await loginPromise;
+  assert.equal(freeCred.subscriptionTier, 'free');
+  assert.ok(notifications.some((e) => e.type === 'progress' && e.message.includes('Free account (gemini-auto enabled)')));
+
+  // Refresh upgrades detected tier to pro
+  currentTierWire = 2;
+  const proCred = await auth.refresh(freeCred, new AbortController().signal);
+  assert.equal(proCred.subscriptionTier, 'pro');
+
+  // Refresh outage preserves prior subscriptionTier cleanly
+  failUsage = true;
+  const keptCred = await auth.refresh(proCred, new AbortController().signal);
+  assert.equal(keptCred.subscriptionTier, 'pro');
+
+  // Login outage does not fail sign-in and omits unknown subscriptionTier
+  let authUrl2;
+  const loginPromise2 = auth.login({
+    signal: new AbortController().signal,
+    notify: (e) => {
+      if (e.type === 'auth_url') authUrl2 = new URL(e.url);
+    },
+    prompt: () => new Promise(() => {}),
+  });
+  while (!authUrl2) await new Promise((r) => setImmediate(r));
+  const redirect2 = new URL(authUrl2.searchParams.get('redirect_uri'));
+  redirect2.hostname = '127.0.0.1';
+  redirect2.search = new URLSearchParams({
+    state: authUrl2.searchParams.get('state'),
+    code: 'tier-code-2',
+  }).toString();
+  await fetch(redirect2);
+
+  const fallbackCred = await loginPromise2;
+  assert.equal(fallbackCred.access, 'scoped-tier-token');
+  assert.equal('subscriptionTier' in fallbackCred, false);
+});
+
+test('filterGeminiModels restricts Free accounts to gemini-auto on both createProvider and 2-arg hosts while preserving other providers', () => {
+  const mixedModels = [
+    ...MODELS,
+    { id: 'claude-sonnet', name: 'Claude', provider: 'anthropic', api: 'anthropic-messages' },
+  ];
+
+  // Free credential: keeps other providers untouched, narrows gemini-app to gemini-auto only
+  const freeFiltered = filterGeminiModels(mixedModels, { type: 'oauth', subscriptionTier: 'free' });
+  assert.deepEqual(
+    freeFiltered.map((m) => `${m.provider}/${m.id}`),
+    ['gemini-app/gemini-auto', 'anthropic/claude-sonnet'],
+  );
+
+  // Paid or unknown credentials keep all gemini-app models
+  assert.deepEqual(
+    filterGeminiModels(MODELS, { type: 'oauth', subscriptionTier: 'pro' }).map((m) => m.id),
+    ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite', 'gemini-auto'],
+  );
+  assert.deepEqual(
+    filterGeminiModels(MODELS, undefined).map((m) => m.id),
+    ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite', 'gemini-auto'],
+  );
+
+  let createdDef = null;
+  registerGeminiAppExtension(
+    { registerProvider: (def) => { createdDef = def; }, registerCommand: () => {} },
+    { createProvider: (def) => def, createAssistantMessageEventStream: () => new MockEventStream() },
+  );
+  assert.equal(typeof createdDef.filterModels, 'function');
+  assert.deepEqual(
+    createdDef.filterModels(MODELS, { type: 'oauth', subscriptionTier: 'free' }).map((m) => m.id),
+    ['gemini-auto'],
+  );
+
+  let registeredConfig = null;
+  registerGeminiAppExtension(
+    { registerProvider: (_id, cfg) => { registeredConfig = cfg; }, registerCommand: () => {} },
+    { createProvider: undefined, createAssistantMessageEventStream: () => new MockEventStream() },
+  );
+  assert.equal(typeof registeredConfig.oauth?.modifyModels, 'function');
+  assert.deepEqual(
+    registeredConfig.oauth.modifyModels(mixedModels, { type: 'oauth', subscriptionTier: 'free' }).map((m) => `${m.provider}/${m.id}`),
+    ['gemini-app/gemini-auto', 'anthropic/claude-sonnet'],
+  );
+});
+
+test('/gemini-quota displays detected subscription tier header alongside usage rows', async () => {
+  const registeredCommands = new Map();
+  const notifications = [];
+  const floatField = (number, value) => {
+    const buf = Buffer.alloc(5);
+    buf[0] = number * 8 + 5;
+    buf.writeFloatLE(value, 1);
+    return buf;
+  };
+  let tierVarint = 1; // Free
+  const buildUsage = () =>
+    Buffer.concat([
+      v(2, tierVarint),
+      m(3, m(2, Buffer.concat([floatField(2, 0.2), m(3, Buffer.from('5-hour limit'))]))),
+    ]);
+
+  registerGeminiAppExtension(
+    { registerProvider: () => {}, registerCommand: (name, spec) => registeredCommands.set(name, spec) },
+    {
+      createProvider: (def) => def,
+      createAssistantMessageEventStream: () => new MockEventStream(),
+      fetchGoogleUsageInfo: async () => ({ payload: buildUsage() }),
+    },
+  );
+
+  await registeredCommands.get('gemini-quota').handler('', {
+    modelRegistry: { getApiKeyForProvider: async () => 'token' },
+    ui: { notify: (msg, level) => notifications.push({ msg, level }) },
+  });
+  assert.match(notifications.at(-1).msg, /Gemini Subscription: Free \(available model: gemini-auto\)/);
+  assert.match(notifications.at(-1).msg, /5-hour limit: 80% remaining \(20% used\)/);
+
+  tierVarint = 2; // AI Pro
+  await registeredCommands.get('gemini-quota').handler('', {
+    modelRegistry: { getApiKeyForProvider: async () => 'token' },
+    ui: { notify: (msg, level) => notifications.push({ msg, level }) },
+  });
+  assert.match(notifications.at(-1).msg, /Gemini Subscription: AI Pro/);
+});
+
+test('formatFriendlyError exposes upstreamMessage for NATIVE_PRECONDITION_REQUIRED and helpful hints on downgrade', async () => {
+  const { protocolError } = await import('../src/tool-protocol.mjs');
+  const model = { id: 'gemini-argon', provider: 'gemini-app', api: 'gemini-app-api' };
+  const context = { messages: [{ role: 'user', content: 'Hi', timestamp: 1 }] };
+
+  const makeHandler = (err) =>
+    createGeminiStreamHandler({
+      createAssistantMessageEventStream: () => new MockEventStream(),
+      ...systemHelpers,
+      NativeDirectProvider: class {
+        async runTurn() {
+          throw err;
+        }
+      },
+    });
+
+  const tosErr = Object.assign(protocolError('NATIVE_PRECONDITION_REQUIRED', 502), {
+    nativeEvidence: { upstreamMessage: 'Before proceeding, please accept our terms of service.' },
+  });
+  const tosRes = await makeHandler(tosErr).streamSimple(model, context, { apiKey: 'tok' }).result();
+  assert.match(tosRes.errorMessage, /Terms of Service not accepted/);
+  assert.match(tosRes.errorMessage, /NATIVE_PRECONDITION_REQUIRED/);
+  assert.match(tosRes.errorMessage, /Before proceeding, please accept our terms of service\./);
+
+  const advErr = Object.assign(protocolError('NATIVE_PRECONDITION_REQUIRED', 502), {
+    nativeEvidence: { upstreamMessage: 'REQUIRES_ADVANCED: Mode requires AI Pro' },
+  });
+  const advRes = await makeHandler(advErr).streamSimple(model, context, { apiKey: 'tok' }).result();
+  assert.match(advRes.errorMessage, /requires a paid Google AI subscription/i);
+  assert.match(advRes.errorMessage, /gemini-auto/);
+  assert.match(advRes.errorMessage, /REQUIRES_ADVANCED/);
+
+  const genericPrecondErr = Object.assign(protocolError('NATIVE_PRECONDITION_REQUIRED', 502), {
+    nativeEvidence: { upstreamMessage: 'CUSTOM_PRECONDITION_DETAIL' },
+  });
+  const genRes = await makeHandler(genericPrecondErr).streamSimple(model, context, { apiKey: 'tok' }).result();
+  assert.match(genRes.errorMessage, /NATIVE_PRECONDITION_REQUIRED/);
+  assert.match(genRes.errorMessage, /CUSTOM_PRECONDITION_DETAIL/);
+  assert.match(genRes.errorMessage, /gemini-auto/);
+
+  const downgradeRes = await makeHandler(protocolError('MODEL_DOWNGRADE_REJECTED', 502))
+    .streamSimple(model, context, { apiKey: 'tok' })
+    .result();
+  assert.match(downgradeRes.errorMessage, /MODEL_DOWNGRADE_REJECTED/);
+  assert.match(downgradeRes.errorMessage, /gemini-auto/);
 });

@@ -166,11 +166,12 @@ function content(value, { assistant = false, responses = false, user = false, pr
   });
   return parts.some(part => part.type === 'image_url') ? parts : parts.map(part => part.text).join('');
 }
-function settings(body) {
+function settings(body, { allowAutoModel = false } = {}) {
   const model = body.model === undefined ? 'gemini-argon' : body.model;
   if (typeof model !== 'string') fail('UNSUPPORTED_MODEL', 400, 'model');
   const alias = model.startsWith('models/') ? model.slice(7) : model;
-  if (!NATIVE_MODELS.includes(alias)) fail('UNSUPPORTED_MODEL', 400, 'model');
+  const allowedModels = allowAutoModel ? [...NATIVE_MODELS, 'gemini-auto'] : NATIVE_MODELS;
+  if (!allowedModels.includes(alias)) fail('UNSUPPORTED_MODEL', 400, 'model');
   const thinking = thinkingSettings(body);
   if (body.stream !== undefined && typeof body.stream !== 'boolean') fail('INVALID_STREAM', 400, 'stream');
   if (body.native_search !== undefined && typeof body.native_search !== 'boolean') fail('INVALID_NATIVE_SEARCH', 400, 'native_search');
@@ -308,12 +309,12 @@ function validateInertOpenAIFields(payload, { responses = false } = {}) {
   }
 }
 
-export function normalizeChatRequest(payload) {
+export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
   keys(payload, ['model', 'messages', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'stream_options', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed', 'logprobs', 'top_logprobs', 'response_format', 'user', 'metadata', 'stop', 'n', 'service_tier', 'logit_bias', 'verbosity', 'modalities']);
   requestBudget(payload);
   validateInertOpenAIFields(payload);
   const compat = compatibility(payload);
-  const resolved = settings(payload);
+  const resolved = settings(payload, { allowAutoModel });
   const response_format = normalizeChatResponseFormat(payload.response_format);
   if (resolved.native_search) {
     if (resolved.model !== 'gemini-argon' || resolved.thinking_level !== 2) fail('UNSUPPORTED_NATIVE_SEARCH_MODE');
@@ -381,12 +382,12 @@ export function normalizeChatRequest(payload) {
   return body;
 }
 
-export function normalizeResponsesRequest(payload) {
+export function normalizeResponsesRequest(payload, { allowAutoModel = false } = {}) {
   keys(payload, ['model', 'input', 'instructions', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'temperature', 'top_p', 'max_output_tokens', 'text', 'user', 'metadata', 'service_tier', 'truncation']);
   requestBudget(payload);
   validateInertOpenAIFields(payload, { responses: true });
   const compat = compatibility(payload, true);
-  const resolved = settings(payload);
+  const resolved = settings(payload, { allowAutoModel });
   const response_format = normalizeResponsesText(payload.text);
   const messages = [];
   if (payload.instructions !== undefined && payload.instructions !== null) messages.push({ role: 'system', content: text(payload.instructions) });
@@ -421,7 +422,7 @@ export function normalizeResponsesRequest(payload) {
     }
   }
   const { include: _include, ...inertCompat } = compat;
-  const body = normalizeChatRequest({ ...resolved, ...inertCompat, ...(response_format ? { response_format } : {}), messages, tools, tool_choice: choice, [RESPONSE_TOOL_IDENTITIES]: identities });
+  const body = normalizeChatRequest({ ...resolved, ...inertCompat, ...(response_format ? { response_format } : {}), messages, tools, tool_choice: choice, [RESPONSE_TOOL_IDENTITIES]: identities }, { allowAutoModel });
   const projected = collectImageInputs(body.messages).messages;
   return {
     body,

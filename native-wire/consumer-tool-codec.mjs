@@ -212,9 +212,10 @@ export function encodeClientFunctionCallResult(calls,contents){
   }));
 }
 export const encodeConsumerResultsEnd = turnSequence => cat(sequence(turnSequence), m(1011, m(2, Buffer.alloc(0))));
-export function buildConsumerToolInitial({ userText, images = [], systemText, tools = [], toolChoice = 'auto', turnSequence = 1, clientMetadata, identifiers, continuation, agentChat = false, clientToolsFeature = false, operationFeature = true, halfCloseFeature = false, localSession = false, clientToolsCapability = false, clientFunctionCapabilities = false, ownedDeviceId, modeCategory, thinkingLevel = ARGON_THINKING_LEVEL, temporaryChat = true, allowNativeTools = false } = {}, { maxInputBytes = TOOL_LIMITS.bytes } = {}) {
+export function buildConsumerToolInitial({ userText, images = [], systemText, tools = [], toolChoice = 'auto', turnSequence = 1, clientMetadata, identifiers, continuation, agentChat = false, clientToolsFeature = false, operationFeature = true, halfCloseFeature = false, localSession = false, clientToolsCapability = false, clientFunctionCapabilities = false, ownedDeviceId, modeCategory, thinkingLevel = ARGON_THINKING_LEVEL, temporaryChat = true, allowNativeTools = false, smartModelSelection = false } = {}, { maxInputBytes = TOOL_LIMITS.bytes } = {}) {
   if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1 || maxInputBytes > MAX_MESSAGE_BYTES) rejectTool('INVALID_NATIVE_INPUT_LIMIT');
   string(userText, maxInputBytes); if (systemText !== undefined) string(systemText); if (typeof allowNativeTools !== 'boolean') rejectTool('INVALID_NATIVE_TOOLS_PERMISSION'); if (allowNativeTools && tools.length) rejectTool('NATIVE_TOOLS_WITH_DECLARATIONS'); if (typeof agentChat !== 'boolean') rejectTool('INVALID_AGENT_CONTEXT'); if (typeof clientToolsFeature !== 'boolean') rejectTool('INVALID_CLIENT_TOOLS_FEATURE'); if (typeof operationFeature !== 'boolean') rejectTool('INVALID_OPERATION_FEATURE'); if (typeof halfCloseFeature !== 'boolean') rejectTool('INVALID_HALF_CLOSE_FEATURE'); if (typeof localSession !== 'boolean') rejectTool('INVALID_LOCAL_SESSION'); if (typeof clientToolsCapability !== 'boolean') rejectTool('INVALID_CLIENT_TOOLS_CAPABILITY'); if (typeof clientFunctionCapabilities !== 'boolean') rejectTool('INVALID_CLIENT_FUNCTION_CAPABILITIES');
+  if (typeof smartModelSelection !== 'boolean') rejectTool('INVALID_SMART_MODEL_SELECTION');
   if (allowNativeTools && (!Array.isArray(images) || images.length)) rejectTool('NATIVE_SEARCH_IMAGES_UNSUPPORTED');
   if(ownedDeviceId!==undefined&&(typeof ownedDeviceId!=='string'||!/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/.test(ownedDeviceId)))rejectTool('INVALID_OWNED_DEVICE_ID');if(ownedDeviceId!==undefined&&!localSession)rejectTool('OWNED_DEVICE_REQUIRES_LOCAL_SESSION');
   const registry = compileConsumerTools(tools, toolChoice);if(localSession&&!registry.size)rejectTool('LOCAL_TOOLS_REQUIRED');if((clientToolsCapability||clientFunctionCapabilities)&&!registry.size)rejectTool('TOOL_CAPABILITY_REQUIRES_DECLARATIONS');
@@ -222,13 +223,15 @@ export function buildConsumerToolInitial({ userText, images = [], systemText, to
   if (!operationFeature && (!registry.size || !clientToolsFeature)) rejectTool('OPERATION_OMISSION_REQUIRES_CLIENT_TOOLS');
   if (halfCloseFeature && !operationFeature) rejectTool('HALF_CLOSE_REQUIRES_OPERATION_FEATURE');
   const metadata = { ...(clientMetadata ?? { clientType: 21, languageCode: 'en', interfaceLanguageCode: 'en', clientVersion: NATIVE_VERSION, clientInstanceId: crypto.randomUUID(), triggerType: 1, uiSource: 1 }), clientFunctionCapabilities };
-  if (!Number.isSafeInteger(thinkingLevel) || thinkingLevel < 0 || thinkingLevel > 4) rejectTool('INVALID_THINKING_LEVEL');
+  const omitThinking = smartModelSelection && thinkingLevel === null;
+  if (!omitThinking && (!Number.isSafeInteger(thinkingLevel) || thinkingLevel < 0 || thinkingLevel > 4)) rejectTool('INVALID_THINKING_LEVEL');
   if (typeof temporaryChat !== 'boolean') rejectTool('INVALID_TEMPORARY_CHAT');
-  const base = buildClientGenerate({ userText, images, systemText, identifiers, clientMetadata: metadata, temporaryChat });
+  const base = buildClientGenerate({ userText, images, systemText, identifiers, clientMetadata: metadata, temporaryChat, smartModelSelection });
   const desktopInfo = cat(...[...registry.values()].map(tool => m(2, tool.declaration)), ...(ownedDeviceId===undefined?[]:[s(6,ownedDeviceId)]), ...(clientToolsCapability ? [m(7, unsignedVarint(CLIENT_TOOLS_CAPABILITY))] : []));
-  const requestedMode = modeCategory === undefined ? ARGON_MODE_CATEGORY : modeCategory;
-  if (!Number.isSafeInteger(requestedMode) || requestedMode < 0 || requestedMode > 255) rejectTool('INVALID_MODE_CATEGORY');
-  const template = cat(...parse(base).map(field => field.number === 15 ? v(15, registry.size || allowNativeTools ? 0 : 1) : field.raw), v(47, requestedMode), v(48, thinkingLevel), ...(agentChat ? [v(49, 1)] : []), ...(registry.size ? [m(51, cat(...(ownedDeviceId===undefined?[]:[s(1,ownedDeviceId)]),m(3, desktopInfo), ...(localSession ? [v(5, 1)] : [])))] : []));
+  const omitMode = smartModelSelection && (modeCategory === undefined || modeCategory === null);
+  const requestedMode = omitMode ? null : (modeCategory === undefined ? ARGON_MODE_CATEGORY : modeCategory);
+  if (!omitMode && (!Number.isSafeInteger(requestedMode) || requestedMode < 0 || requestedMode > 255)) rejectTool('INVALID_MODE_CATEGORY');
+  const template = cat(...parse(base).map(field => field.number === 15 ? v(15, registry.size || allowNativeTools ? 0 : 1) : field.raw), ...(omitMode ? [] : [v(47, requestedMode)]), ...(omitThinking ? [] : [v(48, thinkingLevel)]), ...(agentChat ? [v(49, 1)] : []), ...(registry.size ? [m(51, cat(...(ownedDeviceId===undefined?[]:[s(1,ownedDeviceId)]),m(3, desktopInfo), ...(localSession ? [v(5, 1)] : [])))] : []));
   if (continuation !== undefined && !Buffer.isBuffer(continuation)) rejectTool('INVALID_OWN_CONTINUATION');
   // Proven empty InitialRequest.ext1013 marker; NOT an outer update carrier or declaration list.
   const initial = cat(m(1, buildRequestMetadata(metadata)), ...(continuation === undefined ? [] : [m(6, continuation)]), m(1001, m(1, template)), m(1004, Buffer.alloc(0)), ...(registry.size && operationFeature ? [m(1009, Buffer.alloc(0))] : []), ...(halfCloseFeature ? [m(1010, Buffer.alloc(0))] : []), ...(clientToolsFeature ? [m(1013, Buffer.alloc(0))] : []));

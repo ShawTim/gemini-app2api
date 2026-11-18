@@ -28,16 +28,20 @@ export function inspectNativeOutput(fields) {
     nativeStructuredOutputPresent: structured, nativeRefusalPresent: refusal,
     ...(Number.isSafeInteger(completenessState) && completenessState >= 0 && completenessState <= 0x7fffffff ? { nativeCompletenessState: completenessState } : {}) };
 }
-export function isVerifiedEmptyResponse(error, model) {
+export function isVerifiedEmptyResponse(error, model, { allowAutoModel = false } = {}) {
   const e = error?.nativeEvidence;
+  const isAuto = allowAutoModel === true && model === 'gemini-auto';
+  const modeOk = isAuto
+    ? (e?.observedMode === null || e?.observedMode === undefined || (Number.isSafeInteger(e.observedMode) && e.observedMode >= 0 && e.observedMode <= 64))
+    : (MODEL_MODES[model] !== undefined && e?.observedMode === MODEL_MODES[model]);
   return error?.status === 502 && error.code === 'EMPTY_NATIVE_RESPONSE' &&
     e?.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 &&
-    e.wireEnded === true && e.modelCompleted === true && e.observedMode === MODEL_MODES[model] && MODEL_MODES[model] !== undefined &&
+    e.wireEnded === true && e.modelCompleted === true && modeOk &&
     ['no_text', 'whitespace_only', 'thoughts_only'].includes(e.emptyResponseReason) &&
     Number.isSafeInteger(e.nativeTextBytes) && e.nativeTextBytes >= 0 && e.nativeTextBytes <= 8 * 1024 * 1024 &&
     (e.emptyResponseReason === 'whitespace_only' ? e.nativeTextBytes > 0 : e.nativeTextBytes === 0) &&
     typeof e.nativeThoughtsPresent === 'boolean' && (e.emptyResponseReason !== 'thoughts_only' || e.nativeThoughtsPresent === true) &&
     e.nativeShareableTextBytes === 0 && e.nativeStructuredOutputPresent === false && e.nativeRefusalPresent === false &&
-    e.http2ResetCode === undefined && (e.fallback === undefined || e.fallback === 0) &&
-    (e.downgradeReason === undefined || e.downgradeReason === 0);
+    e.http2ResetCode === undefined &&
+    (isAuto || ((e.fallback === undefined || e.fallback === 0) && (e.downgradeReason === undefined || e.downgradeReason === 0)));
 }

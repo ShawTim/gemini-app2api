@@ -100,22 +100,25 @@ function safeFailure(error) {
 
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, timeoutMs = 600_000, modelAlias = 'gemini-argon', continuation = false, allowTextSnapshotReplacement = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, timeoutMs = 600_000, modelAlias = 'gemini-argon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
     if (typeof downloadImages !== 'function') throw new TypeError('downloadImages required');
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new TypeError('invalid timeout');
     if (continuation !== false) throw protocolError('UNSUPPORTED_CONTINUATION', 400);
-    if (!NATIVE_MODELS.includes(modelAlias)) throw protocolError('UNSUPPORTED_MODEL', 400);
+    if (typeof allowAutoModel !== 'boolean') throw new TypeError('invalid auto model policy');
+    const allowedModels = allowAutoModel ? [...NATIVE_MODELS, 'gemini-auto'] : NATIVE_MODELS;
+    if (!allowedModels.includes(modelAlias)) throw protocolError('UNSUPPORTED_MODEL', 400);
     this.authManager = authManager; this.openTurn = openTurn; this.uploadImages = uploadImages; this.timeoutMs = timeoutMs;
     this.downloadImages = downloadImages;
     if (typeof allowTextSnapshotReplacement !== 'boolean') throw new TypeError('invalid snapshot policy');
     this.allowTextSnapshotReplacement = allowTextSnapshotReplacement;
+    this.allowAutoModel = allowAutoModel;
     this.modelAlias = modelAlias; this.continuationEnabled = false;
   }
 
-  buildTurn(body) { return buildCanonicalPrompt(normalizeChatRequest(body)); }
+  buildTurn(body) { return buildCanonicalPrompt(normalizeChatRequest(body, { allowAutoModel: this.allowAutoModel })); }
 
   async runNativeSearch(accountId, body, onDelta, context) {
     const timeoutMs = context.timeoutMs ?? this.timeoutMs;
@@ -173,14 +176,18 @@ export class NativeDirectProvider {
   async runTurn(accountId, canonicalChatBody, onDelta = () => {}, context = {}) {
     const timeoutMs = context.timeoutMs ?? this.timeoutMs;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) fail('INVALID_TIMEOUT', 400);
-    const body = normalizeChatRequest(canonicalChatBody);
+    const body = normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
     if (body.native_search) return this.runNativeSearch(accountId, body, onDelta, { ...context, timeoutMs });
     const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode);
     if (recoveryInstruction) body.messages = [...body.messages, { role: 'system', content: recoveryInstruction }];
     if (this.allowTextSnapshotReplacement && body.tools.length) fail('NATIVE_TEXT_SNAPSHOT_TOOLS_FORBIDDEN', 400);
     const policy = compileToolPolicy(body.tools, body.tool_choice);
     let { messages, images } = buildCanonicalPrompt(body);
-    const modeCategory = MODEL_MODES[body.model];
+    const isAutoModel = this.allowAutoModel && body.model === 'gemini-auto';
+    const modeCategory = isAutoModel ? null : MODEL_MODES[body.model];
+    const modeMatches = mode => isAutoModel
+      ? (mode === null || (Number.isSafeInteger(mode) && mode >= 0 && mode <= 64))
+      : mode === modeCategory;
     if (context.signal?.aborted) fail('NATIVE_TURN_ABORTED', 499);
     const controller = new AbortController();
     const note = (name, values) => observeNative(context.nativeDiagnostic, 'event', name, values);
@@ -267,7 +274,11 @@ export class NativeDirectProvider {
       if (controller.signal.aborted) await deadline;
       // The product injects its independent transport; historical research ledgers are untouched.
       phase = 'open';
-      turn = this.openTurn(token, { messages, images: attachments, temporaryChat: true, modeCategory, thinkingLevel: body.thinking_level, timeoutMs, signal: controller.signal,
+      turn = this.openTurn(token, { messages, images: attachments, temporaryChat: true,
+        modeCategory: isAutoModel ? null : modeCategory,
+        thinkingLevel: isAutoModel ? null : body.thinking_level,
+        ...(isAutoModel ? { smartModelSelection: true } : {}),
+        timeoutMs, signal: controller.signal,
         emitHeaders: incremental,
         ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
       iterator = turn.events[Symbol.asyncIterator]();
@@ -305,10 +316,12 @@ export class NativeDirectProvider {
             observedAttribution = info.attribution;
             if (requiresHydrogen && !HYDROGEN_ATTRIBUTION.test(info.attribution)) downgrade = true;
           }
-          // Final generate evidence must name the requested mode. Prior proven
-          // rejection is sticky; an unresolved zero is not a proven downgrade.
-          if (observedMode !== null && observedMode !== 0 && observedMode !== modeCategory) downgrade = true;
-          if (info.fallback === 1 || (info.downgradeReason !== null && info.downgradeReason !== undefined && info.downgradeReason !== 0)) downgrade = true;
+          // Final generate evidence must name the requested mode unless auto selection is enabled.
+          // Prior proven rejection is sticky; an unresolved zero is not a proven downgrade.
+          if (!isAutoModel) {
+            if (observedMode !== null && observedMode !== 0 && observedMode !== modeCategory) downgrade = true;
+            if (info.fallback === 1 || (info.downgradeReason !== null && info.downgradeReason !== undefined && info.downgradeReason !== 0)) downgrade = true;
+          }
           if (info.thinkingLevel !== null && info.thinkingLevel !== undefined) {
             if (!Number.isSafeInteger(info.thinkingLevel) || info.thinkingLevel < 0 || info.thinkingLevel > 4) fail('INVALID_NATIVE_THINKING_LEVEL');
             observedThinking = info.thinkingLevel;
@@ -350,7 +363,7 @@ export class NativeDirectProvider {
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
           }
-          if (incremental && observedMode === modeCategory && attributionVerified() && liveSyncedLength < rawText.length) {
+          if (incremental && modeMatches(observedMode) && attributionVerified() && liveSyncedLength < rawText.length) {
             const delta = rawText.slice(liveSyncedLength);
             liveSyncedLength = rawText.length;
             await publish(liveSplitter.push(delta));
@@ -378,7 +391,7 @@ export class NativeDirectProvider {
       // must be non-retryable or PI will repeatedly submit fresh generations.
       if (/^\s*I'm on it\.\s*Responses with Deep Think can take some time, so check back in a bit\.\s*https?:\/\/googleusercontent\.com\/agentic_processing_chip\/\d+\s*$/i.test(rawText)) fail('NATIVE_ASYNC_RESPONSE_UNSUPPORTED', 422);
       if (!modelComplete) fail('INCOMPLETE_NATIVE_RESPONSE');
-      if (observedMode !== modeCategory) fail('MISSING_NATIVE_MODE_EVIDENCE');
+      if (!modeMatches(observedMode)) fail('MISSING_NATIVE_MODE_EVIDENCE');
       if (!attributionVerified()) fail('MODEL_DOWNGRADE_REJECTED');
       if (outputShape.nativeRefusalPresent) fail('NATIVE_RESPONSE_REFUSED', 422);
       if (!rawText.trim()) {
@@ -431,7 +444,7 @@ export class NativeDirectProvider {
       note('provider_success');
       return result;
     } catch (error) {
-      const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && observedMode === modeCategory && attributionVerified();
+      const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
       if (incremental && modeVerified && !sinkFailed) {
         try { await publish(liveSplitter.flush()); }
         catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }

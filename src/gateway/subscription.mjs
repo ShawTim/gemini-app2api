@@ -1,7 +1,7 @@
 // GetUsageInfo.user_tier=2 uses the native UserSubscriptionTier enum.
 // Verified from SwiftProtobuf name-map/type metadata and an existing upstream payload.
 import { parse } from '../../native-wire/protobuf.mjs';
-import { fault } from './state.mjs';
+import { fault } from './oauth-client-defaults.mjs';
 export const SUBSCRIPTION_FIELDS = Object.freeze({ nativeTier: 2 });
 const TIERS = Object.freeze({ 1: 'free', 2: 'pro', 3: 'ultra', 4: 'plus', 5: 'ultra_neon' });
 const NAMES = Object.freeze({ 0: 'TIER_UNSPECIFIED', 1: 'BASIC_USER', 2: 'TIER1', 3: 'TIER2', 4: 'LITE_USER', 5: 'TIER_NEON' });

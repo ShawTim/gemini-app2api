@@ -19,7 +19,7 @@ const GENERIC_PROTOCOL_MESSAGES = new Set([
   'Unsupported or invalid request',
 ]);
 
-function formatFriendlyError(error, isAborted) {
+function formatFriendlyError(error, isAborted, modelId) {
   if (isAborted) return 'Request was aborted';
   if (
     error?.status === 429 ||
@@ -47,16 +47,33 @@ function formatFriendlyError(error, isAborted) {
   ) {
     return `Google Gemini authentication expired or permission denied${error?.code ? ` (${error.code})` : ''}. Please run /login gemini-app to sign in again.`;
   }
+  const upstreamMessage =
+    typeof error?.nativeEvidence?.upstreamMessage === 'string' &&
+    error.nativeEvidence.upstreamMessage.length > 0
+      ? error.nativeEvidence.upstreamMessage
+      : '';
   const code = typeof error?.code === 'string' && error.code.length > 0 ? error.code : '';
+  if (code === 'NATIVE_PRECONDITION_REQUIRED') {
+    if (/terms of service|tos_not_accepted/i.test(upstreamMessage)) {
+      return `Google Gemini Terms of Service not accepted [NATIVE_PRECONDITION_REQUIRED]: ${upstreamMessage} — Accept Terms of Service at https://gemini.google.com or run /login gemini-app again.`;
+    }
+    if (/requires_advanced|mismatched_bard_mode|invalid_bard_mode/i.test(upstreamMessage)) {
+      return `Selected model (${modelId || 'requested mode'}) requires a paid Google AI subscription [NATIVE_PRECONDITION_REQUIRED]: ${upstreamMessage} — Switch to gemini-auto (or run /login gemini-app to refresh available models).`;
+    }
+    return `Native response failed verification: [NATIVE_PRECONDITION_REQUIRED]${upstreamMessage ? ` — ${upstreamMessage}` : ''}. Free Gemini accounts only support gemini-auto (switch to gemini-auto or run /login gemini-app; if new to Gemini, ensure Terms of Service are accepted at https://gemini.google.com).`;
+  }
+  if (code === 'MODEL_DOWNGRADE_REJECTED') {
+    return `Requested model (${modelId || 'selected model'}) was downgraded or is unavailable for this account [MODEL_DOWNGRADE_REJECTED]. Try gemini-hydrogen, or switch to gemini-auto on Free accounts.`;
+  }
   const param = typeof error?.param === 'string' && error.param.length > 0 ? ` (param: ${error.param})` : '';
   const message = typeof error?.message === 'string' && error.message.length > 0 ? error.message : '';
   if (code && (!message || GENERIC_PROTOCOL_MESSAGES.has(message))) {
-    return `${message ? `${message}: ` : ''}[${code}]${param}`;
+    return `${message ? `${message}: ` : ''}[${code}]${param}${upstreamMessage ? ` — ${upstreamMessage}` : ''}`;
   }
   if (code && !message.includes(code)) {
-    return `[${code}] ${message}${param}`;
+    return `[${code}] ${message}${param}${upstreamMessage ? ` — ${upstreamMessage}` : ''}`;
   }
-  return message ? `${message}${param}` : code || 'Unknown error';
+  return message ? `${message}${param}${upstreamMessage ? ` — ${upstreamMessage}` : ''}` : code || 'Unknown error';
 }
 
 function hasTrailingHighSurrogate(str) {
@@ -323,6 +340,7 @@ export function createGeminiStreamHandler({
         const provider = new NativeDirectProvider(authManager, {
           openTurn,
           modelAlias: model.id,
+          allowAutoModel: true,
         });
 
         let attempts = 0;
@@ -418,7 +436,7 @@ export function createGeminiStreamHandler({
               turnError?.code !== 'NATIVE_TURN_ABORTED' &&
               turnError?.code !== 'REQUEST_CANCELLED'
             ) {
-              const kind = automaticRecoveryKind(turnError, model.id);
+              const kind = automaticRecoveryKind(turnError, model.id, { allowAutoModel: true });
               if (ALLOWED_RECOVERY_KINDS.has(kind)) {
                 attempts++;
                 recoveryCode = turnError.code;
@@ -470,7 +488,7 @@ export function createGeminiStreamHandler({
           };
         }
         partial.stopReason = stopReason;
-        partial.errorMessage = formatFriendlyError(error, isAborted);
+        partial.errorMessage = formatFriendlyError(error, isAborted, model?.id);
         stream.push({ type: 'error', reason: stopReason, error: partial });
         stream.end();
       }

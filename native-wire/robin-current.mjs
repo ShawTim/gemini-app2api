@@ -70,7 +70,8 @@ function imageAttachments(images) {
  * Model IDs and mode numbers are passed explicitly by caller policy.
  * Built-in tools, overage credits and smart model selection default off.
  */
-export function buildClientGenerate({ userText, images = [], systemText, modelId, identifiers, clientMetadata, includePolicyFlags = true, temporaryChat = false } = {}) {
+export function buildClientGenerate({ userText, images = [], systemText, modelId, identifiers, clientMetadata, includePolicyFlags = true, temporaryChat = false, smartModelSelection = false } = {}) {
+  if (typeof smartModelSelection !== 'boolean') throw new TypeError('Invalid smart model selection');
   const fields = [message(1, Buffer.concat([string(1, userText), ...imageAttachments(images)]))];
   if (modelId !== undefined) fields.push(message(3, string(2, modelId)));
   if (identifiers !== undefined) {
@@ -86,7 +87,7 @@ export function buildClientGenerate({ userText, images = [], systemText, modelId
   if (systemText !== undefined) fields.push(message(29, string(4, systemText)));
   // Temporary chat keeps the turn out of the account's saved conversation history.
   if (temporaryChat) fields.push(varintField(31, 1));
-  if (includePolicyFlags) fields.push(varintField(55, 0), varintField(56, 0));
+  if (includePolicyFlags) fields.push(varintField(55, 0), varintField(56, smartModelSelection ? 1 : 0));
   const output = Buffer.concat(fields);
   if (output.length > MAX_MESSAGE_BYTES) throw new RangeError('Message exceeds budget');
   return output;

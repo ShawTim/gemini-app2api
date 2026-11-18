@@ -68,16 +68,19 @@ Optional environment overrides if using your own OAuth desktop client:
 | `gemini-argon` | Gemini Argon | 128,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
 | `gemini-hydrogen` | Gemini Hydrogen | 512,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
 | `gemini-flash-lite` | Gemini Flash Lite | 128,000 | 8,192 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
+| `gemini-auto` | Gemini Auto | 128,000 | 8,192 | Smart Model Selection for Free & paid Google accounts (text, static images, tools) |
 
+> **Subscription Tier Detection**: `/login gemini-app` automatically detects your account's Google AI subscription tier via `GetUsageInfo`. **Free** accounts automatically filter available models to `gemini-auto` (avoiding paid-mode precondition rejections), while **AI Plus**, **AI Pro**, and **AI Ultra** accounts expose all models. Run `/gemini-quota` at any time to check both your detected tier and rolling usage windows.
+>
 > **Quota Tip**: `gemini-hydrogen` consumes significantly less rolling window quota than `gemini-argon` and responds faster, making it ideal for multi-step coding and tool-calling loops. Reserve `gemini-argon` for complex architecture or deep reasoning tasks.
 >
 > **Usage Accounting**: Token counters reported in Pi are local character-based estimates over message text (`~3.5` chars/token, excluding image payloads and tool schemas) rather than official Google token counts.
 >
-> **Auto-Compaction**: The configured `contextWindow` (`128,000` for Argon/Flash Lite; `512,000` for Hydrogen) works automatically with Pi's proactive compaction (`contextWindow - reserveTokens`) and `413` context-overflow recovery compaction (or manual `/compact`).
+> **Auto-Compaction**: The configured `contextWindow` (`128,000` for Argon/Flash Lite/Auto; `512,000` for Hydrogen) works automatically with Pi's proactive compaction (`contextWindow - reserveTokens`) and `413` context-overflow recovery compaction (or manual `/compact`).
 
 ## Commands
 
-- `/gemini-quota` — Fetches and displays your signed-in account's rolling usage percentages and reset timestamps.
+- `/gemini-quota` — Fetches and displays your signed-in account's detected subscription tier, rolling usage percentages, and reset timestamps.
 
 ## Security & Privacy
 

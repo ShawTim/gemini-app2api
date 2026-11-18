@@ -18,11 +18,15 @@ export function toolRecoveryInstruction(code) {
   }
   return null;
 }
-export function automaticRecoveryKind(error, model) {
+export function automaticRecoveryKind(error, model, { allowAutoModel = false } = {}) {
   if (isExplicitQuotaFailure(error)) return 'quota';
-  if (isVerifiedEmptyResponse(error, model)) return 'empty_response';
+  if (isVerifiedEmptyResponse(error, model, { allowAutoModel })) return 'empty_response';
+  const isAuto = allowAutoModel === true && model === 'gemini-auto';
   const expected = MODEL_MODES[model];
-  if (expected === undefined) return null;
+  if (!isAuto && expected === undefined) return null;
+  const modeOk = mode => isAuto
+    ? (mode === null || mode === undefined || (Number.isSafeInteger(mode) && mode >= 0 && mode <= 64))
+    : mode === expected;
   const e = error?.nativeEvidence;
   if (error?.code === 'OAUTH_REFRESH_FAILED' && error?.status === 502) {
     if (!e) return 'transport';
@@ -34,8 +38,8 @@ export function automaticRecoveryKind(error, model) {
     return null;
   }
   if (!e || ![502, 503].includes(error?.status) || e.nativeRefusalPresent === true ||
-      (e.fallback !== undefined && e.fallback !== 0) || (e.downgradeReason !== undefined && e.downgradeReason !== 0)) return null;
-  if (e.observedMode !== null && e.observedMode !== undefined && e.observedMode !== 0 && e.observedMode !== expected) return null;
+      (!isAuto && ((e.fallback !== undefined && e.fallback !== 0) || (e.downgradeReason !== undefined && e.downgradeReason !== 0)))) return null;
+  if (!isAuto && e.observedMode !== null && e.observedMode !== undefined && e.observedMode !== 0 && e.observedMode !== expected) return null;
   if (error.code === 'NATIVE_UPSTREAM_UNAVAILABLE' && error.status === 503 &&
       ['open', 'read', 'decode', 'end'].includes(e.phase) &&
       ((e.upstreamHttpStatus === 503 && (e.grpcStatus === null || e.grpcStatus === 0 || e.grpcStatus === 14)) ||
@@ -46,14 +50,14 @@ export function automaticRecoveryKind(error, model) {
   if (TRANSPORT_ERRORS.has(error.code) && ['open', 'read', 'decode', 'end'].includes(e.phase) &&
       (e.upstreamHttpStatus === null || e.upstreamHttpStatus === 200) && (e.grpcStatus === null || e.grpcStatus === 0)) return 'transport';
   const completed = e.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 && e.wireEnded === true &&
-    e.modelCompleted === true && e.observedMode === expected && e.nativeRefusalPresent === false && e.http2ResetCode === undefined;
+    e.modelCompleted === true && modeOk(e.observedMode) && e.nativeRefusalPresent === false && e.http2ResetCode === undefined;
   if (completed && error.code === 'NATIVE_SOFT_ERROR_RESPONSE' && e.outputFailureReason === 'generic_error_offer' &&
       e.outputFailureSource === 'exact_text_signature' && e.outputToolCalls === 0 && e.nativeStructuredOutputPresent === false) return 'provider_soft_error';
   if (completed && TOOL_ERRORS.has(error.code)) return 'tool_protocol';
   if (completed && STRUCTURED_OUTPUT_ERRORS.has(error.code)) return 'structured_output';
   // A clean but incomplete turn may be regenerated; never treat it as success.
   if (error.code === 'INCOMPLETE_NATIVE_RESPONSE' && e.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 &&
-      e.wireEnded === true && e.observedMode === expected && e.nativeRefusalPresent === false &&
+      e.wireEnded === true && modeOk(e.observedMode) && e.nativeRefusalPresent === false &&
       e.nativeStructuredOutputPresent === false && e.nativeShareableTextBytes === 0 && e.http2ResetCode === undefined) return 'incomplete_response';
   return null;
 }

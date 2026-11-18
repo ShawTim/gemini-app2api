@@ -1,5 +1,7 @@
 import { startLoopbackLogin as defaultStartLoopbackLogin, refreshNativeCredential as defaultRefreshNativeCredential } from '../../native-wire/oauth-loopback.mjs';
 import { acceptGoogleMainTerms as defaultAcceptGoogleMainTerms } from '../../src/gateway/terms.mjs';
+import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
+import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
 import { DEFAULT_OAUTH_PROFILE } from '../../src/gateway/oauth-client-defaults.mjs';
 
 const FLEXIBLE_API_SCOPE = 'https://www.googleapis.com/auth/flexible-api';
@@ -46,9 +48,21 @@ export function createGeminiOAuthAuth({
   startLoopbackLogin = defaultStartLoopbackLogin,
   refreshNativeCredential = defaultRefreshNativeCredential,
   acceptGoogleMainTerms = defaultAcceptGoogleMainTerms,
+  fetchGoogleUsageInfo = defaultFetchGoogleUsageInfo,
+  decodeSubscription = defaultDecodeSubscription,
   defaultProfile = DEFAULT_OAUTH_PROFILE,
   env = process.env,
 } = {}) {
+  async function detectSubscriptionTier(accessToken, { signal } = {}) {
+    try {
+      const { payload } = await fetchGoogleUsageInfo(accessToken, { signal, timeoutMs: 8000 });
+      const sub = decodeSubscription(payload);
+      return typeof sub?.tier === 'string' && sub.tier ? sub.tier : 'unknown';
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return 'unknown';
+    }
+  }
   async function login(interaction) {
     const config = resolveOAuthConfig({ defaultProfile, env });
     const outerSignal = interaction?.signal;
@@ -146,11 +160,27 @@ export function createGeminiOAuthAuth({
       });
     }
 
+    interaction?.notify?.({
+      type: 'progress',
+      message: 'Checking Gemini subscription tier...',
+    });
+    const subscriptionTier = await detectSubscriptionTier(scoped.accessToken, { signal: outerSignal });
+    if (subscriptionTier !== 'unknown') {
+      interaction?.notify?.({
+        type: 'progress',
+        message:
+          subscriptionTier === 'free'
+            ? 'Detected Gemini Free account (gemini-auto enabled).'
+            : `Detected Gemini subscription tier: ${subscriptionTier}.`,
+      });
+    }
+
     return {
       type: 'oauth',
       refresh: scoped.refreshToken || tokens.refreshToken,
       access: scoped.accessToken,
       expires: computeExpiresAtMs(scoped.expiresInSeconds ?? tokens.expiresInSeconds),
+      ...(subscriptionTier !== 'unknown' ? { subscriptionTier } : {}),
     };
   }
 
@@ -160,12 +190,15 @@ export function createGeminiOAuthAuth({
     }
     const config = resolveOAuthConfig({ defaultProfile, env });
     const refreshed = await refreshNativeCredential(config, credential.refresh, { signal });
+    const detectedTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
+    const subscriptionTier = detectedTier !== 'unknown' ? detectedTier : credential.subscriptionTier;
     return {
       ...credential,
       type: 'oauth',
       refresh: refreshed.refreshToken || credential.refresh,
       access: refreshed.accessToken,
       expires: computeExpiresAtMs(refreshed.expiresInSeconds),
+      ...(subscriptionTier ? { subscriptionTier } : {}),
     };
   }
 
