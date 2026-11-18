@@ -252,7 +252,7 @@ export function buildCanonicalPrompt(body, resolvedImages) {
   const tailReminder = activeToolNames
     ? '\n\n[Tool Protocol Reminder]\nUpstream native/internal function-calling channels are disabled (`INVALID_ARGUMENT: function does not exist`). Never invoke tools through native/internal tool channels; to call `' +
       activeToolNames +
-      '`, write a literal plain-text Markdown ```tool_call fenced JSON block in your visible assistant response.'
+      '`, write a literal plain-text Markdown ```tool_call fenced JSON block in your visible assistant response. Stop immediately after your tool_call block(s) and never emit [Caller tool result] yourself.'
     : '';
   const prompt = '[System Instructions]\n' + preamble + '\n\n' + userText + tailReminder;
   if (prompt.length > MAX_CHARS || Buffer.byteLength(prompt) > PROMPT_MAX_BYTES) fail('PROMPT_TOO_LARGE', 413);

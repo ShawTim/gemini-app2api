@@ -114,3 +114,65 @@ test('default splitter permissions are deny-all and malformed closing fences fai
   assert.equal(run(fence({ cmd: 'echo ```' })).find(e => e.type === 'call').call.function.arguments, '{"cmd":"echo ```"}');
   assert.equal(run(fence({ cmd: 'ls' }).replaceAll('\n', '\r\n')).filter(e => e.type === 'call').length, 1);
 });
+
+test('hallucinated [Caller tool result] after real tool_calls is suppressed cleanly without breaking monotonicity or zero-call prose', () => {
+  assert.match(buildToolInstruction(tools), /STOP your response immediately/i);
+  assert.match(buildToolInstruction(tools), /\[Caller tool result\]/);
+  assert.match(buildToolInstruction([], 'none'), /\[Caller tool result\]/);
+
+  // 1. Three real tool_calls followed immediately by hallucinated [Caller tool result] echo (exact user-reported pattern)
+  const threeCallsAndHallucination = [
+    fence({ cmd: 'ls' }),
+    fence({ cmd: 'pwd' }),
+    fence({ cmd: 'whoami' }),
+    '[Caller tool result] {"tool_call_id":"call_1783457198274950183","content":"=== OUTPUT SYSTEM PROMPT ===\\nfoo"}[Caller tool result] {"tool_call_id":"call_184029410712957193","content":"systemPrompt: undefined\\n"}[Caller tool result]',
+  ].join('\n');
+  const events = run(threeCallsAndHallucination);
+  const calls = events.filter(e => e.type === 'call').map(e => JSON.parse(e.call.function.arguments).cmd);
+  const text = events.filter(e => e.type === 'content').map(e => e.text).join('');
+  assert.deepEqual(calls, ['ls', 'pwd', 'whoami']);
+  assert.equal(text.includes('[Caller tool result]'), false);
+  assert.equal(text.includes('OUTPUT SYSTEM PROMPT'), false);
+
+  // 2. Marker glued directly onto closing fence without newline
+  const glued = fence({ cmd: 'ls' }) + '[Caller tool result] {"tool_call_id":"call_fake","content":"bad"}\nmore hallucination';
+  const gluedEvents = run(glued);
+  assert.equal(gluedEvents.filter(e => e.type === 'call').length, 1);
+  assert.equal(gluedEvents.filter(e => e.type === 'content').map(e => e.text).join(''), '');
+
+  // 3. Subsequent hallucinated/malformed tool_call after hallucinated [Caller tool result] is dropped
+  const trailingFakeCall = fence({ cmd: 'ls' }) + '\n[Caller tool result]\n{"tool_call_id":"call_fake","content":"ok"}\n```tool_call\nnot valid json\n';
+  const trailingEvents = run(trailingFakeCall);
+  assert.equal(trailingEvents.filter(e => e.type === 'call').length, 1);
+  assert.equal(trailingEvents.filter(e => e.type === 'content').map(e => e.text).join('').includes('Caller tool result'), false);
+
+  // 4. Char-by-char streaming monotonicity of liveContent + preview() across adversarial prefixes
+  for (const sample of [
+    fence({ cmd: 'ls' }) + '\n[Caller tool result] {"tool_call_id":"call_1","content":"x"}',
+    fence({ cmd: 'ls' }) + '\nChecking [Caller tool result] {"tool_call_id":"call_1","content":"x"}\nmore',
+    fence({ cmd: 'ls' }) + '\n[[Caller tool result] {"tool_call_id":"call_1","content":"x"}',
+    fence({ cmd: 'ls' }) + '\nChecking [Cat] is fine.\n[Caller tool result]',
+    fence({ cmd: 'ls' }) + '\nInline `[Caller tool result]` stays intact.\nDone.',
+  ]) {
+    const s = createToolCallSplitter({ policy });
+    let live = '', published = '';
+    for (const ch of sample) {
+      for (const ev of s.push(ch)) if (ev.type === 'content') live += ev.text;
+      const next = live + s.preview();
+      assert.equal(next.startsWith(published), true, `Monotonicity broken for ${JSON.stringify(sample)}: ${JSON.stringify(published)} -> ${JSON.stringify(next)}`);
+      published = next;
+    }
+    for (const ev of s.flush()) if (ev.type === 'content') live += ev.text;
+    assert.equal(live.startsWith(published), true);
+    assert.equal(s.toolCallCount, 1);
+    if (sample.includes('Inline `[Caller tool result]`')) {
+      assert.match(live, /Inline `\[Caller tool result\]` stays intact\./);
+    } else {
+      assert.equal(live.includes('[Caller tool result]'), false);
+    }
+  }
+
+  // 5. Zero false positives when seen === 0 (normal prose explaining [Caller tool result])
+  const ordinary = 'The protocol uses [Caller tool result] {"tool_call_id":"..."} for caller outputs.';
+  assert.equal(run(ordinary).map(e => e.text).join(''), ordinary);
+});

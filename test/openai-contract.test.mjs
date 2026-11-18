@@ -483,7 +483,8 @@ test('canonical prompt places gateway tool protocol after caller system prompt a
   assert.ok(enabledPrompt.indexOf('caller system prompt') < enabledPrompt.indexOf('# Available Local Tools'));
   assert.ok(enabledPrompt.includes('[Tool Protocol Reminder]'));
   assert.ok(enabledPrompt.includes('`lookup`'));
-  assert.ok(enabledPrompt.endsWith('in your visible assistant response.'));
+  assert.ok(enabledPrompt.includes('in your visible assistant response.'));
+  assert.ok(enabledPrompt.endsWith('Stop immediately after your tool_call block(s) and never emit [Caller tool result] yourself.'));
 
   for (const disabledBody of [
     normalizeChatRequest({ model: 'gemini-argon', messages: [callerSystem, user] }),

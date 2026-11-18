@@ -1837,3 +1837,56 @@ test('formatFriendlyError exposes upstreamMessage for NATIVE_PRECONDITION_REQUIR
   assert.match(downgradeRes.errorMessage, /MODEL_DOWNGRADE_REJECTED/);
   assert.match(downgradeRes.errorMessage, /gemini-auto/);
 });
+
+test('pi-gemini-app suppresses hallucinated [Caller tool result] after streamed tool calls on gemini-hydrogen', async () => {
+  const hydrogenModel = MODELS.find((item) => item.id === 'gemini-hydrogen');
+  assert.ok(hydrogenModel);
+  const full = [
+    '```tool_call',
+    '{"name":"read","arguments":{"path":"a.txt"}}',
+    '```',
+    '```tool_call',
+    '{"name":"read","arguments":{"path":"b.txt"}}',
+    '```',
+    '```tool_call',
+    '{"name":"read","arguments":{"path":"c.txt"}}',
+    '```',
+    '[Caller tool result] {"tool_call_id":"call_1","content":"hallucinated"}[Caller tool result] {"tool_call_id":"call_2","content":"fake"}[Caller tool result]',
+  ].join('\n');
+  const cut1 = full.indexOf('[Caller tool result]') + 7; // mid-marker split across streaming frames
+  const handler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    openTurn: () => ({
+      events: (async function* () {
+        yield { type: 'frame', bytes: buildNativeFrame(full.slice(0, cut1), { mode: 1, attribution: 'Used 4 Hydrogen model', complete: false }) };
+        yield { type: 'frame', bytes: buildNativeFrame(full, { mode: 1, attribution: 'Used 4 Hydrogen model', complete: true }) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    }),
+  });
+  const context = {
+    messages: [{ role: 'user', content: 'Read a, b, c', timestamp: 1 }],
+    tools: [
+      {
+        name: 'read',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      },
+    ],
+  };
+  const msg = await handler.streamSimple(hydrogenModel, context, { apiKey: 'fixture-token' }).result();
+  assert.equal(msg.stopReason, 'toolUse');
+  const toolCalls = msg.content.filter((b) => b.type === 'toolCall');
+  assert.deepEqual(
+    toolCalls.map((b) => b.arguments.path),
+    ['a.txt', 'b.txt', 'c.txt'],
+  );
+  const textOut = msg.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('');
+  assert.equal(textOut.includes('[Caller tool result]'), false);
+  assert.equal(textOut.includes('hallucinated'), false);
+});

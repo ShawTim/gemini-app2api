@@ -120,7 +120,7 @@ export function validateToolCompletion(calls, policy) {
 
 export function buildToolInstruction(tools = [], choice = 'auto') {
   const policy = compileToolPolicy(tools, choice);
-  if (!policy.enabled) return 'Answer the latest user request now as the assistant. If caller tool results are present, use them to complete your answer; do not wait for another user message. Never invent tool outputs. Tool calls are prohibited for this turn. Do not emit a tool_call fence. For literal examples use a json fence.';
+  if (!policy.enabled) return 'Answer the latest user request now as the assistant. If caller tool results are present, use them to complete your answer; do not wait for another user message. Never invent tool outputs. Never emit transcript role markers such as [Caller tool result], [User], or [Assistant]. Tool calls are prohibited for this turn. Do not emit a tool_call fence. For literal examples use a json fence.';
   return [
     '# Available Local Tools (caller-owned prompt protocol, NOT native function calling)',
     JSON.stringify(tools),
@@ -132,6 +132,7 @@ export function buildToolInstruction(tools = [], choice = 'auto') {
     '```',
     'Arguments must be a JSON object matching the declared schema. Never invent tools or results.',
     'Only the caller executes tools. Wait for linked caller tool results before using results.',
+    'After emitting your tool_call block(s), STOP your response immediately. Never emit, simulate, or echo [Caller tool result], [User], [Assistant], or any transcript role markers.',
     'A standalone top-level tool_call fence is reserved for actual requests; use json fences for literal examples. Inline references are text.',
     policy.forced ? `You MUST request only ${policy.forced}.` : choice === 'required' ? 'You MUST request at least one declared tool.' : 'Request tools only when needed.',
   ].join('\n');
@@ -161,10 +162,28 @@ export function flattenMessages(messages = [], { maxChars = 3_500_000 } = {}) {
   return { systemText, userText };
 }
 
+const CALLER_RESULT_MARKER = '[Caller tool result]';
+
+// Returns the safe prefix length before a full or trailing partial CALLER_RESULT_MARKER.
+// Because CALLER_RESULT_MARKER contains '[' only at index 0, any partial prefix at the end
+// of `str` must start at the last '[' within the trailing slice.
+function callerResultPreviewCut(str) {
+  const full = str.indexOf(CALLER_RESULT_MARKER);
+  if (full >= 0) return full;
+  const lastBracket = str.lastIndexOf('[');
+  if (lastBracket >= 0 && CALLER_RESULT_MARKER.startsWith(str.slice(lastBracket))) {
+    return lastBracket;
+  }
+  return -1;
+}
+
 /** Bounded tool-fence splitter. Only complete JSON/name/schema-checked calls
- * become call events; preview exposes ordinary pending text, never a tool body. */
+ * become call events; preview exposes ordinary pending text, never a tool body.
+ * Once at least one real tool_call has been emitted, any unquoted hallucinated
+ * `[Caller tool result]` continuation and everything after it is suppressed so
+ * the caller receives only the real tool calls. */
 export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBytes(12).toString('hex'), policy = compileToolPolicy([]) } = {}) {
-  let pending = '', scanned = 0, seen = 0, closed = false, bytes = 0;
+  let pending = '', scanned = 0, seen = 0, closed = false, suppressed = false, bytes = 0;
   let mode = 'text', marker = '`', fenceLength = 3, toolBody = '', toolBytes = 0, headerBytes = 0, inlineTicks = 0;
   const ids = new Set();
   const malformed = reason => {
@@ -184,10 +203,25 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
   };
   const inlineText = (text, raw, eol, events) => {
     if (/^(?: {4}|\t| {0,3}(?:>|[-+*][ \t]|\d+[.)][ \t]))/.test(text)) {
-      inlineTicks = 0; events.push({ type: 'content', text: raw }); return;
+      inlineTicks = 0;
+      if (seen > 0) {
+        const idx = text.indexOf(CALLER_RESULT_MARKER);
+        if (idx >= 0) {
+          if (idx > 0) events.push({ type: 'content', text: text.slice(0, idx) });
+          suppressed = true;
+          return;
+        }
+      }
+      events.push({ type: 'content', text: raw });
+      return;
     }
     if (!text.trim()) inlineTicks = 0;
     for (let i = 0; i < text.length;) {
+      if (seen > 0 && !inlineTicks && text.startsWith(CALLER_RESULT_MARKER, i)) {
+        if (i) events.push({ type: 'content', text: text.slice(0, i) });
+        suppressed = true;
+        return;
+      }
       if (text[i] === '\\' && !inlineTicks) {
         i += 2;
         while (text[i] === '`' && text[i - 1] === '`') i++;
@@ -210,6 +244,7 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     events.push({ type: 'content', text: raw });
   };
   const line = (raw, final, events) => {
+    if (suppressed) return;
     const eol = /\r?\n$/.exec(raw)?.[0] ?? '';
     const text = eol ? raw.slice(0, -eol.length) : raw;
     // Prefix-only matching avoids backtracking across long untrusted lines.
@@ -220,8 +255,15 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
         // JSON/name/schema validation, not incidental Markdown suffix layout,
         // authorizes the call. Never scan the suffix again as another request.
         emitCall(events); mode = 'text'; toolBody = ''; toolBytes = 0; inlineTicks = 0;
-        if (info.trim()) events.push({ type: 'content', text: info + eol });
-        else if (eol) events.push({ type: 'content', text: eol });
+        if (info.trim()) {
+          const markerIdx = info.indexOf(CALLER_RESULT_MARKER);
+          if (markerIdx >= 0) {
+            if (markerIdx > 0) events.push({ type: 'content', text: info.slice(0, markerIdx) });
+            suppressed = true;
+            return;
+          }
+          events.push({ type: 'content', text: info + eol });
+        } else if (eol) events.push({ type: 'content', text: eol });
         return;
       }
       if (run?.[0] === '`' && info.trim()) malformed('closing_fence');
@@ -255,10 +297,15 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
       if (end < 0) break;
       line(pending.slice(consumed, end + 1), false, events);
       consumed = end + 1; from = consumed;
+      if (suppressed) { pending = ''; scanned = 0; return events; }
     }
     if (consumed) pending = pending.slice(consumed);
     scanned = pending.length;
-    if (final && pending) { line(pending, true, events); pending = ''; scanned = 0; }
+    if (final && pending) {
+      line(pending, true, events);
+      pending = ''; scanned = 0;
+      if (suppressed) return events;
+    }
     if (mode === 'tool') {
       if (headerBytes + toolBytes + Buffer.byteLength(pending) > TOOL_LIMITS.bytes) fail('TOOL_SIZE_LIMIT', 502);
       if (final) fail('TRUNCATED_TOOL_CALL', 502);
@@ -269,18 +316,31 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     push(text) {
       if (closed) fail('SPLITTER_CLOSED', 502);
       if (typeof text !== 'string' || (bytes += Buffer.byteLength(text)) > 8 * 1024 * 1024) fail('RESPONSE_TOO_LARGE', 502);
+      if (suppressed) return [];
       pending += text;
       return drain(false);
     },
-    flush() { if (closed) fail('SPLITTER_CLOSED', 502); closed = true; return drain(true); },
+    flush() {
+      if (closed) fail('SPLITTER_CLOSED', 502);
+      closed = true;
+      if (suppressed) return [];
+      return drain(true);
+    },
     preview() {
-      if (mode === 'tool') return '';
+      if (suppressed || mode === 'tool') return '';
       if (mode === 'ordinary') return pending;
       if (!pending.trim() && pending.length <= 3) return '';
-      const tick = pending.indexOf('`');
-      if (tick < 0) return pending;
-      if (tick <= 3 && /^ *$/.test(pending.slice(0, tick))) return '';
-      return pending.slice(0, tick);
+      let safe = pending;
+      const tick = safe.indexOf('`');
+      if (tick >= 0) {
+        if (tick <= 3 && /^ *$/.test(safe.slice(0, tick))) return '';
+        safe = safe.slice(0, tick);
+      }
+      if (seen > 0) {
+        const cut = callerResultPreviewCut(safe);
+        if (cut >= 0) safe = safe.slice(0, cut);
+      }
+      return safe;
     },
     get toolCallCount() { return seen; },
   };
