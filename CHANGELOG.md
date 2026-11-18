@@ -2,6 +2,15 @@
 
 Release notes for Gemini App2API.
 
+## 1.4.0 — 2026-11-18
+
+### Native in-process Pi provider extension, Marketplace package builder, GHCR multi-arch workflow & gateway transport/tool resilience
+- Added a zero-dependency native in-process `@earendil-works/pi-coding-agent` (`pi`) provider extension under `extensions/pi/` (`gemini-argon`, `gemini-hydrogen`, and `gemini-flash-lite` directly over HTTP/2 `ProcessQuery` without a separate gateway server), featuring desktop loopback + headless SSH redirect-URL OAuth sign-in (`/login gemini-app` with automatic Google Gemini Terms of Service submission), rolling quota inspection (`/gemini-quota`), bidirectional tool ID/name mapping, lone UTF-16 surrogate sanitization, 2 KiB output hold, single-shot automatic recovery, and `413` context-overflow formatting aligned with Pi's automatic compaction recovery.
+- Added a deterministic standalone Pi Marketplace package builder (`scripts/build-pi-package.mjs`), zero-dependency ECMAScript module/security scanner (`scripts/js-module-scanner.mjs`), and 7-gate release verifier (`scripts/check-pi-package.mjs`) producing an isolated 39-file `pi-gemini-app` tarball (`zero` runtime dependencies, `zero` `child_process`/`vm`/`eval`, decoupled OAuth client defaults in `src/gateway/oauth-client-defaults.mjs`, ancestor symlink containment, and isolated V8 ESM loader verification).
+- Hardened gateway HTTP/2 and OAuth resilience across `src/gateway/native-transport.mjs`, `src/gateway/accounts.mjs`, and `src/gateway/automatic-recovery.mjs`: guarded unbound `Http2Session.socket` `Proxy` listener cleanup against `ERR_HTTP2_SOCKET_UNBOUND` crashes on peer disconnects, raised the Node.js v22 Happy Eyeballs per-address connect attempt timeout floor (`5,000 ms`) to prevent `ETIMEDOUT` OAuth refresh failures over high-RTT VPN tunnels, and added single-shot transient refresh retry plus pre-commit `502 OAUTH_REFRESH_FAILED` account failover.
+- Anchored plain-text `tool_call` fence compliance in `src/tool-protocol.mjs` and `src/openai-contract.mjs` on long/compacted coding-agent contexts by placing `# Available Local Tools` after caller `system` text, adding an explicit guardrail against internal native function-calling channels, and appending a `[Tool Protocol Reminder]` recency anchor when tools are enabled.
+- Added automated multi-arch (`linux/amd64`, `linux/arm64`) GitHub Container Registry publishing (`.github/workflows/docker-publish.yml`) on `v*.*.*` release tags (`ghcr.io/shawtim/gemini-app2api:latest`).
+
 ## 1.3.5 — 2026-11-17
 
 ### Canonical RobinService gRPC paths & upstream 503 failover
