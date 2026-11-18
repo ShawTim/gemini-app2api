@@ -2,6 +2,14 @@
 
 Release notes for Gemini App2API.
 
+## 1.5.0 — 2026-11-19
+
+### Gemini Neon (`gemini-neon`), `gemini-argon` compatibility alias, tool-result hallucination suppression & `pi-gemini-app@0.1.2`
+- Added attribution-verified **`gemini-neon`** (`ModeCategory = 3` / `PRO`, strict `/\bneon\b/i` field-30 attribution verification, fail-closed `MODEL_DOWNGRADE_REJECTED`) as the default flagship model across the OpenAI-compatible Gateway, Admin UI v2, Telemetry, `native_search`, and `pi-gemini-app` after Google retired `ModeCategory = 8` (`ULTRA` / Argon) under `neon_pro_policy`.
+- Retained **`gemini-argon`** (and `models/gemini-argon`) as a transparent backward-compatibility alias routed to **`gemini-neon`** across `/v1/chat/completions`, `/v1/responses`, Admin account tests, `AccountPool`, recovery handlers, and `pi-gemini-app`, without cluttering `GET /v1/models` or Admin UI with duplicate columns.
+- Hardened the caller-owned prompt tool protocol in `src/tool-protocol.mjs` and `src/openai-contract.mjs` (shared by both Gateway and `pi-gemini-app`): added explicit stop/no-echo instructions after ```` ```tool_call ```` blocks and a strictly monotonic post-tool-call suppressor in `createToolCallSplitter` that drops hallucinated `[Caller tool result]` continuations (and trailing fake calls) once at least one valid `tool_call` has been emitted, with zero impact on ordinary zero-call prose or inline code mentions.
+- Shipped **`pi-gemini-app@0.1.2`**: added `gemini-auto` (`smartModelSelection`) and Free-tier subscription model filtering, bundled built-in transcript helpers and legacy `Context` / 2-arg `registerProvider` compatibility for older Pi hosts, surfaced upstream gRPC `FAILED_PRECONDITION` messages with actionable hints on `NATIVE_PRECONDITION_REQUIRED`, and aligned package README and repository documentation.
+
 ## 1.4.0 — 2026-11-18
 
 ### Native in-process Pi provider extension, Marketplace package builder, GHCR multi-arch workflow & gateway transport/tool resilience

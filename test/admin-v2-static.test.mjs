@@ -564,7 +564,7 @@ test('account deep-link lookup survives prior errors, failed older refreshes, an
     ok: true,
     status: 200,
     json: async () => ({
-      version: '1.4.0',
+      version: '1.5.0',
       models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'],
       accounts,
       requests: [],
@@ -584,7 +584,7 @@ test('account deep-link lookup survives prior errors, failed older refreshes, an
     f.S.route = 'accounts';
     f.S.accounts = [{ id: 'acc_1' }];
     f.S.overview = {
-      version: '1.4.0',
+      version: '1.5.0',
       models: ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'],
       accounts: f.S.accounts,
       requests: [],

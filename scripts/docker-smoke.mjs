@@ -169,7 +169,7 @@ async function publishedOriginSmoke() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: 'gemini-argon',
+            model: 'gemini-neon',
             user: 'openclaw-smoke',
             stop: ['END'],
             n: 1,
