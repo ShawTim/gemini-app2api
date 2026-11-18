@@ -55,7 +55,7 @@ test("six effort names map explicitly and survive canonical re-normalization on 
     xhigh: 2,
   });
   for (const api of ["chat", "responses"])
-    for (const model of ["gemini-argon", "gemini-hydrogen", "gemini-flash-lite"])
+    for (const model of ["gemini-neon", "gemini-hydrogen", "gemini-flash-lite"])
       for (const [effort, level] of Object.entries(REASONING_EFFORT_LEVELS)) {
         const canonical = normalize(api, {
           ...input(api),
@@ -213,7 +213,7 @@ test("all efforts reach actual provider options with honest JSON/SSE echoes and 
         assert.equal(r.headers.get("x-thinking-level"), String(level));
         const data = completed(await r.text(), api, stream);
         assertEcho(data, api, effort);
-        assert.equal(data.model, "gemini-argon");
+        assert.equal(data.model, "gemini-neon");
       }
 });
 test("upstream mismatch remains resolved evidence, never relabelled as requested high", async (t) => {

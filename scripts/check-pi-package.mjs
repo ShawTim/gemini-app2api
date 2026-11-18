@@ -288,7 +288,7 @@ export async function verifyPiPackageStaging({
           0,
           `pi --list-models failed (status=${cliResult.status}, error=${cliResult.error?.message || 'none'}): ${cliResult.stderr}`,
         );
-        assert.match(cliResult.stdout, /gemini-argon/);
+        assert.match(cliResult.stdout, /gemini-neon/);
         assert.match(cliResult.stdout, /gemini-hydrogen/);
         assert.match(cliResult.stdout, /gemini-flash-lite/);
         assert.match(cliResult.stdout, /gemini-auto/);

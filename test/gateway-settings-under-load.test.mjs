@@ -80,7 +80,7 @@ test('PATCH settings during generation is durable and concurrent requests retain
   for (const task of [pending, next]) {
     const response = await task; assert.equal(response.status, 200); noCompaction(response, f); await response.text();
   }
-  assert.deepEqual(f.seen.map(x => x.modeCategory), [8, 8]); fullHistory(f);
+  assert.deepEqual(f.seen.map(x => x.modeCategory), [3, 3]); fullHistory(f);
   assert.ok(f.app.overview().requests.every(r => r.cancellationSource === undefined));
 });
 
@@ -110,7 +110,7 @@ test('legacy compaction keys stay inert during settings saves and explicit Hydro
   await until(() => f.app.overview().metrics.active === 0);
   const after = await send(f, 'explicit_hydrogen_settings');
   assert.equal(after.status, 200); noCompaction(after, f); await after.text();
-  assert.deepEqual(f.seen.map(x => x.modeCategory), [1, 8]); fullHistory(f);
+  assert.deepEqual(f.seen.map(x => x.modeCategory), [1, 3]); fullHistory(f);
 });
 
 test('invalid and retired settings remain 400 during active work; auth, origin and CSRF still apply', async t => {

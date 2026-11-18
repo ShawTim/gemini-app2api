@@ -47,14 +47,14 @@ test('full-history Argon metadata has no compaction UI/export fields or private 
   await expect(page.locator('[data-context-compaction]')).toHaveCount(0); await expect(page.locator('#action-dialog')).not.toContainText('PRIVATE_');
   const downloadPromise = page.waitForEvent('download'); await page.locator('#export-one-request').click();
   const download = await downloadPromise; const stream = await download.createReadStream(); let exported = ''; for await (const chunk of stream) exported += chunk;
-  const record = JSON.parse(exported).request; expect(record.id).toBe(applied.id); expect(record.status).toBe(200); expect(record.model).toBe('gemini-argon'); expect(f.seen).toHaveLength(1); expect(record).not.toHaveProperty('contextCompaction');
+  const record = JSON.parse(exported).request; expect(record.id).toBe(applied.id); expect(record.status).toBe(200); expect(record.model).toBe('gemini-neon'); expect(f.seen).toHaveLength(1); expect(record).not.toHaveProperty('contextCompaction');
   expect(exported).not.toMatch(/PRIVATE_|summary"\s*:|contextCompaction/);
   await page.keyboard.press('Escape');
   const nextBody = { ...body, messages: [...body.messages, { role: 'assistant', content: 'Final Argon answer' }, { role: 'user', content: 'Continue in the same conversation' }] };
   const next = await send(nextBody); expect(next.status).toBe(200); expect(await next.text()).toContain('Next Argon answer');
   await route(page, 'settings'); await route(page, 'requests');
   await page.locator(`[data-request-id="${f.app.overview().requests[0].id}"]`).click(); await expect(page.locator('[data-context-compaction]')).toHaveCount(0);
-  expect(f.seen.map(x => x.modeCategory)).toEqual([8, 8]);
+  expect(f.seen.map(x => x.modeCategory)).toEqual([3, 3]);
   for (const m of nextBody.messages) expect(f.seen[1].messages[0].content).toContain(m.content);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

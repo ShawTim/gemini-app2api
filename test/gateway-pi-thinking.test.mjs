@@ -13,7 +13,7 @@ test('PI high and xhigh stay on normal extended thinking, never async Deep Think
     const r = await f.api('/v1/chat/completions', { method: 'POST', body: { model, messages: [user], reasoning_effort: 'high', max_completion_tokens: 16000 } });
     assert.equal(r.status, 200); assert.equal((await r.json()).choices[0].message.content, 'OK');
     assert.equal(f.seen.at(-1).thinkingLevel, 2);
-    assert.equal(f.seen.at(-1).modeCategory, model === 'gemini-argon' ? 8 : 1);
+    assert.equal(f.seen.at(-1).modeCategory, model === 'gemini-argon' ? 3 : 1);
     assert.equal(r.headers.get('x-requested-thinking-level'), '2');
   }
   assert.equal(normalizeChatRequest({ messages: [user], reasoning_effort: 'xhigh' }).thinking_level, 2);
@@ -24,7 +24,7 @@ test('PI high and xhigh stay on normal extended thinking, never async Deep Think
 });
 
 test('gRPC success without model completion cannot release text or calls', async () => {
-  const bytes = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('Only partial text')))), v(9, 0), v(41, 8), v(42, 2)])));
+  const bytes = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('Only partial text')))), m(30, Buffer.from('Used 4 Neon High model')), v(9, 0), v(41, 3), v(42, 2)])));
   const provider = new NativeDirectProvider({ getValidAccessToken: async () => 'synthetic-access' }, { openTurn: () => ({ events: { async *[Symbol.asyncIterator]() { yield { type: 'frame', bytes }; yield { type: 'end', httpStatus: 200, grpcStatus: 0 }; } }, cancel() {} }) });
   let outputs = 0;
   await assert.rejects(provider.runTurn('synthetic', { messages: [user] }, () => outputs++), { code: 'INCOMPLETE_NATIVE_RESPONSE' });

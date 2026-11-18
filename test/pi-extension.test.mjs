@@ -63,11 +63,11 @@ const VALID_PNG_BASE64 = makeMinimalPngBase64();
 function buildNativeFrame(
   text,
   {
-    mode = 8,
+    mode = 3,
     complete = true,
     thinking = 2,
     responseId = 'resp_synthetic_1',
-    attribution = mode === 1 ? 'Used 4 Hydrogen High model' : undefined,
+    attribution = mode === 1 ? 'Used 4 Hydrogen High model' : mode === 3 ? 'Used 4 Neon High model' : undefined,
   } = {},
 ) {
   const modelFields = Buffer.concat([
@@ -1219,7 +1219,7 @@ test('Pi CLI offline smoke test loads ./extensions/pi and registers gemini-app m
   });
 
   assert.equal(result.status, 0, `pi --list-models failed: ${result.stderr}`);
-  assert.match(result.stdout, /gemini-argon/);
+  assert.match(result.stdout, /gemini-neon/);
   assert.match(result.stdout, /gemini-hydrogen/);
   assert.match(result.stdout, /gemini-flash-lite/);
   assert.match(result.stdout, /gemini-auto/);
@@ -1721,11 +1721,11 @@ test('filterGeminiModels restricts Free accounts to gemini-auto on both createPr
   // Paid or unknown credentials keep all gemini-app models
   assert.deepEqual(
     filterGeminiModels(MODELS, { type: 'oauth', subscriptionTier: 'pro' }).map((m) => m.id),
-    ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite', 'gemini-auto'],
+    ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite', 'gemini-auto'],
   );
   assert.deepEqual(
     filterGeminiModels(MODELS, undefined).map((m) => m.id),
-    ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite', 'gemini-auto'],
+    ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite', 'gemini-auto'],
   );
 
   let createdDef = null;

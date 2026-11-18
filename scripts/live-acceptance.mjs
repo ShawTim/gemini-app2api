@@ -58,7 +58,7 @@ export async function liveCase({
     platform: process.platform + "-" + process.arch,
     accountSlot,
     case: caseName,
-    selectedModel: "gemini-argon",
+    selectedModel: "gemini-neon",
     requestedThinking: thinkingLevel,
     resolvedModes: [],
     resolvedThinking: [],
@@ -108,7 +108,7 @@ export async function liveCase({
         code: /^[A-Z0-9_]+$/.test(code || "") ? code : "LIVE_HTTP_ERROR",
       });
     }
-    if ((!sse && mode !== "8") || (mode !== null && mode !== "8"))
+    if ((!sse && mode !== "3") || (mode !== null && mode !== "3"))
       throw Object.assign(Error(), { code: "LIVE_MODE_EVIDENCE_MISMATCH" });
     if (!sse) {
       const data = JSON.parse(text);
@@ -140,7 +140,7 @@ export async function liveCase({
     for (const entry of data.slice(0, -1).map((x) => JSON.parse(x))) {
       if (entry.incomplete || entry.error || entry.incomplete_details)
         throw Object.assign(Error(), { code: "LIVE_RESPONSE_INCOMPLETE" });
-      if (entry.model !== "gemini-argon")
+      if (entry.model !== "gemini-neon")
         throw Object.assign(Error(), { code: "LIVE_MODEL_LABEL_MISMATCH" });
       for (const choice of entry.choices) {
         if (choice.finish_reason) finished++;
@@ -161,7 +161,7 @@ export async function liveCase({
     if (finished !== 1)
       throw Object.assign(Error(), { code: "LIVE_SSE_INCOMPLETE" });
     return {
-      model: "gemini-argon",
+      model: "gemini-neon",
       choices: [
         {
           message: {
@@ -193,12 +193,12 @@ export async function liveCase({
       throw Object.assign(Error(), { code: "LIVE_FAILOVER_MUST_BE_DISABLED" });
     if (caseName === "text") {
       const r = await request("/v1/chat/completions", {
-        model: "gemini-argon",
+        model: "gemini-neon",
         messages: [{ role: "user", content: "Reply with a brief greeting." }],
         thinking_level: thinkingLevel,
       });
       if (
-        r.model !== "gemini-argon" ||
+        r.model !== "gemini-neon" ||
         !r.choices?.[0]?.message?.content?.trim()
       )
         throw Object.assign(Error(), { code: "LIVE_TEXT_INVALID" });
@@ -216,14 +216,14 @@ export async function liveCase({
         : [{ type: "function", function: fn }];
       const path = responses ? "/v1/responses" : "/v1/chat/completions";
       const first = await request(path, {
-        model: "gemini-argon",
+        model: "gemini-neon",
         [responses ? "input" : "messages"]: messages,
         tools,
         tool_choice: "required",
         thinking_level: thinkingLevel,
         stream: sse,
       });
-      if (first.model !== "gemini-argon")
+      if (first.model !== "gemini-neon")
         throw Object.assign(Error(), { code: "LIVE_MODEL_LABEL_MISMATCH" });
       const calls = responses
         ? first.output
@@ -264,7 +264,7 @@ export async function liveCase({
             { role: "tool", tool_call_id: calls[0].id, content: result },
           ];
       const last = await request(path, {
-        model: "gemini-argon",
+        model: "gemini-neon",
         [responses ? "input" : "messages"]: history,
         tools,
         tool_choice: "none",
@@ -281,7 +281,7 @@ export async function liveCase({
         : last.choices[0].message.content;
       report.followedCallerResult =
         typeof content === "string" && content.includes(value);
-      if (!report.followedCallerResult || last.model !== "gemini-argon")
+      if (!report.followedCallerResult || last.model !== "gemini-neon")
         throw Object.assign(Error(), {
           code: "LIVE_CALLER_RESULT_NOT_CONFIRMED",
         });
@@ -293,7 +293,7 @@ export async function liveCase({
       : "LIVE_CASE_FAILED";
     report.stopRound = true; // No next case or account is automatically invoked.
   }
-  report.nativeModeEvidenceComplete = report.resolvedModes.length > 0 && report.resolvedModes.every(mode => mode === 8);
+  report.nativeModeEvidenceComplete = report.resolvedModes.length > 0 && report.resolvedModes.every(mode => mode === 3);
   return report;
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

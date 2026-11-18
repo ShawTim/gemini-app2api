@@ -37,7 +37,7 @@ for (const caseName of [
       assert.equal(report.verified, true);
       assert.deepEqual(
         report.resolvedModes,
-        caseName === "text" ? [8] : caseName.endsWith('-sse') ? [null, 8] : [8, 8],
+        caseName === "text" ? [3] : caseName.endsWith('-sse') ? [null, 3] : [3, 3],
       );
       assert.equal(report.nativeModeEvidenceComplete, !caseName.endsWith('-sse'));
       assert.equal(report.calls, caseName === "text" ? 0 : 1);
@@ -105,8 +105,8 @@ test("live runner records explicit thinking without substituting models or silen
   assert.equal(report.verified, true);
   assert.equal(report.requestedThinking, 1);
   assert.deepEqual(report.resolvedThinking, [1, 1]);
-  assert.deepEqual(report.resolvedModes, [8, 8]);
-  assert.ok(f.seen.every((x) => x.thinkingLevel === 1 && x.modeCategory === 8));
+  assert.deepEqual(report.resolvedModes, [3, 3]);
+  assert.ok(f.seen.every((x) => x.thinkingLevel === 1 && x.modeCategory === 3));
   const before = f.seen.length;
   await assert.rejects(
     liveCase({

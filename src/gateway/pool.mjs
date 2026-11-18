@@ -5,6 +5,7 @@ import { isExplicitQuotaFailure } from './quota-failover.mjs';
 import { isVerifiedEmptyResponse } from './output-recovery.mjs';
 import { automaticRecoveryKind } from './automatic-recovery.mjs';
 import { ACCOUNT_MODELS, isProviderRejection } from "./provider-state.mjs";
+import { canonicalModel } from "../openai-contract.mjs";
 import { ModelTelemetry } from "./model-telemetry.mjs";
 const keyOf = (owner, id) => crypto.createHash("sha256").update(owner + "\0" + id).digest("hex");
 export function classifyFailure(error) {
@@ -51,7 +52,8 @@ export class AccountPool {
     if (!this.runtime.has(id)) this.runtime.set(id, { inFlight: 0, requests: 0, failures: 0, lastUsedAt: null });
     return this.runtime.get(id);
   }
-  available(model = "gemini-argon") {
+  available(model = "gemini-neon") {
+    model = canonicalModel(model);
     if (!ACCOUNT_MODELS.includes(model)) return [];
     return this.accounts.list().filter(a => this.routingAllowed(a.id) && a.enabled && a.status === "ready" && this.stats(a.id).inFlight < 2);
   }
@@ -98,6 +100,7 @@ export class AccountPool {
     }
   }
   async runTest(accountId, { model, signal }, execute) {
+    model = canonicalModel(model);
     if (!ACCOUNT_MODELS.includes(model)) throw fault("UNSUPPORTED_MODEL");
     const account = this.accounts.list().find(a => a.id === accountId);
     if (!account) throw fault("ACCOUNT_NOT_FOUND", 404);
@@ -121,7 +124,8 @@ export class AccountPool {
       throw error;
     } finally { this.#releaseAccount(accountId, stat); }
   }
-  async run({ owner, sessionId, signal, model = "gemini-argon" }, execute) {
+  async run({ owner, sessionId, signal, model = "gemini-neon" }, execute) {
+    model = canonicalModel(model);
     if (!ACCOUNT_MODELS.includes(model)) throw fault("UNSUPPORTED_MODEL");
     if (typeof owner !== "string" || !owner) throw fault("INVALID_OWNER", 401);
     if (sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) throw fault("INVALID_SESSION_ID");

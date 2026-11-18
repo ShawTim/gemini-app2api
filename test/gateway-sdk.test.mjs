@@ -23,7 +23,7 @@ test("official JavaScript SDK: models, Chat JSON/SSE tools and caller result con
     baseURL: f.base + "/v1",
     maxRetries: 0,
   });
-  assert.equal((await client.models.list()).data[0].id, "gemini-argon");
+  assert.equal((await client.models.list()).data[0].id, "gemini-neon");
   const messages = [{ role: "user", content: "Synthetic request" }];
   const first = await client.chat.completions.create({
     model: "gemini-argon",

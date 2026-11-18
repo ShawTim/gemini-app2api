@@ -10,14 +10,15 @@ const phrase = 'I seem to be encountering an error. Can I try something else for
 const secondPhrase = "I'm having a hard time fulfilling your request. Can I help you with something else instead?";
 const hydrogenPhrase = 'I encountered an error doing what you asked. Could you try again?';
 const request = { model: 'gemini-argon', messages: [{ role: 'user', content: 'Continue the actual task using the permitted tools.' }], tools };
-const frame = (text, { complete = true, mode = 8, extra = [], completeness } = {}) => m(1003, m(1, Buffer.concat([
+const frame = (text, { complete = true, mode = 3, extra = [], completeness } = {}) => m(1003, m(1, Buffer.concat([
   m(1, Buffer.concat([m(1, Buffer.from('synthetic-private-response-id')), m(2, m(1, Buffer.from(text))), ...(completeness === undefined ? [] : [v(19, completeness)])])),
+  ...(mode === 3 ? [m(30, Buffer.from('Used 4 Neon High model'))] : []),
   v(9, Number(complete)), v(41, mode), v(42, 2), ...extra,
 ])));
 const provider = (text, options = {}) => new NativeDirectProvider({ getValidAccessToken: async () => 'synthetic-only' }, { openTurn: () => ({
   events: (async function* () { yield { type: 'frame', bytes: frame(text, options) }; if (options.reset) throw Object.assign(Error('Synthetic reset'), { code: 'NATIVE_STREAM_RESET' }); yield { type: 'end', httpStatus: 200, grpcStatus: options.grpc === undefined ? 0 : options.grpc }; })(), cancel() {},
 }) });
-const evidence = extra => ({ phase: 'validate', upstreamHttpStatus: 200, grpcStatus: 0, wireEnded: true, modelCompleted: true, observedMode: 8,
+const evidence = extra => ({ phase: 'validate', upstreamHttpStatus: 200, grpcStatus: 0, wireEnded: true, modelCompleted: true, observedMode: 3,
   nativeRefusalPresent: false, nativeStructuredOutputPresent: false, outputFailureReason: 'generic_error_offer', outputFailureSource: 'exact_text_signature', outputToolCalls: 0, ...extra });
 
 test('only the observed complete whole-answer failure signature is matched', () => {
@@ -139,7 +140,7 @@ test('disabled recovery ends the soft error as an explicit incomplete terminal, 
     }
     assert.equal(f.seen.length, 2);
     const row = f.app.overview().requests[0]; assert.equal(row.errorCode, 'NATIVE_SOFT_ERROR_RESPONSE'); assert.equal(row.outputIncomplete, true);
-    assert.ok(f.app.overview().accounts.every(a => a.modelStates['gemini-argon'].state !== 'verified'));
+    assert.ok(f.app.overview().accounts.every(a => a.modelStates['gemini-neon'].state !== 'verified'));
   }
 });
 

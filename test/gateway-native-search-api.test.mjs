@@ -49,7 +49,7 @@ const frame = ({
   text = "Final source https://example.org/",
   tool = "google",
   complete = true,
-  mode = 8,
+  mode = 3,
   id = "synthetic-response",
   modelExtra = [],
 } = {}) => ({
@@ -67,6 +67,7 @@ const frame = ({
             ...modelExtra,
           ]),
         ),
+        ...(mode === 3 ? [str(30, "Used 4 Neon High model")] : []),
         v(9, Number(complete)),
         v(41, mode),
         v(42, 2),
@@ -169,7 +170,7 @@ for (const api of ["chat", "responses"])
       assert.equal(r.status, 200);
       assert.equal(f.seen.length, 1);
       assert.equal(f.seen[0].allowNativeTools, true);
-      assert.equal(f.seen[0].modeCategory, 8);
+      assert.equal(f.seen[0].modeCategory, 3);
       assert.equal(f.seen[0].thinkingLevel, 2);
       assert.match(f.seen[0].messages[0].content, /Keep source URLs/);
       const raw = await r.text();
@@ -595,8 +596,9 @@ test("duplicate webSources and metadata frames apply deny-wins for forceAccount 
             1,
             Buffer.concat([
               m(1, Buffer.concat([str(1, "synthetic-response"), webSourceMsg({ url: secretUrl, sourceTitle: secretTitle, forceAccount: true })])),
+              str(30, "Used 4 Neon High model"),
               v(9, 1),
-              v(41, 8),
+              v(41, 3),
               v(42, 2),
             ]),
           ),

@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { parse } from '../native-wire/protobuf.mjs';
 import { decodeClientGenerateResponse } from '../native-wire/robin-current.mjs';
 import { ProtocolError, protocolError, compileToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
-import { MODEL_MODES, NATIVE_MODELS, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
+import { MODEL_ALIASES, MODEL_MODES, NATIVE_MODELS, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
 import { RESPONSE_TOOL_IDENTITIES } from './responses-tool-namespaces.mjs';
 import { safeNativeEvidence } from './gateway/native-evidence.mjs';
 import { decodePassiveQuota, mergeQuotaObservation } from './gateway/quota.mjs';
@@ -20,7 +20,7 @@ import { validateStructuredOutputText } from './gateway/structured-output.mjs';
 import { mapNativeSearchAnnotations, extractNativeSearchSources } from './gateway/native-search-citations.mjs';
 import { softErrorReason } from './gateway/soft-error.mjs';
 import { observeNative } from './gateway/native-diagnostic.mjs';
-export { NATIVE_MODELS, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse };
+export { MODEL_ALIASES, NATIVE_MODELS, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse };
 
 import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './gateway/native-response-limits.mjs';
 const fail = (code, status = 502) => { throw protocolError(code, status); };
@@ -37,6 +37,7 @@ const failWithEvidence = (code, evidence) => {
 };
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 const HYDROGEN_ATTRIBUTION = /\bhydrogen\b/i;
+const NEON_ATTRIBUTION = /\bneon\b/i;
 function one(fields, number) {
   const found = fields.filter(field => field.number === number);
   if (found.length > 1) fail('INVALID_NATIVE_RESPONSE');
@@ -100,7 +101,7 @@ function safeFailure(error) {
 
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, timeoutMs = 600_000, modelAlias = 'gemini-argon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, timeoutMs = 600_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
@@ -108,14 +109,15 @@ export class NativeDirectProvider {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new TypeError('invalid timeout');
     if (continuation !== false) throw protocolError('UNSUPPORTED_CONTINUATION', 400);
     if (typeof allowAutoModel !== 'boolean') throw new TypeError('invalid auto model policy');
+    const resolvedAlias = canonicalModel(modelAlias);
     const allowedModels = allowAutoModel ? [...NATIVE_MODELS, 'gemini-auto'] : NATIVE_MODELS;
-    if (!allowedModels.includes(modelAlias)) throw protocolError('UNSUPPORTED_MODEL', 400);
+    if (!allowedModels.includes(resolvedAlias)) throw protocolError('UNSUPPORTED_MODEL', 400);
     this.authManager = authManager; this.openTurn = openTurn; this.uploadImages = uploadImages; this.timeoutMs = timeoutMs;
     this.downloadImages = downloadImages;
     if (typeof allowTextSnapshotReplacement !== 'boolean') throw new TypeError('invalid snapshot policy');
     this.allowTextSnapshotReplacement = allowTextSnapshotReplacement;
     this.allowAutoModel = allowAutoModel;
-    this.modelAlias = modelAlias; this.continuationEnabled = false;
+    this.modelAlias = resolvedAlias; this.continuationEnabled = false;
   }
 
   buildTurn(body) { return buildCanonicalPrompt(normalizeChatRequest(body, { allowAutoModel: this.allowAutoModel })); }
@@ -205,10 +207,12 @@ export class NativeDirectProvider {
     timer = setTimeout(() => stop(protocolError('NATIVE_TURN_TIMEOUT', 504)), timeoutMs);
     const bounded = promise => Promise.race([promise, deadline]);
     const requiresHydrogen = body.model === 'gemini-hydrogen';
+    const requiresNeon = body.model === 'gemini-neon';
     let rawText = '', frames = 0, received = 0, observedMode = null, observedThinking = null;
     let modelComplete = false, ended = false, grpc = null, httpStatus = null, downgrade = false, phase = 'auth';
     let observedFallback = null, downgradeReason = null, observedAttribution = null;
-    const attributionVerified = () => !requiresHydrogen || HYDROGEN_ATTRIBUTION.test(observedAttribution ?? '');
+    const attributionMatches = value => (!requiresHydrogen || HYDROGEN_ATTRIBUTION.test(value ?? '')) && (!requiresNeon || NEON_ATTRIBUTION.test(value ?? ''));
+    const attributionVerified = () => attributionMatches(observedAttribution);
     let snapshotId = null, revisionCount = 0, quotaObservation = null, quotaFrames = 0;
     let emptyResponseReason = null, outputObserved = false, responseLimitReason = null, outputFailureReason = null;
     const outputShape = { nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeStructuredOutputPresent: false, nativeRefusalPresent: false };
@@ -314,7 +318,7 @@ export class NativeDirectProvider {
           }
           if (frameResolved && info.attribution !== null && info.attribution.length > 0) {
             observedAttribution = info.attribution;
-            if (requiresHydrogen && !HYDROGEN_ATTRIBUTION.test(info.attribution)) downgrade = true;
+            if (!attributionMatches(info.attribution)) downgrade = true;
           }
           // Final generate evidence must name the requested mode unless auto selection is enabled.
           // Prior proven rejection is sticky; an unresolved zero is not a proven downgrade.

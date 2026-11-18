@@ -1,6 +1,6 @@
 // Only a fully completed, verified empty ordinary turn is recoverable automatically.
 // Never promote thoughts/shareable/structured output to an assistant answer.
-import { MODEL_MODES } from '../openai-contract.mjs';
+import { MODEL_MODES, canonicalModel } from '../openai-contract.mjs';
 import { parse } from '../../native-wire/protobuf.mjs';
 import { protocolError } from '../tool-protocol.mjs';
 export const EMPTY_RESPONSE_REASONS = Object.freeze(['no_text', 'whitespace_only', 'thoughts_only', 'post_parse_empty']);
@@ -29,11 +29,12 @@ export function inspectNativeOutput(fields) {
     ...(Number.isSafeInteger(completenessState) && completenessState >= 0 && completenessState <= 0x7fffffff ? { nativeCompletenessState: completenessState } : {}) };
 }
 export function isVerifiedEmptyResponse(error, model, { allowAutoModel = false } = {}) {
+  const resolvedModel = canonicalModel(model);
   const e = error?.nativeEvidence;
-  const isAuto = allowAutoModel === true && model === 'gemini-auto';
+  const isAuto = allowAutoModel === true && resolvedModel === 'gemini-auto';
   const modeOk = isAuto
     ? (e?.observedMode === null || e?.observedMode === undefined || (Number.isSafeInteger(e.observedMode) && e.observedMode >= 0 && e.observedMode <= 64))
-    : (MODEL_MODES[model] !== undefined && e?.observedMode === MODEL_MODES[model]);
+    : (MODEL_MODES[resolvedModel] !== undefined && e?.observedMode === MODEL_MODES[resolvedModel]);
   return error?.status === 502 && error.code === 'EMPTY_NATIVE_RESPONSE' &&
     e?.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 &&
     e.wireEnded === true && e.modelCompleted === true && modeOk &&

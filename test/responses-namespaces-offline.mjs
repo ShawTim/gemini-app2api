@@ -114,7 +114,7 @@ assert.equal(chatPackets.at(-1).choices[0].finish_reason, 'stop'); assert.equal(
 let upstream = 0;
 const wireText = names.map(name => '```tool_call\n' + JSON.stringify({ name, arguments: { value: 'fixture' } }) + '\n```\n').join('');
 const str = (n, s) => m(n, Buffer.from(s));
-const frame = complete => m(1003, m(1, Buffer.concat([m(1, Buffer.concat([str(1, 'fixture'), m(2, str(1, wireText))])), v(9, complete ? 1 : 0), v(41, 8), v(42, 2)])));
+const frame = complete => m(1003, m(1, Buffer.concat([m(1, Buffer.concat([str(1, 'fixture'), m(2, str(1, wireText))])), v(9, complete ? 1 : 0), str(30, 'Used 4 Neon High model'), v(41, 3), v(42, 2)])));
 for (const incrementalOutput of [false, true]) for (const incomplete of [false, true]) {
   if (!incrementalOutput && incomplete) continue;
   const provider = new NativeDirectProvider({ getValidAccessToken: async () => 'synthetic' }, { timeoutMs: 1000, openTurn: () => {

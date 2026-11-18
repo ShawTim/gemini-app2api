@@ -129,12 +129,12 @@ test("successful quota failover preserves model/full history and pins the succes
     })(), cancel() {} };
   };
   const response = await send(f, body, headers); assert.equal(response.status, 200);
-  assert.equal(response.headers.get("x-native-mode"), "8");
+  assert.equal(response.headers.get("x-native-mode"), "3");
   assert.equal(response.headers.get("x-gemini-provider-attempts"), "2");
   assert.equal(response.headers.get("x-gemini-failover-count"), "1");
   assert.equal(response.headers.get("x-gemini-failover-reason"), "quota");
   assert.match(await response.text(), /Recovered on requested model/);
-  assert.equal(seen.length, 2); assert.ok(seen.every(options => options.modeCategory === 8));
+  assert.equal(seen.length, 2); assert.ok(seen.every(options => options.modeCategory === 3));
   assert.deepEqual(seen[0].messages, seen[1].messages);
   const request = f.app.overview().requests[0];
   assert.equal(request.providerFailures.length, 1);
@@ -211,7 +211,7 @@ for (const automatic of [false, true]) test(`fifth quota refusal reaches the six
   assert.match(await response.text(), /Sixth account answered/);
   const request = f.app.overview().requests[0];
   assert.equal(new Set([...request.providerFailures.map(x => x.accountId), request.accountId]).size, 6);
-  assert.ok(f.seen.every(x => x.modeCategory === 8 && x.thinkingLevel === 2));
+  assert.ok(f.seen.every(x => x.modeCategory === 3 && x.thinkingLevel === 2));
   assert.ok(f.seen.every(x => JSON.stringify(x.messages) === JSON.stringify(f.seen[0].messages)));
 });
 

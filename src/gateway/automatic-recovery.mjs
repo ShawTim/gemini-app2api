@@ -1,5 +1,5 @@
 // Request-scoped bounded recovery; never repair/execute an invalid tool call.
-import { MODEL_MODES } from '../openai-contract.mjs';
+import { MODEL_MODES, canonicalModel } from '../openai-contract.mjs';
 import { isVerifiedEmptyResponse } from './output-recovery.mjs';
 import { isExplicitQuotaFailure } from './quota-failover.mjs';
 const TOOL_ERRORS = new Set(['MALFORMED_TOOL_CALL', 'INVALID_TOOL_JSON', 'TRUNCATED_TOOL_CALL', 'INVALID_TOOL_CALL',
@@ -19,10 +19,11 @@ export function toolRecoveryInstruction(code) {
   return null;
 }
 export function automaticRecoveryKind(error, model, { allowAutoModel = false } = {}) {
+  const resolvedModel = canonicalModel(model);
   if (isExplicitQuotaFailure(error)) return 'quota';
-  if (isVerifiedEmptyResponse(error, model, { allowAutoModel })) return 'empty_response';
-  const isAuto = allowAutoModel === true && model === 'gemini-auto';
-  const expected = MODEL_MODES[model];
+  if (isVerifiedEmptyResponse(error, resolvedModel, { allowAutoModel })) return 'empty_response';
+  const isAuto = allowAutoModel === true && resolvedModel === 'gemini-auto';
+  const expected = MODEL_MODES[resolvedModel];
   if (!isAuto && expected === undefined) return null;
   const modeOk = mode => isAuto
     ? (mode === null || mode === undefined || (Number.isSafeInteger(mode) && mode >= 0 && mode <= 64))

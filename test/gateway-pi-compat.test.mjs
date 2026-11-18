@@ -38,7 +38,7 @@ test('PI Argon/Hydrogen Chat JSON and SSE succeed and explicitly disclose unenfo
     if (stream) { const text = await r.text(); assert.match(text, /"content":"OK"/); assert.match(text, /data: \[DONE\]/); }
     else assert.equal((await r.json()).choices[0].message.content, 'OK');
     const wire = f.seen.at(-1);
-    assert.equal(wire.modeCategory, model === 'gemini-argon' ? 8 : 1);
+    assert.equal(wire.modeCategory, model === 'gemini-argon' ? 3 : 1);
     assert.equal(wire.max_completion_tokens, undefined);
     assert.equal(wire.max_tokens, undefined);
   }

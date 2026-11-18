@@ -15,11 +15,14 @@ const input = { model: HYDROGEN, messages: [{ role: 'user', content: 'Synthetic 
 const only = (bytes, n) => { const values = parse(bytes).filter(f => f.number === n); assert.equal(values.length, 1); return values[0]; };
 async function setup(t, options = {}) { const f = await fixture({ accountCount: 1, allowFailover: false, ...options }); t.after(f.close); return f; }
 
-test('Hydrogen is FAST=1, distinct from Lite=6/Argon=8; retired gemini-flash is rejected; defaults and numeric/effort controls stay explicit', async t => {
-  assert.deepEqual(NATIVE_MODELS, ['gemini-argon', HYDROGEN, 'gemini-flash-lite']);
-  assert.deepEqual(MODEL_MODES, { 'gemini-argon': 8, [HYDROGEN]: 1, 'gemini-flash-lite': 6 });
+test('Neon=3/Hydrogen=1/Lite=6 with temporary gemini-argon alias; retired gemini-flash is rejected; defaults and numeric/effort controls stay explicit', async t => {
+  assert.deepEqual(NATIVE_MODELS, ['gemini-neon', HYDROGEN, 'gemini-flash-lite']);
+  assert.deepEqual(MODEL_MODES, { 'gemini-neon': 3, [HYDROGEN]: 1, 'gemini-flash-lite': 6 });
   assert.equal(normalizeChatRequest(input).thinking_level, 2);
-  assert.equal(normalizeChatRequest({ messages: input.messages }).model, 'gemini-argon');
+  assert.equal(normalizeChatRequest({ messages: input.messages }).model, 'gemini-neon');
+  assert.equal(normalizeChatRequest({ model: 'gemini-argon', messages: input.messages }).model, 'gemini-neon');
+  assert.equal(normalizeChatRequest({ model: 'models/gemini-argon', messages: input.messages }).model, 'gemini-neon');
+  assert.equal(normalizeResponsesRequest({ model: 'gemini-argon', input: 'Synthetic' }).body.model, 'gemini-neon');
   assert.equal(normalizeChatRequest({ ...input, model: 'models/' + HYDROGEN, reasoning_effort: 'low' }).thinking_level, 1);
   assert.equal(normalizeResponsesRequest({ model: HYDROGEN, input: 'Synthetic', reasoning: { effort: 'medium' } }).body.model, HYDROGEN);
   assert.throws(() => normalizeChatRequest({ ...input, model: 'gemini-flash' }), { code: 'UNSUPPORTED_MODEL', status: 400 });
@@ -54,9 +57,9 @@ test('all four Hydrogen HTTP formats forward FAST and preserve requested/resolve
   const models = await (await f.api('/v1/models')).json();
   assert.ok(models.data.some(m => m.id === HYDROGEN));
   assert.equal(models.data.some(m => m.id === 'gemini-flash'), false);
-  assert.equal(models.data.find(m => m.id === 'gemini-argon').context_window, 128000); // advisory client budget
+  assert.equal(models.data.find(m => m.id === 'gemini-neon').context_window, 128000); // advisory client budget
   assert.equal(models.data.find(m => m.id === HYDROGEN).context_window, 512000); // advisory client budget
-  assert.ok(models.data.filter(m => !['gemini-argon', HYDROGEN].includes(m.id)).every(m => !Object.hasOwn(m, 'context_window')));
+  assert.ok(models.data.filter(m => !['gemini-neon', HYDROGEN].includes(m.id)).every(m => !Object.hasOwn(m, 'context_window')));
   const before = (await (await f.admin('accounts')).json()).accounts[0];
   assert.equal(before.modelStates[HYDROGEN].state, 'unverified'); assert.equal(f.seen.length, 0);
   for (const api of ['chat', 'responses']) for (const stream of [false, true]) {
@@ -84,8 +87,8 @@ test('all four Hydrogen HTTP formats forward FAST and preserve requested/resolve
   }
   const after = (await (await f.admin('accounts')).json()).accounts[0];
   assert.equal(after.modelStates[HYDROGEN].state, 'verified'); assert.equal(after.modelStates[HYDROGEN].mode, 1);
-  assert.equal(after.modelStates['gemini-argon'].state, 'unverified'); assert.equal(after.modelStates['gemini-flash-lite'].state, 'unverified');
-  assert.equal((await (await f.request('/ready')).json()).upstreamVerified, false); // default Argon unchanged
+  assert.equal(after.modelStates['gemini-neon'].state, 'unverified'); assert.equal(after.modelStates['gemini-flash-lite'].state, 'unverified');
+  assert.equal((await (await f.request('/ready')).json()).upstreamVerified, false); // default Neon unchanged
 });
 
 test('Hydrogen refuses other resolved modes and legacy/missing field-30 attribution before JSON/SSE release and records no false success', async t => {
@@ -153,7 +156,7 @@ test('Hydrogen rejection is model-scoped, original diagnostics and quota provena
   const r = await f.api('/v1/chat/completions', { method: 'POST', body: input }); assert.equal(r.status, 502); await r.text();
   const account = (await (await f.admin('accounts')).json()).accounts[0];
   assert.equal(account.lastError.model, HYDROGEN); assert.equal(account.modelStates[HYDROGEN].state, 'rejected');
-  assert.equal(account.modelStates['gemini-argon'].state, 'unverified'); assert.equal(account.modelStates['gemini-flash-lite'].state, 'unverified');
+  assert.equal(account.modelStates['gemini-neon'].state, 'unverified'); assert.equal(account.modelStates['gemini-flash-lite'].state, 'unverified');
   const persisted = modelStates(f.store.data.accounts[0]); assert.equal(persisted[HYDROGEN].state, 'rejected');
   assert.equal(safeAccountError(f.store.data.accounts[0].lastError).model, HYDROGEN);
   assert.equal(safeQuota({ source: 'official', provider: 'google-robin', status: 'ok', observedModel: HYDROGEN }).observedModel, HYDROGEN);

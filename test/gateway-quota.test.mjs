@@ -6,7 +6,7 @@ import { fixture } from "./gateway-fixture.mjs";
 import { NativeDirectProvider } from "../src/native-provider.mjs";
 test("passive quota is attached only to a fully accepted turn", async () => {
   const modelFields = m(2, m(1, Buffer.from("Answer")));
-  const client = Buffer.concat([m(1, modelFields), v(9, 1), v(11, 0), v(31, 0), v(41, 8), v(42, 2), m(20, m(1, budgetInfo(2, 8)))]);
+  const client = Buffer.concat([m(1, modelFields), m(30, Buffer.from("Used 4 Neon High model")), v(9, 1), v(11, 0), v(31, 0), v(41, 3), v(42, 2), m(20, m(1, budgetInfo(2, 8)))]);
   const frame = m(1003, m(1, client));
   const provider = new NativeDirectProvider({ getValidAccessToken: async () => "synthetic" }, {
     openTurn: () => ({ events: (async function* () { yield { type: "frame", bytes: frame }; yield { type: "end", httpStatus: 200, grpcStatus: 0 }; })() }),

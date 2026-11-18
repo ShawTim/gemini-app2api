@@ -805,7 +805,7 @@ function telemetryErrorChips(stats = {}) {
 }
 function overviewModelTelemetry() {
   const o = S.overview || {};
-  const models = o.models || ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'];
+  const models = o.models || ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite'];
   const byModel = o.modelTelemetry?.byModel || {};
   return panel(
     L('Model Traffic & Reliability', '模型流量與穩定性分佈'),
@@ -838,7 +838,7 @@ function overviewModelTelemetry() {
   );
 }
 function accountModelTelemetryView(a) {
-  const models = S.overview?.models || Object.keys(a.modelTelemetry || {}) || ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'];
+  const models = S.overview?.models || Object.keys(a.modelTelemetry || {}) || ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite'];
   const matrix = a.modelTelemetry || {};
   return el('section', { class: 'drawer-section drawer-model-telemetry', 'data-account-model-telemetry': a.id },
     el('h3', { class: 'drawer-section-title' },
@@ -985,11 +985,11 @@ function accountInitials(a) {
   return (parts.length >= 2 ? parts[0][0] + parts[1][0] : (parts[0] || '?').slice(0, 2)).toUpperCase();
 }
 function accountModelChips(a) {
-  const models = S.overview?.models || ['gemini-hydrogen', 'gemini-argon', 'gemini-flash-lite'];
+  const models = S.overview?.models || ['gemini-hydrogen', 'gemini-neon', 'gemini-flash-lite'];
   const states = a.modelStates || {};
   return el('div', { class: 'model-chips', 'aria-label': L('Model verification summary', '模型驗證摘要') }, models.map(m => {
     const st = states[m]?.state || 'unverified';
-    const short = m === 'gemini-hydrogen' ? 'hydrogen' : m === 'gemini-argon' ? 'argon' : m === 'gemini-flash-lite' ? 'lite' : m;
+    const short = m === 'gemini-hydrogen' ? 'hydrogen' : m === 'gemini-neon' ? 'neon' : m === 'gemini-flash-lite' ? 'lite' : m;
     const cls = st === 'verified' ? 'ok' : ['rejected', 'blocked'].includes(st) ? 'rejected' : '';
     return el('span', { class: `m-chip ${cls}`.trim(), title: `${m}: ${modelStateLabel(st)}` }, el('i', { 'aria-hidden': true }), short);
   }));
@@ -1043,13 +1043,13 @@ function poolPulseGrid() {
       el('div', { class: 'spark-bars', 'aria-hidden': true }, sample.length ? sample.map(r => el('i', { class: Number(r.status) >= 400 ? 'err' : null, style: `height:${Math.max(14, Math.round((r.durationMs / maxMs) * 100))}%` })) : el('i', { style: 'height:18%;opacity:0.25' }))),
     el('article', { class: 'pulse-card' },
       el('div', { class: 'pulse-head' }, el('span', {}, L('QUOTA EFFICIENCY', '配額效率策略')), badge(versionTag())),
-      el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value mono', style: 'font-size:15px' }, 'gemini-hydrogen'), el('span', { class: 'pulse-sub pulse-accent' }, L('~60× turns vs Argon', '約 60× 對話輪數'))),
-      el('div', { class: 'pulse-sub' }, L('512k context · Argon 128k reserved for Plan', '512k 上下文 · Argon 128k 留作架構規劃'))));
+      el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value mono', style: 'font-size:15px' }, 'gemini-hydrogen'), el('span', { class: 'pulse-sub pulse-accent' }, L('~60× turns vs Pro tier', '約 60× 對話輪數'))),
+      el('div', { class: 'pulse-sub' }, L('512k context · Neon 128k reserved for Plan', '512k 上下文 · Neon 128k 留作架構規劃'))));
 }
 function presetSnippetText(preset = S.preset) {
   const base = gatewayBaseUrl();
   if (preset === 'cline') {
-    return `// Plan / Architect: gemini-argon (128k Pro reasoning)\n// Act / Code:       gemini-hydrogen (512k · ~60x turns)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-hydrogen"\n}`;
+    return `// Plan / Architect: gemini-neon (128k Pro reasoning; gemini-argon aliases here)\n// Act / Code:       gemini-hydrogen (512k · ~60x turns)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-hydrogen"\n}`;
   }
   if (preset === 'curl') {
     return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gemini-hydrogen","messages":[{"role":"user","content":"Hi"}]}'`;
@@ -1819,10 +1819,10 @@ function emptyDemoTelemetryEntry() {
     lastUsedAt: null,
   };
 }
-function emptyDemoModelTelemetry(models = ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']) {
+function emptyDemoModelTelemetry(models = ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']) {
   return { zeroPromptLogging: true, models: [...models], byModel: Object.fromEntries(models.map(m => [m, emptyDemoTelemetryEntry()])) };
 }
-function summarizeDemoModelTelemetry(accounts = [], models = ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']) {
+function summarizeDemoModelTelemetry(accounts = [], models = ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']) {
   const byModel = Object.fromEntries(models.map(m => [m, emptyDemoTelemetryEntry()]));
   for (const a of accounts) {
     for (const m of models) {
@@ -1851,7 +1851,7 @@ function syncDemoState(target = demo) {
 }
 function makeDemo() {
   const now = Date.now(), ago = seconds => new Date(now - seconds * 1000).toISOString();
-  const models = ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite'];
+  const models = ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite'];
   const entry = (requests, successes, failures, inFlight, outputBytes, retries, softErrors, quotaErrors, errorCounts, lastUsedAt) => ({
     requests, successes, failures, inFlight, outputBytes, retries, softErrors, quotaErrors,
     errorCounts: { quota: 0, auth: 0, precondition: 0, transient: 0, soft_error: 0, protocol: 0, other: 0, ...errorCounts },
@@ -1864,7 +1864,7 @@ function makeDemo() {
       subscription: { source: 'official', status: 'ok', tier: 'pro', updatedAt: ago(600) },
       modelTelemetry: {
         'gemini-hydrogen': entry(1120, 1114, 5, 1, 4820480, 4, 1, 2, { quota: 2, transient: 1, soft_error: 1, protocol: 1 }, ago(12)),
-        'gemini-argon': entry(540, 537, 2, 1, 2359296, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(45)),
+        'gemini-neon': entry(540, 537, 2, 1, 2359296, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(45)),
         'gemini-flash-lite': entry(182, 181, 1, 0, 421888, 1, 0, 0, { transient: 1 }, ago(140)),
       },
     },
@@ -1874,7 +1874,7 @@ function makeDemo() {
       subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
       modelTelemetry: {
         'gemini-hydrogen': entry(580, 577, 2, 1, 2146304, 2, 1, 1, { quota: 1, soft_error: 1 }, ago(38)),
-        'gemini-argon': entry(266, 265, 1, 0, 983040, 1, 0, 0, { precondition: 1 }, ago(120)),
+        'gemini-neon': entry(266, 265, 1, 0, 983040, 1, 0, 0, { precondition: 1 }, ago(120)),
         'gemini-flash-lite': entry(100, 99, 1, 0, 245760, 1, 0, 0, { protocol: 1 }, ago(310)),
       },
     },
@@ -1884,7 +1884,7 @@ function makeDemo() {
       subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
       modelTelemetry: {
         'gemini-hydrogen': entry(132, 129, 3, 0, 512000, 3, 1, 1, { quota: 1, transient: 1, soft_error: 1 }, ago(280)),
-        'gemini-argon': entry(62, 60, 2, 0, 229376, 1, 0, 1, { quota: 1, transient: 1 }, ago(640)),
+        'gemini-neon': entry(62, 60, 2, 0, 229376, 1, 0, 1, { quota: 1, transient: 1 }, ago(640)),
         'gemini-flash-lite': entry(24, 23, 1, 0, 61440, 0, 0, 0, { other: 1 }, ago(1420)),
       },
     },
@@ -1894,12 +1894,12 @@ function makeDemo() {
       subscription: { source: 'unknown', status: 'unknown', tier: 'unknown', updatedAt: null },
       modelTelemetry: {
         'gemini-hydrogen': entry(72, 71, 1, 0, 262144, 0, 0, 0, { auth: 1 }, ago(86400)),
-        'gemini-argon': entry(38, 37, 1, 0, 131072, 0, 0, 0, { auth: 1 }, ago(90200)),
+        'gemini-neon': entry(38, 37, 1, 0, 131072, 0, 0, 0, { auth: 1 }, ago(90200)),
         'gemini-flash-lite': entry(16, 16, 0, 0, 36864, 0, 0, 0, {}, ago(94800)),
       },
     },
   ];
-  const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: ['gemini-hydrogen', 'gemini-argon', 'gemini-flash-lite'][i % 3], accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
+  const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: ['gemini-hydrogen', 'gemini-neon', 'gemini-flash-lite'][i % 3], accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
   const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `sess_demo_${String(i + 1).padStart(3, '0')}`, accountId: i % 2 ? 'acct_secondary' : 'acct_primary', turns: [12, 6, 3, 8, 2, 17, 4, 1][i], lastUsedAt: ago(i * 58 + 12), inFlight: i < 3 ? 1 : 0 }));
   const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, sessionTtlMs: 1800000, maxSessions: 256 };
   return syncDemoState({

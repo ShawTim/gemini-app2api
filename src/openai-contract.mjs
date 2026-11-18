@@ -14,9 +14,16 @@ import { RESPONSE_TOOL_IDENTITIES, normalizeResponsesTools, responsesCallFields 
 import { toResponsesUsage } from './openai-usage.mjs';
 
 const fail = (code, status = 400, param = null) => { throw protocolError(code, status, param); };
-export const NATIVE_MODELS = Object.freeze(['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
-// Native ModeCategory wire values: ULTRA=8, FAST=1 (Gemini 4 Hydrogen), FLASH_LITE=6. Never auto/Plus.
-export const MODEL_MODES = Object.freeze({ 'gemini-argon': 8, 'gemini-hydrogen': 1, 'gemini-flash-lite': 6 });
+export const NATIVE_MODELS = Object.freeze(['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']);
+// Temporary compatibility alias while clients migrate from retired gemini-argon (mode 8) to gemini-neon (mode 3).
+export const MODEL_ALIASES = Object.freeze({ 'gemini-argon': 'gemini-neon' });
+// Native ModeCategory wire values: PRO=3 (Gemini 4 Neon), FAST=1 (Gemini 4 Hydrogen), FLASH_LITE=6. Never auto/Plus.
+export const MODEL_MODES = Object.freeze({ 'gemini-neon': 3, 'gemini-hydrogen': 1, 'gemini-flash-lite': 6 });
+export function canonicalModel(model) {
+  if (typeof model !== 'string') return model;
+  const stripped = model.startsWith('models/') ? model.slice(7) : model;
+  return Object.hasOwn(MODEL_ALIASES, stripped) ? MODEL_ALIASES[stripped] : stripped;
+}
 // Ordinary effort hints must never opt into native asynchronous Deep Think (3).
 // Extended thinking (2) is the existing normal-turn default, not an ordered scale.
 export const REASONING_EFFORT_LEVELS = Object.freeze({ none: 0, minimal: 0, low: 1, medium: 2, high: 2, xhigh: 2 });
@@ -167,9 +174,9 @@ function content(value, { assistant = false, responses = false, user = false, pr
   return parts.some(part => part.type === 'image_url') ? parts : parts.map(part => part.text).join('');
 }
 function settings(body, { allowAutoModel = false } = {}) {
-  const model = body.model === undefined ? 'gemini-argon' : body.model;
+  const model = body.model === undefined ? 'gemini-neon' : body.model;
   if (typeof model !== 'string') fail('UNSUPPORTED_MODEL', 400, 'model');
-  const alias = model.startsWith('models/') ? model.slice(7) : model;
+  const alias = canonicalModel(model);
   const allowedModels = allowAutoModel ? [...NATIVE_MODELS, 'gemini-auto'] : NATIVE_MODELS;
   if (!allowedModels.includes(alias)) fail('UNSUPPORTED_MODEL', 400, 'model');
   const thinking = thinkingSettings(body);
@@ -317,7 +324,7 @@ export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
   const resolved = settings(payload, { allowAutoModel });
   const response_format = normalizeChatResponseFormat(payload.response_format);
   if (resolved.native_search) {
-    if (resolved.model !== 'gemini-argon' || resolved.thinking_level !== 2) fail('UNSUPPORTED_NATIVE_SEARCH_MODE');
+    if (resolved.model !== 'gemini-neon' || resolved.thinking_level !== 2) fail('UNSUPPORTED_NATIVE_SEARCH_MODE');
     if (response_format) fail('NATIVE_SEARCH_RESPONSE_FORMAT_CONFLICT');
     if ((payload.tools !== undefined && (!Array.isArray(payload.tools) || payload.tools.length)) || (payload.tool_choice !== undefined && payload.tool_choice !== 'auto') || payload.parallel_tool_calls !== undefined) fail('NATIVE_SEARCH_TOOL_CONFLICT');
     if (Array.isArray(payload.messages) && payload.messages.some(message => message?.role === 'tool' || message?.tool_calls !== undefined || message?.tool_call_id !== undefined)) fail('NATIVE_SEARCH_TOOL_HISTORY_UNSUPPORTED');

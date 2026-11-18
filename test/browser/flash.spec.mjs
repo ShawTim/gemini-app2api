@@ -14,7 +14,7 @@ test('Hydrogen is advertised, independently unverified, and selectable without h
     await page.keyboard.press('Escape');
     await expect(page.locator('#account-drawer')).toBeHidden();
     await page.evaluate(() => { location.hash = 'models'; });
-    await expect(page.locator('#client-model option')).toHaveText(['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
+    await expect(page.locator('#client-model option')).toHaveText(['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']);
     await page.locator('#client-model').selectOption('gemini-hydrogen');
     await expect(page.locator('#client-snippet')).toContainText('"gemini-hydrogen"');
     expect(f.seen).toHaveLength(0);
@@ -25,7 +25,7 @@ test('Hydrogen is advertised, independently unverified, and selectable without h
     await page.locator('[data-route="accounts"]:visible').first().click();
     await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     await expect(state).toHaveAttribute('data-provider-state', 'verified');
-    await expect(page.locator('#account-drawer [data-provider-model="gemini-argon"]')).toHaveAttribute('data-provider-state', 'unverified');
+    await expect(page.locator('#account-drawer [data-provider-model="gemini-neon"]')).toHaveAttribute('data-provider-state', 'unverified');
     await expect(page.locator('#account-drawer [data-provider-model="gemini-flash-lite"]')).toHaveAttribute('data-provider-state', 'unverified');
     await page.keyboard.press('Escape');
     expect(quotaRequests).toBe(0); expect(errors).toEqual([]);

@@ -190,7 +190,7 @@ test("request filtering/pagination, safe export, sessions and audit are backend 
         await f.api("/v1/chat/completions", {
           method: "POST",
           body: {
-            model: "gemini-argon",
+            model: "gemini-neon",
             messages: [{ role: "user", content: "private synthetic prompt" }],
           },
           headers: { "X-Session-ID": "browser-session" },
@@ -210,7 +210,7 @@ test("request filtering/pagination, safe export, sessions and audit are backend 
   await page.locator("#request-status").selectOption("errors");
   await expect(page.locator("#request-count")).toContainText("0 matching");
   await page.locator("#request-status").selectOption("");
-  await page.locator("#request-model").selectOption("gemini-argon");
+  await page.locator("#request-model").selectOption("gemini-neon");
   const download = page.waitForEvent("download");
   await page.locator("#export-requests").click();
   const saved = await (await download).path();
@@ -499,7 +499,7 @@ test("Google error original and HTTP/gRPC statuses are shown as text in accounts
     events:{async *[Symbol.asyncIterator](){yield {type:"end",httpStatus:200,grpcStatus:9};}},
     getSafeStatus:()=>({httpStatus:200,grpcStatus:9,grpcMessage:message+markup,ended:true,receivedBytes:123}),cancel(){},
   };};
-  const r=await f.api("/v1/chat/completions",{method:"POST",body:{model:"gemini-argon",messages:[{role:"user",content:"private synthetic prompt"}]}});
+  const r=await f.api("/v1/chat/completions",{method:"POST",body:{model:"gemini-neon",messages:[{role:"user",content:"private synthetic prompt"}]}});
   expect(r.status).toBe(502);const requestId=r.headers.get("x-request-id");await r.text();
   await login(page);await route(page,"accounts");
   await expect(page.locator('[data-account-upstream-error] [data-upstream-message]')).toHaveCount(0);
@@ -533,18 +533,18 @@ test("new-user rejection remains observable without a local retry allowance or b
   await login(page);await route(page,"accounts");
   await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(page.locator('#account-drawer')).toBeVisible();
-  const state=()=>page.locator('#account-drawer [data-account-model-states="acc-0"] [data-provider-model="gemini-argon"]');
+  const state=()=>page.locator('#account-drawer [data-account-model-states="acc-0"] [data-provider-model="gemini-neon"]');
   await expect(state()).toHaveAttribute("data-provider-state","unverified");expect(opened).toBe(0);
-  const body={model:"gemini-argon",messages:[{role:"user",content:"Synthetic first-user check"}]};
+  const body={model:"gemini-neon",messages:[{role:"user",content:"Synthetic first-user check"}]};
   const response=await f.api("/v1/chat/completions",{method:"POST",body});expect(response.status).toBe(502);await response.text();
   await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
   await route(page,"overview");await route(page,"accounts");
   await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(state()).toHaveAttribute("data-provider-state","rejected");
   await expect(page.locator('#account-drawer [data-account-upstream-error="acc-0"] [data-upstream-message]')).toHaveText(message);
-  const allow=()=>page.locator('[data-action="provider-retry"][data-id="acc-0"][data-model="gemini-argon"]');
+  const allow=()=>page.locator('[data-action="provider-retry"][data-id="acc-0"][data-model="gemini-neon"]');
   await expect(allow()).toHaveCount(0);
-  const retired = await f.admin('accounts/acc-0/provider-retry', { method: 'POST', body: { model: 'gemini-argon' } });
+  const retired = await f.admin('accounts/acc-0/provider-retry', { method: 'POST', body: { model: 'gemini-neon' } });
   expect(retired.status).toBe(404); await retired.text();
   await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
   await route(page, 'overview'); await route(page, 'accounts');
@@ -569,7 +569,7 @@ test("HTTP2 reset code is distinct from gRPC status in admin and does not imply 
     events:{async *[Symbol.asyncIterator](){throw Object.assign(Error("SYNTHETIC_PRIVATE_TRANSPORT_DETAIL"),{code:"NATIVE_STREAM_RESET"});}},
     getSafeStatus:()=>({httpStatus:200,grpcStatus:null,http2ResetCode:8,ended:false,receivedBytes:100}),cancel(){},
   };};
-  const response=await f.api("/v1/chat/completions",{method:"POST",body:{model:"gemini-argon",messages:[{role:"user",content:"Synthetic request"}],stream:true}});
+  const response=await f.api("/v1/chat/completions",{method:"POST",body:{model:"gemini-neon",messages:[{role:"user",content:"Synthetic request"}],stream:true}});
   expect(response.status).toBe(422);const requestId=response.headers.get("x-request-id");const error=(await response.json()).error;expect(error.code).toBe("GENERATION_FAILED");expect(error.upstream_code).toBe("NATIVE_STREAM_RESET");
   await login(page);await route(page,"accounts");
   const erroredId=(await (await f.admin("accounts")).json()).accounts.find(a=>a.lastError).id;
@@ -725,8 +725,8 @@ for (const width of [390, 1440]) test(`technical quota and model evidence stay a
   const now = new Date().toISOString(), old = new Date(Date.now() - 3600000).toISOString();
   const base = { enabled: true, authenticationStatus: 'signed_in', status: 'ready', requests: 12, failures: 1, inFlight: 0, modelStates: {} };
   const accounts = [
-    { ...base, id: 'acc-0', quota: { source: 'official', status: 'ok', updatedAt: now, usageRows: [{ label: 'Provider alpha', providerPercent: 0 }, { label: 'Provider beta', providerPercent: 37 }] }, modelStates: { 'gemini-argon': { state: 'verified', checkedAt: now } } },
-    { ...base, id: 'acc-1', label: 'Synthetic attention', status: 'cooldown', quota: { source: 'official', status: 'error', errorCode: 'QUOTA_FIXTURE_FAILED', updatedAt: old, usageRows: [{ label: 'Different observation A', providerPercent: 10, observedAt: old }, { label: 'Different observation B', providerPercent: 20, observedAt: now }] }, modelStates: { 'gemini-argon': { state: 'rejected', checkedAt: now } } },
+    { ...base, id: 'acc-0', quota: { source: 'official', status: 'ok', updatedAt: now, usageRows: [{ label: 'Provider alpha', providerPercent: 0 }, { label: 'Provider beta', providerPercent: 37 }] }, modelStates: { 'gemini-neon': { state: 'verified', checkedAt: now } } },
+    { ...base, id: 'acc-1', label: 'Synthetic attention', status: 'cooldown', quota: { source: 'official', status: 'error', errorCode: 'QUOTA_FIXTURE_FAILED', updatedAt: old, usageRows: [{ label: 'Different observation A', providerPercent: 10, observedAt: old }, { label: 'Different observation B', providerPercent: 20, observedAt: now }] }, modelStates: { 'gemini-neon': { state: 'rejected', checkedAt: now } } },
     { ...base, id: 'acc-2', label: 'Synthetic sign-in', status: 'login_required', authenticationStatus: 'login_required' },
     { ...base, id: 'acc-3', label: 'Synthetic disabled', enabled: false, status: 'disabled' },
   ];
@@ -1165,7 +1165,7 @@ test("drawer aria-expanded symmetry, dialog focus protection during bulk poll, m
       requests: 3,
       failures: 0,
       inFlight: 0,
-      modelStates: { 'gemini-argon': { state: 'unverified' } },
+      modelStates: { 'gemini-neon': { state: 'unverified' } },
     },
     {
       id: 'acc-1',
@@ -1177,7 +1177,7 @@ test("drawer aria-expanded symmetry, dialog focus protection during bulk poll, m
       requests: 1,
       failures: 0,
       inFlight: 0,
-      modelStates: { 'gemini-argon': { state: 'unverified' } },
+      modelStates: { 'gemini-neon': { state: 'unverified' } },
     },
   ];
   const makeQuota = (currentPct, weeklyPct = 50) => ({
@@ -1259,7 +1259,7 @@ test("drawer aria-expanded symmetry, dialog focus protection during bulk poll, m
     return r.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ model: 'gemini-argon', choices: [{ message: { content: 'Synthetic OK' } }] }),
+      body: JSON.stringify({ model: 'gemini-neon', choices: [{ message: { content: 'Synthetic OK' } }] }),
     });
   });
 
@@ -1308,7 +1308,7 @@ test("drawer aria-expanded symmetry, dialog focus protection during bulk poll, m
   await page.locator('#dialog-cancel').click();
   await expect(page.locator('#drawer-rename')).toBeFocused();
 
-  const drawerTestBtn = page.locator('#account-drawer [data-action="test-model"][data-id="acc-0"][data-model="gemini-argon"]');
+  const drawerTestBtn = page.locator('#account-drawer [data-action="test-model"][data-id="acc-0"][data-model="gemini-neon"]');
   await drawerTestBtn.focus();
   await page.keyboard.press('Enter');
   await testSeen;
@@ -1320,7 +1320,7 @@ test("drawer aria-expanded symmetry, dialog focus protection during bulk poll, m
   await expect(page.locator('#account-drawer')).toBeHidden();
   await expect(page).toHaveURL(/#accounts$/);
 
-  await page.evaluate(() => { location.hash = 'accounts?account=acc-1&model=gemini-argon'; });
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-1&model=gemini-neon'; });
   await expect(page.locator('#account-drawer')).toBeVisible();
   await expect(page.locator('#account-drawer')).toContainText('Backup account');
   await expect(card1).toHaveClass(/is-selected/);
@@ -1369,7 +1369,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
     failures: 0,
     inFlight: 0,
     modelStates: {
-      'gemini-argon': { state: 'unverified' },
+      'gemini-neon': { state: 'unverified' },
       'gemini-hydrogen': { state: 'unverified' },
       'gemini-flash-lite': { state: 'unverified' },
     },
@@ -1385,7 +1385,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
     failures: 0,
     inFlight: 0,
     modelStates: {
-      'gemini-argon': { state: 'unverified' },
+      'gemini-neon': { state: 'unverified' },
       'gemini-hydrogen': { state: 'unverified' },
     },
   };
@@ -1400,7 +1400,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
     failures: 0,
     inFlight: 0,
     modelStates: {
-      'gemini-argon': { state: 'unverified' },
+      'gemini-neon': { state: 'unverified' },
       'gemini-hydrogen': { state: 'unverified' },
     },
   };
@@ -1480,7 +1480,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
     return r.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ model: 'gemini-argon', choices: [{ message: { content: 'Synthetic OK' } }] }),
+      body: JSON.stringify({ model: 'gemini-neon', choices: [{ message: { content: 'Synthetic OK' } }] }),
     });
   });
 
@@ -1496,9 +1496,9 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
   await login(page);
 
   delayNextAccountsFetch = true;
-  await page.evaluate(() => { location.hash = 'accounts?account=acc-delayed&model=gemini-argon'; });
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-delayed&model=gemini-neon'; });
   await accountsSeen;
-  await expect(page).toHaveURL(/#accounts\?account=acc-delayed&model=gemini-argon$/);
+  await expect(page).toHaveURL(/#accounts\?account=acc-delayed&model=gemini-neon$/);
   await expect(page.locator('#account-drawer')).toBeHidden();
 
   currentAccounts = [acc0, accDelayed];
@@ -1507,7 +1507,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
   await expect(page.locator('#account-drawer')).toBeVisible();
   await expect(page.locator('#account-drawer')).toContainText('Delayed account');
   await expect(page.locator('#account-models-acc-delayed')).toBeFocused();
-  await expect(page).toHaveURL(/#accounts\?account=acc-delayed&model=gemini-argon$/);
+  await expect(page).toHaveURL(/#accounts\?account=acc-delayed&model=gemini-neon$/);
 
   await page.reload();
   await expect(page.locator('#account-drawer')).toBeVisible();
@@ -1521,18 +1521,18 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
   await page.setViewportSize({ width: 390, height: 520 });
 
   failNextAccountsFetch = true;
-  await page.evaluate(() => { location.hash = 'accounts?account=acc-retry&model=gemini-argon'; });
+  await page.evaluate(() => { location.hash = 'accounts?account=acc-retry&model=gemini-neon'; });
   await expect(page.locator('#page-error')).toBeVisible();
   await expect(page.locator('#account-drawer')).toBeHidden();
   expect(await page.evaluate(() => document.getElementById('app').inert)).toBe(false);
-  await expect(page).toHaveURL(/#accounts\?account=acc-retry&model=gemini-argon$/);
+  await expect(page).toHaveURL(/#accounts\?account=acc-retry&model=gemini-neon$/);
 
   currentAccounts = [acc0, accDelayed, accRetry];
   await page.locator('#page-error button').click();
   await expect(page.locator('#account-drawer')).toBeVisible();
   await expect(page.locator('#account-drawer')).toContainText('Retry account');
   await expect(page.locator('#account-models-acc-retry')).toBeFocused();
-  await expect(page).toHaveURL(/#accounts\?account=acc-retry&model=gemini-argon$/);
+  await expect(page).toHaveURL(/#accounts\?account=acc-retry&model=gemini-neon$/);
   expect(await isTargetInDrawerView('#account-models-acc-retry')).toBe(true);
   await page.locator('#drawer-close').click();
   await expect(page.locator('#account-drawer')).toBeHidden();
@@ -1575,7 +1575,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
   const initialScrollTop = await page.evaluate(() => document.getElementById('drawer-body').scrollTop);
   expect(initialScrollTop).toBeGreaterThan(80);
 
-  const drawerTestBtn = page.locator('#account-drawer [data-action="test-model"][data-id="acc-0"][data-model="gemini-argon"]');
+  const drawerTestBtn = page.locator('#account-drawer [data-action="test-model"][data-id="acc-0"][data-model="gemini-neon"]');
   await drawerTestBtn.focus();
   await page.keyboard.press('Enter');
   await testSeen;
@@ -1583,7 +1583,7 @@ test("drawer preserves deep links across delayed account list refresh, keeps scr
   releaseTest();
 
   await expect(drawerTestBtn).toBeFocused();
-  expect(await isTargetInDrawerView('[data-action="test-model"][data-id="acc-0"][data-model="gemini-argon"]')).toBe(true);
+  expect(await isTargetInDrawerView('[data-action="test-model"][data-id="acc-0"][data-model="gemini-neon"]')).toBe(true);
 
   await page.locator('#drawer-remove').focus();
   await page.keyboard.press('Tab');
@@ -1612,7 +1612,7 @@ test("drawer distinguishes capacity-saturated signed-in accounts from sign-in er
     failures: 0,
     inFlight: 2,
     modelStates: {
-      'gemini-argon': { state: 'unverified' },
+      'gemini-neon': { state: 'unverified' },
     },
   };
   const unexplainedAccount = {
@@ -1627,7 +1627,7 @@ test("drawer distinguishes capacity-saturated signed-in accounts from sign-in er
     failures: 0,
     inFlight: 0,
     modelStates: {
-      'gemini-argon': { state: 'unverified' },
+      'gemini-neon': { state: 'unverified' },
     },
   };
   const mockedAccounts = [busyAccount, unexplainedAccount];
@@ -1674,7 +1674,7 @@ test("drawer distinguishes capacity-saturated signed-in accounts from sign-in er
 
 test("overview and account drawer render bilingual metadata-only model telemetry without prompt leakage or overflow", async ({ page }) => {
   f.app.provider.runTurn = async (_acc, canonical, emit) => {
-    if (canonical.model === "gemini-argon") {
+    if (canonical.model === "gemini-neon") {
       throw Object.assign(new Error("SOFT_ERR_SECRET"), {
         code: "NATIVE_SOFT_ERROR_RESPONSE",
         status: 502,
@@ -1699,7 +1699,7 @@ test("overview and account drawer render bilingual metadata-only model telemetry
   const errRes = await f.api("/v1/chat/completions", {
     method: "POST",
     body: {
-      model: "gemini-argon",
+      model: "gemini-neon",
       messages: [{ role: "user", content: "SECRET_BROWSER_PROMPT_2" }],
     },
   });
@@ -1715,7 +1715,7 @@ test("overview and account drawer render bilingual metadata-only model telemetry
   await expect(panel).toContainText("Metadata only · Zero prompt logging");
   const hydrogenCard = panel.locator('[data-telemetry-model="gemini-hydrogen"]');
   await expect(hydrogenCard).toContainText("1/1 ok");
-  const argonCard = panel.locator('[data-telemetry-model="gemini-argon"]');
+  const argonCard = panel.locator('[data-telemetry-model="gemini-neon"]');
   await expect(argonCard).toContainText("Soft error");
   await expect(argonCard).toContainText("1");
   const panelText = await panel.textContent();

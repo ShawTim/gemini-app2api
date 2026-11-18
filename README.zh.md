@@ -57,7 +57,7 @@
 - **精確定義的 OpenAI 相容介面（`Chat` 與 `Responses`）：** 支援 `GET /v1/models`、`POST /v1/chat/completions` 與 `POST /v1/responses`，涵蓋 JSON 與增量 SSE 串流、結構化輸出（Structured Outputs：透過 Chat `response_format` 與 Responses `text.format` 支援 `json_schema` 及 `json_object`，送出前通過有界 JSON Schema 驗證）、`native_search` 公開網頁 `url_citation` 引用標註、`reasoning_effort` / `reasoning.effort` 思考強度對應，以及靜態 PNG/JPEG/WebP 圖片輸入。
 - **客戶端自主工具權限（Caller-Owned Tools）：** 由客戶端宣告函數與 JSON Schema（含 Responses `type: "namespace"` 工具分組）、在本機執行獲准呼叫並回傳結果；閘道嚴格驗證工具名稱與參數結構，絕不代為執行 Shell 指令或存取你的專案目錄。
 - **零第三方 Runtime 依賴與嚴密安全邊界：** 零外部生產套件；強制檢查 `0700`/`0600` 私密目錄與檔案權限、採用 `scrypt` 管理密碼雜湊、以 SHA-256 驗證雜湊搭配 `0600` 本機私密金鑰保存（僅於建立當下或通過驗證與 CSRF 保護後按需回傳）、嚴格 `Origin`/`Host`/`X-CSRF-Token` 後台寫入保護，以及預設關閉且具 SSRF 防護的公開圖片下載。
-- **中英雙語現代化維運後台（`English` / `繁體中文`）：** 支援桌面與手機響應式檢視及深淺色主題；在 `/admin` **Overview（總覽）** 與側欄帳戶檢視器（Account Inspector Drawer）內提供帳戶池狀態脈搏、請求延遲快照圖，以及僅統計中繼資料、零提示詞日誌的各帳戶 × 各模型觀測遙測（`gemini-hydrogen`、`gemini-argon`、`gemini-flash-lite` 供應商嘗試計數——含容錯／恢復重試與手動帳戶測試——以及輸出位元組、重試、軟錯誤與錯誤分類）；支援一鍵批量唯讀更新 **目前用量（Current usage）** 與 **每週限額（Weekly limit）**、快速連接設定範本（`Codex CLI`、`Cline`、`cURL`）、可隨時複製或撤銷的 API 金鑰管理、明確記錄或確認接受 Gemini 服務條款，以及遮罩後的上游 HTTP/gRPC 診斷資訊。
+- **中英雙語現代化維運後台（`English` / `繁體中文`）：** 支援桌面與手機響應式檢視及深淺色主題；在 `/admin` **Overview（總覽）** 與側欄帳戶檢視器（Account Inspector Drawer）內提供帳戶池狀態脈搏、請求延遲快照圖，以及僅統計中繼資料、零提示詞日誌的各帳戶 × 各模型觀測遙測（`gemini-neon`、`gemini-hydrogen`、`gemini-flash-lite` 供應商嘗試計數——含容錯／恢復重試與手動帳戶測試——以及輸出位元組、重試、軟錯誤與錯誤分類）；支援一鍵批量唯讀更新 **目前用量（Current usage）** 與 **每週限額（Weekly limit）**、快速連接設定範本（`Codex CLI`、`Cline`、`cURL`）、可隨時複製或撤銷的 API 金鑰管理、明確記錄或確認接受 Gemini 服務條款，以及遮罩後的上游 HTTP/gRPC 診斷資訊。
 
 | 淺色主題 —— 帳戶側欄檢視與狀態脈搏 | 手機版後台 —— 繁體中文介面 |
 |---|---|
@@ -75,7 +75,7 @@
 > ```sh
 > pi install npm:pi-gemini-app
 > ```
-> 安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app` 及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-argon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`。完整說明請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
+> 安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app` 及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-neon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`（`gemini-argon` 暫時自動 alias 至 `gemini-neon`）。完整說明請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
 ### 1. 準備工作
 
@@ -145,7 +145,7 @@ docker run -d --name gemini-app2api --init --restart unless-stopped \
 |---|---|
 | **Base URL** | `http://127.0.0.1:18989/v1`（同 Compose 共用網路其他容器填 `http://<service-name>:18989/v1`；支援主機路由之 Docker Desktop 獨立容器填 `http://host.docker.internal:<published-port>/v1`；遠端部署請填 HTTPS 反向代理網址 `/v1`） |
 | **API Key** | 在管理後台 **API 金鑰**頁面建立的 client key（切勿填寫管理員密碼或 Google token） |
-| **Model** | `gemini-argon`（旗艦推理與編碼模式）、`gemini-hydrogen`（Gemini 4 Hydrogen）或 `gemini-flash-lite` |
+| **Model** | `gemini-neon`（Gemini 4 Neon 旗艦推理與編碼模式；`gemini-argon` 暫時自動 alias 至此）、`gemini-hydrogen`（Gemini 4 Hydrogen）或 `gemini-flash-lite` |
 | **API 類型** | `/v1/chat/completions` 或 `/v1/responses`（以[支援契約](docs/API_SUPPORT.md)為準） |
 
 測試模型清單連線（不消耗生成額度）：
@@ -161,7 +161,7 @@ curl -fsS http://127.0.0.1:18989/v1/models \
 curl -fsS http://127.0.0.1:18989/v1/chat/completions \
   -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-argon","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"gemini-neon","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ### 常用客戶端設定範例
@@ -170,7 +170,7 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 <summary><strong>Cursor</strong></summary>
 
 1. 開啟 **Cursor Settings → Models**。
-2. 新增自訂模型名稱 `gemini-argon`（亦可一併加入 `gemini-hydrogen`）。
+2. 新增自訂模型名稱 `gemini-neon`（亦可一併加入 `gemini-hydrogen`）。
 3. 開啟 **Override OpenAI Base URL**，填入你的閘道 `/v1` 網址（若 Cursor 雲端轉發模式要求公開 HTTPS，請搭配你的私人 TLS 反向代理網址），並貼上客戶端 API 金鑰。
 
 </details>
@@ -181,17 +181,17 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 1. **API Provider** 選擇 `OpenAI Compatible`。
 2. **Base URL：** `http://127.0.0.1:18989/v1`
 3. **API Key：** 貼上後台建立的 client key。
-4. **Model ID：** 建議高頻率多輪 Agent 迴圈優先選用配額友善的 `gemini-hydrogen`，或選用 `gemini-argon`（請先參閱[配額消耗比較](#quota-consumption)）；兩者皆完整支援增量串流、多輪本地工具呼叫與靜態圖片輸入。
+4. **Model ID：** 建議高頻率多輪 Agent 迴圈優先選用配額友善的 `gemini-hydrogen`，或選用 `gemini-neon`（請先參閱[配額消耗比較](#quota-consumption)）；兩者皆完整支援增量串流、多輪本地工具呼叫與靜態圖片輸入。
 
 </details>
 
 <details>
 <summary><strong>OpenAI Codex CLI（<code>~/.codex/config.toml</code>）</strong></summary>
 
-Codex CLI 原生支援 `/v1/responses` 協定（包含 `namespace` 工具分組與 `reasoning.effort` 對應）。高頻率多輪 Agent 迴圈建議優先選用配額友善的 `gemini-hydrogen`，與旗艦推理模式 `gemini-argon` 搭配使用（詳見[配額消耗比較](#quota-consumption)）：
+Codex CLI 原生支援 `/v1/responses` 協定（包含 `namespace` 工具分組與 `reasoning.effort` 對應）。高頻率多輪 Agent 迴圈建議優先選用配額友善的 `gemini-hydrogen`，與旗艦推理模式 `gemini-neon` 搭配使用（詳見[配額消耗比較](#quota-consumption)）：
 
 ```toml
-model = "gemini-hydrogen" # 或改設 "gemini-argon" 用於旗艦 Pro 推理
+model = "gemini-hydrogen" # 或改設 "gemini-neon" 用於旗艦 Pro 推理
 model_provider = "gemini_app2api"
 model_reasoning_summary = "none"
 web_search = "disabled"
@@ -214,14 +214,14 @@ wire_api = "responses"
 pi install npm:pi-gemini-app
 ```
 
-安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址；完成登入後會自動代該帳戶確認接受 Google Gemini 服務條款）及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-argon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
+安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址；完成登入後會自動代該帳戶確認接受 Google Gemini 服務條款）及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-neon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`（`gemini-argon` 暫時自動 alias 至 `gemini-neon`）。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
 </details>
 
 <details>
 <summary><strong>Cherry Studio / Open WebUI / 官方 OpenAI SDK</strong></summary>
 
-- **Cherry Studio / Open WebUI：** 新增 OpenAI 相容服務商，API 位址填寫 `http://127.0.0.1:18989/v1` 並貼上 client key，即可自動讀取 `gemini-argon`、`gemini-hydrogen`、`gemini-flash-lite`。
+- **Cherry Studio / Open WebUI：** 新增 OpenAI 相容服務商，API 位址填寫 `http://127.0.0.1:18989/v1` 並貼上 client key，即可自動讀取 `gemini-neon`、`gemini-hydrogen`、`gemini-flash-lite`。
 - **官方 JavaScript 與 Python SDK：** 儲存庫內附完整的多輪工具呼叫範例 [`examples/client.mjs`](examples/client.mjs) 與 [`examples/client.py`](examples/client.py)。請注意每一輪請求都必須回傳完整對話歷史（含原始 `tool_call_id` / `call_id` 與工具結果）。
 
 </details>
@@ -232,11 +232,11 @@ pi install npm:pi-gemini-app
 
 | 模型別名 | 定位與用途 | Native Mode | 公布的 Context Metadata |
 |---|---|---:|---|
-| **`gemini-argon`** | **旗艦 Pro 級推理與程式開發模式**，適合複雜架構設計與多輪 Agent 任務 | `8` | `context_window: 128000`（客戶端建議預算） |
+| **`gemini-neon`** | **Gemini 4 Neon** 旗艦 Pro 級推理與程式開發模式（嚴格驗證上游 Neon 模型歸屬；`gemini-argon` 暫時自動 alias 至此） | `PRO`（`3`） | `context_window: 128000`（客戶端建議預算） |
 | **`gemini-hydrogen`** | **Gemini 4 Hydrogen** 低延遲日常推理與快速互動任務（嚴格驗證上游 Hydrogen 模型歸屬） | `FAST`（`1`） | `context_window: 512000`（客戶端建議預算） |
 | **`gemini-flash-lite`** | 高吞吐、輕量級快速回應任務 | `6` | 未公布 |
 
-> 模型別名對應 Gemini App 原生執行模式，並非 Google Cloud Vertex / AI Studio 的固定版本代號；實際可用性取決於各登入帳戶的上游方案權限。`context_window: 128000`（`gemini-argon`）與 `context_window: 512000`（`gemini-hydrogen`）為根據單輪長上下文召回率、prefill 延遲及閘道 `4 MiB` 請求上限實測訂立之客戶端建議預算，並非閘道強制截斷上限或 Google 官方 SLA 保證容量。
+> 模型別名對應 Gemini App 原生執行模式，並非 Google Cloud Vertex / AI Studio 的固定版本代號；實際可用性取決於各登入帳戶的上游方案權限。為方便舊有設定平滑過渡，原已落架的 `gemini-argon`（原 mode `8`）目前仍暫時支援並自動轉送至 `gemini-neon`（`PRO` mode `3`）。`context_window: 128000`（`gemini-neon`）與 `context_window: 512000`（`gemini-hydrogen`）為根據單輪長上下文召回率、prefill 延遲及閘道 `4 MiB` 請求上限實測訂立之客戶端建議預算，並非閘道強制截斷上限或 Google 官方 SLA 保證容量。
 
 <a id="quota-consumption"></a>
 ### 配額消耗提醒：gemini-argon vs gemini-hydrogen
@@ -263,8 +263,8 @@ pi install npm:pi-gemini-app
 | **函數工具** | 支援有界 JSON Schema 驗證、`auto`/`none`/`required`/指定函數 `tool_choice` 及 Responses 純函數 `namespace` 分組；工具一律由客戶端執行 |
 | **結構化輸出** | 支援 Chat `response_format` 與 Responses `text.format`（`json_schema` 與 `json_object`），於回應送出前通過有界 JSON Schema 驗證器校驗（不可與 `native_search: true` 同時使用） |
 | **圖片輸入** | 單次請求最多 `4` 張靜態 PNG / JPEG / WebP（合計 `<= 2 MiB`），支援 `data:` URL 及預設關閉、具 SSRF 防護的公開 HTTP(S) 圖片網址 |
-| **Google 搜尋** | 明確傳入 `"native_search": true`（限 `gemini-argon`、thinking `2`、純文字 `<= 16 KiB`，且不可同輪混用客戶端工具或圖片）；於取得已驗證公開網頁來源時對應為 OpenAI `url_citation` 引用標註 |
-| **觀測遙測統計** | 於 `/admin` **總覽（Overview）** 與帳戶檢視器抽屜（Account Inspector Drawer）提供記憶體內各帳戶 × 各模型供應商嘗試計數（`gemini-hydrogen`、`gemini-argon`、`gemini-flash-lite` 嘗試次數——含重試與手動帳戶測試——以及輸出位元組、重試、軟錯誤及錯誤分類，零提示詞日誌） |
+| **Google 搜尋** | 明確傳入 `"native_search": true`（限 `gemini-neon` 或其臨時 alias `gemini-argon`、thinking `2`、純文字 `<= 16 KiB`，且不可同輪混用客戶端工具或圖片）；於取得已驗證公開網頁來源時對應為 OpenAI `url_citation` 引用標註 |
+| **觀測遙測統計** | 於 `/admin` **總覽（Overview）** 與帳戶檢視器抽屜（Account Inspector Drawer）提供記憶體內各帳戶 × 各模型供應商嘗試計數（`gemini-neon`、`gemini-hydrogen`、`gemini-flash-lite` 嘗試次數——含重試與手動帳戶測試——以及輸出位元組、重試、軟錯誤及錯誤分類，零提示詞日誌） |
 | **思考控制** | 支援同步 `thinking_level`（`0`、`1`、`2`、`4`，預設 `2`）與 OpenAI `reasoning_effort`（`none`/`minimal`→`0`、`low`→`1`、`medium`/`high`/`xhigh`→`2`）；非同步 Deep Think（`3`）會於本機直接拒絕 |
 | **用量統計** | 回傳標示 `estimated: true` 的啟發式 token 估算值，並非 Google 官方精確計費數據 |
 

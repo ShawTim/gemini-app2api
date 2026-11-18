@@ -320,15 +320,15 @@ test("ModelTelemetry measures outputBytes, classifies errors, bounds accounts, a
   assert.equal(telemetry.snapshot().byModel["unsupported-model"], undefined);
 
   // Defer deletion while in flight, then drop per-account counters once drained while preserving byModel.
-  telemetry.start("acc-2", "gemini-argon", { isRetry: false });
+  telemetry.start("acc-2", "gemini-neon", { isRetry: false });
   telemetry.forgetAccount("acc-2");
   assert.equal(telemetry.hasAccount("acc-2"), true);
-  telemetry.fail("acc-2", "gemini-argon", { code: "NATIVE_QUOTA_EXHAUSTED", status: 429 });
+  telemetry.fail("acc-2", "gemini-neon", { code: "NATIVE_QUOTA_EXHAUSTED", status: 429 });
   assert.equal(telemetry.hasAccount("acc-2"), false);
   const snap = telemetry.snapshot();
   assert.equal(snap.zeroPromptLogging, true);
-  assert.equal(snap.byModel["gemini-argon"].quotaErrors, 1);
-  assert.equal(snap.byModel["gemini-argon"].errorCounts.quota, 1);
+  assert.equal(snap.byModel["gemini-neon"].quotaErrors, 1);
+  assert.equal(snap.byModel["gemini-neon"].errorCounts.quota, 1);
 
   // Bounded account retention evicts idle LRU entry when maxAccounts=2 is exceeded.
   telemetry.start("acc-3", "gemini-flash-lite");
@@ -365,7 +365,7 @@ test("AccountPool tracks run(), retry failovers, runTest(), and forgetAccount cl
   });
 
   await assert.rejects(
-    pool.run({ owner: "tester-soft", model: "gemini-argon" }, async () => {
+    pool.run({ owner: "tester-soft", model: "gemini-neon" }, async () => {
       throw Object.assign(new Error("soft error"), {
         code: "NATIVE_SOFT_ERROR_RESPONSE",
         status: 502,
@@ -388,7 +388,7 @@ test("AccountPool tracks run(), retry failovers, runTest(), and forgetAccount cl
   assert.equal(accB.modelTelemetry["gemini-hydrogen"].retries, 1);
   assert.equal(accB.modelTelemetry["gemini-hydrogen"].successes, 1);
   assert.equal(accB.modelTelemetry["gemini-hydrogen"].outputBytes, Buffer.byteLength("recovered"));
-  assert.equal(pool.modelTelemetry().byModel["gemini-argon"].softErrors, 1);
+  assert.equal(pool.modelTelemetry().byModel["gemini-neon"].softErrors, 1);
 
   list = list.filter((a) => a.id !== "acc-b");
   pool.forgetAccount("acc-b");
@@ -507,10 +507,11 @@ test("cross-branch HTTP native_search citations and NATIVE_SEARCH_NOT_OBSERVED r
       1,
       Buffer.concat([
         m(1, Buffer.concat([s(1, "ungrounded-resp"), m(2, s(1, "Ungrounded text"))])),
+        s(30, "Used 4 Neon High model"),
         v(9, 1),
         v(11, 0),
         v(31, 0),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -522,10 +523,11 @@ test("cross-branch HTTP native_search citations and NATIVE_SEARCH_NOT_OBSERVED r
       Buffer.concat([
         m(1, Buffer.concat([s(1, "grounded-resp"), m(2, s(1, groundedText)), citation, source])),
         m(8, m(2, Buffer.concat([s(1, "google"), v(3, 4)]))),
+        s(30, "Used 4 Neon High model"),
         v(9, 1),
         v(11, 0),
         v(31, 0),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -576,13 +578,13 @@ test("cross-branch HTTP native_search citations and NATIVE_SEARCH_NOT_OBSERVED r
     serialized,
     /SECRET_SEARCH_PROMPT|Grounded answer doc|Ungrounded text|secret-source\.example|SECRET_HTML_TITLE|SECRET_SOURCE_TITLE|SECRET_SNIPPET/,
   );
-  const argon = overview.modelTelemetry.byModel["gemini-argon"];
-  assert.equal(argon.requests, 2);
-  assert.equal(argon.successes, 1);
-  assert.equal(argon.failures, 1);
-  assert.equal(argon.errorCounts.protocol, 1);
-  assert.equal(argon.outputBytes, Buffer.byteLength(groundedText));
-  assert.equal(overview.accounts[0].modelTelemetry["gemini-argon"].errorCounts.protocol, 1);
+  const neon = overview.modelTelemetry.byModel["gemini-neon"];
+  assert.equal(neon.requests, 2);
+  assert.equal(neon.successes, 1);
+  assert.equal(neon.failures, 1);
+  assert.equal(neon.errorCounts.protocol, 1);
+  assert.equal(neon.outputBytes, Buffer.byteLength(groundedText));
+  assert.equal(overview.accounts[0].modelTelemetry["gemini-neon"].errorCounts.protocol, 1);
 });
 
 test("ModelTelemetry classifies native-search metadata, decoder, limit, and thinking mismatch codes as protocol regardless of message text", async t => {
@@ -612,7 +614,7 @@ test("ModelTelemetry classifies native-search metadata, decoder, limit, and thin
   const s = (n, value) => m(n, Buffer.from(value));
   const thinkingMismatchFrame = m(
     1003,
-    m(1, Buffer.concat([m(1, Buffer.concat([s(1, "resp-1"), m(2, s(1, "answer"))])), v(9, 1), v(41, 8), v(42, 1)])),
+    m(1, Buffer.concat([m(1, Buffer.concat([s(1, "resp-1"), m(2, s(1, "answer"))])), s(30, "Used 4 Neon High model"), v(9, 1), v(41, 3), v(42, 1)])),
   );
   const invalidUtf8MetadataFrame = m(
     1003,
@@ -621,8 +623,9 @@ test("ModelTelemetry classifies native-search metadata, decoder, limit, and thin
       Buffer.concat([
         m(1, Buffer.concat([s(1, "resp-2"), m(2, s(1, "answer")), m(6, m(6, Buffer.from([0xff])))])),
         m(8, m(2, Buffer.concat([s(1, "google"), v(3, 4)]))),
+        s(30, "Used 4 Neon High model"),
         v(9, 1),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -634,8 +637,9 @@ test("ModelTelemetry classifies native-search metadata, decoder, limit, and thin
       Buffer.concat([
         m(1, Buffer.concat([s(1, "resp-3"), m(2, s(1, "answer"))])),
         ...Array.from({ length: 257 }, () => m(8, m(2, Buffer.concat([s(1, "google"), v(3, 1)])))),
+        s(30, "Used 4 Neon High model"),
         v(9, 1),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -668,11 +672,11 @@ test("ModelTelemetry classifies native-search metadata, decoder, limit, and thin
   }
 
   const overview = await (await f.admin("overview")).json();
-  const argon = overview.modelTelemetry.byModel["gemini-argon"];
-  assert.equal(argon.requests, 3);
-  assert.equal(argon.failures, 3);
-  assert.equal(argon.errorCounts.protocol, 3);
-  assert.equal(argon.errorCounts.other, 0);
+  const neon = overview.modelTelemetry.byModel["gemini-neon"];
+  assert.equal(neon.requests, 3);
+  assert.equal(neon.failures, 3);
+  assert.equal(neon.errorCounts.protocol, 3);
+  assert.equal(neon.errorCounts.other, 0);
 });
 
 test("HTTP transport protocol failures NATIVE_FRAME_REJECTED, NATIVE_INVALID_STATUS, and NATIVE_RECEIVE_LIMIT increment telemetry protocol counter", async (t) => {
@@ -716,11 +720,11 @@ test("HTTP transport protocol failures NATIVE_FRAME_REJECTED, NATIVE_INVALID_STA
   }
 
   const overview = await (await f.admin("overview")).json();
-  const argon = overview.modelTelemetry.byModel["gemini-argon"];
-  assert.equal(argon.requests, 3);
-  assert.equal(argon.failures, 3);
-  assert.equal(argon.errorCounts.protocol, 3);
-  assert.equal(argon.errorCounts.other, 0);
+  const neon = overview.modelTelemetry.byModel["gemini-neon"];
+  assert.equal(neon.requests, 3);
+  assert.equal(neon.failures, 3);
+  assert.equal(neon.errorCounts.protocol, 3);
+  assert.equal(neon.errorCounts.other, 0);
 });
 
 test("real native transport NATIVE_CREDENTIAL_REQUIRED guard preserves HTTP 503 and auth telemetry across Chat/Responses JSON/SSE", async () => {
@@ -763,19 +767,19 @@ test("real native transport NATIVE_CREDENTIAL_REQUIRED guard preserves HTTP 503 
     const overview = await (await f.admin("overview")).json();
     const diagnostics = await (await f.admin("diagnostics")).json();
     for (const payload of [overview, diagnostics]) {
-      const argon = payload.modelTelemetry.byModel["gemini-argon"];
-      assert.equal(argon.requests, 5);
-      assert.equal(argon.failures, 5);
-      assert.equal(argon.errorCounts.auth, 5);
-      assert.equal(argon.errorCounts.transient, 0);
-      assert.equal(argon.errorCounts.other, 0);
+      const neon = payload.modelTelemetry.byModel["gemini-neon"];
+      assert.equal(neon.requests, 5);
+      assert.equal(neon.failures, 5);
+      assert.equal(neon.errorCounts.auth, 5);
+      assert.equal(neon.errorCounts.transient, 0);
+      assert.equal(neon.errorCounts.other, 0);
     }
-    const accountArgon = overview.accounts[0].modelTelemetry["gemini-argon"];
-    assert.equal(accountArgon.requests, 5);
-    assert.equal(accountArgon.failures, 5);
-    assert.equal(accountArgon.errorCounts.auth, 5);
-    assert.equal(accountArgon.errorCounts.transient, 0);
-    assert.equal(accountArgon.errorCounts.other, 0);
+    const accountNeon = overview.accounts[0].modelTelemetry["gemini-neon"];
+    assert.equal(accountNeon.requests, 5);
+    assert.equal(accountNeon.failures, 5);
+    assert.equal(accountNeon.errorCounts.auth, 5);
+    assert.equal(accountNeon.errorCounts.transient, 0);
+    assert.equal(accountNeon.errorCounts.other, 0);
   } finally {
     await f.close();
   }

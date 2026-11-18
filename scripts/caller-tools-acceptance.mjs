@@ -229,7 +229,7 @@ export function decodeCallerResponse(
   for (const row of rows.slice(0, -1)) {
     const event = JSON.parse(row);
     if (event.incomplete || event.error || event.incomplete_details) fail("CALLER_RESPONSE_INCOMPLETE");
-    if (event.model !== "gemini-argon") fail("CALLER_TEST_MODEL_MISMATCH");
+    if (event.model !== "gemini-neon") fail("CALLER_TEST_MODEL_MISMATCH");
     for (const choice of event.choices || []) {
       if (choice.finish_reason) finishes++;
       if (choice.delta?.content) content.push(choice.delta.content);
@@ -256,7 +256,7 @@ export function decodeCallerResponse(
   }
   if (finishes !== 1) fail("CALLER_SSE_INCOMPLETE");
   return {
-    model: "gemini-argon",
+    model: "gemini-neon",
     choices: [
       {
         message: {
@@ -310,7 +310,7 @@ export async function runCallerCase({
     api,
     stream,
     searchKind: name === "search" ? "local-literal-text" : null,
-    selectedModel: "gemini-argon",
+    selectedModel: "gemini-neon",
     requestedThinking: thinkingLevel,
     httpStatuses: [],
     resolvedModes: [],
@@ -370,7 +370,7 @@ export async function runCallerCase({
           ? data.error.code
           : "CALLER_TEST_HTTP_FAILURE",
       );
-    if ((!stream && mode !== "8") || (mode !== null && mode !== "8") || data.model !== "gemini-argon")
+    if ((!stream && mode !== "3") || (mode !== null && mode !== "3") || data.model !== "gemini-neon")
       fail("CALLER_TEST_MODEL_MISMATCH");
     return data;
   };
@@ -384,7 +384,7 @@ export async function runCallerCase({
     sandbox = createCallerCase(name, { root });
     const messages = [{ role: "user", content: sandbox.prompt }];
     const common = {
-      model: "gemini-argon",
+      model: "gemini-neon",
       thinking_level: thinkingLevel,
       stream,
       tools:
@@ -465,7 +465,7 @@ export async function runCallerCase({
   } finally {
     if (!keepSandbox) sandbox?.close();
   }
-  report.nativeModeEvidenceComplete = report.resolvedModes.length > 0 && report.resolvedModes.every(mode => mode === 8);
+  report.nativeModeEvidenceComplete = report.resolvedModes.length > 0 && report.resolvedModes.every(mode => mode === 3);
   return report;
 }
 

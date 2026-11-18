@@ -5,7 +5,7 @@ import { StateStore } from "../src/gateway/state.mjs";
 import { Accounts } from "../src/gateway/accounts.mjs";
 import { AccountPool, classifyFailure } from "../src/gateway/pool.mjs";
 import { verifiedState } from "../src/gateway/provider-state.mjs";
-const ARGON = "gemini-argon",
+const ARGON = "gemini-neon",
   FLASH = "gemini-flash-lite";
 const originalError =
   "com.google.assistant.boq.bard.application.utils.BardStatusException: Before proceeding, please accept our terms of service.";
@@ -70,7 +70,7 @@ test("fresh OAuth account is signed in but model-unverified; no inference until 
   await response.json();
   const after = (await listed(f))[0];
   assert.equal(after.modelStates[ARGON].state, "verified");
-  assert.equal(after.modelStates[ARGON].mode, 8);
+  assert.equal(after.modelStates[ARGON].mode, 3);
   assert.equal(after.modelStates[FLASH].state, "unverified");
   assert.equal(
     (await (await f.request("/ready")).json()).upstreamVerified,
@@ -162,7 +162,7 @@ test("Argon rejection and Flash verification remain distinct evidence, not routi
   const f = await setup(t, { accountCount: 1 });
   const normal = f.app.provider.openTurn;
   f.app.provider.openTurn = (token, options) =>
-    options.modeCategory === 8 ? rejectedTurn() : normal(token, options);
+    options.modeCategory === 3 ? rejectedTurn() : normal(token, options);
   await (await call(f)).text();
   const response = await call(f, request(FLASH));
   assert.equal(response.status, 200);

@@ -8,15 +8,15 @@ import { fixture, tools, responseTools, toolBlock } from './gateway-fixture.mjs'
 const wrap = fields => m(1003, m(1, Buffer.concat(fields)));
 const text = value => m(1, Buffer.concat([m(1, Buffer.from('synthetic-response')), m(2, m(1, Buffer.from(value)))]));
 const request = { model: 'gemini-argon', messages: [{ role: 'user', content: 'Synthetic output check.' }] };
-const make = (modelFields = [], { complete = true, mode = 8, grpc = 0, clientFields = [], frames } = {}) => {
-  const output = wrap([m(1, Buffer.concat(modelFields)), v(9, Number(complete)), ...(mode === null ? [] : [v(41, mode)]), v(42, 2), ...clientFields]);
+const make = (modelFields = [], { complete = true, mode = 3, grpc = 0, clientFields = [], frames } = {}) => {
+  const output = wrap([m(1, Buffer.concat(modelFields)), ...(mode === 3 ? [m(30, Buffer.from('Used 4 Neon High model'))] : []), v(9, Number(complete)), ...(mode === null ? [] : [v(41, mode)]), v(42, 2), ...clientFields]);
   return new NativeDirectProvider({ getValidAccessToken: async () => 'synthetic-access' }, { openTurn: () => ({ events: (async function* () {
     for (const bytes of frames ?? [output]) yield { type: 'frame', bytes };
     yield { type: 'end', httpStatus: 200, grpcStatus: grpc };
   })(), cancel() {} }) });
 };
 const evidence = extra => ({ phase: 'validate', upstreamHttpStatus: 200, grpcStatus: 0, wireEnded: true,
-  modelCompleted: true, observedMode: 8, emptyResponseReason: 'no_text', nativeTextBytes: 0,
+  modelCompleted: true, observedMode: 3, emptyResponseReason: 'no_text', nativeTextBytes: 0,
   nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeStructuredOutputPresent: false, nativeRefusalPresent: false, ...extra });
 const error = extra => ({ code: 'EMPTY_NATIVE_RESPONSE', status: 502, nativeEvidence: evidence(extra) });
 
@@ -86,9 +86,9 @@ test('missing mode, completion and missing/nonzero gRPC cannot authorize empty-r
 });
 
 test('unsupported structures and refusal cannot be hidden by later sparse metadata frames', async () => {
-  const first = wrap([m(13, Buffer.alloc(0)), v(41, 8)]), final = wrap([m(1, Buffer.alloc(0)), v(9, 1), v(41, 8)]);
+  const first = wrap([m(13, Buffer.alloc(0)), v(41, 3)]), final = wrap([m(1, Buffer.alloc(0)), m(30, Buffer.from('Used 4 Neon High model')), v(9, 1), v(41, 3)]);
   await assert.rejects(make([], { frames: [first, final] }).runTurn('synthetic', request), { code: 'NATIVE_RESPONSE_REFUSED' });
-  const malformed = wrap([m(1, Buffer.concat([m(7, Buffer.from('x')), m(7, Buffer.from('y'))])), v(9, 1), v(41, 8)]);
+  const malformed = wrap([m(1, Buffer.concat([m(7, Buffer.from('x')), m(7, Buffer.from('y'))])), v(9, 1), v(41, 3)]);
   await assert.rejects(make([], { frames: [malformed] }).runTurn('synthetic', request), { code: 'INVALID_NATIVE_RESPONSE' });
 });
 
@@ -133,8 +133,9 @@ test('incremental refusal frames fail immediately without emitting deltas, parti
           opened++;
           const frame = wrap([
             m(1, Buffer.concat([m(1, Buffer.from('resp-http-refusal')), m(2, m(1, Buffer.from(payloadText)))])),
+            m(30, Buffer.from('Used 4 Neon High model')),
             v(9, 1),
-            v(41, 8),
+            v(41, 3),
             v(42, 2),
             m(13, m(1, Buffer.from('SYNTHETIC_REFUSAL'))),
           ]);
@@ -167,7 +168,7 @@ test('incremental mode gate withholds deltas while observedMode is null and drop
     v(9, 1),
     v(42, 2),
   ]);
-  const sparseConfirmFrame = wrap([m(1, Buffer.alloc(0)), v(9, 1), v(41, 8), v(42, 2)]);
+  const sparseConfirmFrame = wrap([m(1, Buffer.alloc(0)), m(30, Buffer.from('Used 4 Neon High model')), v(9, 1), v(41, 3), v(42, 2)]);
   const gatedProvider = new NativeDirectProvider(
     { getValidAccessToken: async () => 'synthetic-access' },
     {
@@ -224,8 +225,9 @@ test('incremental mode gate withholds deltas while observedMode is null and drop
   t.after(f.close);
   const partialVerifiedFrame = wrap([
     m(1, Buffer.concat([m(1, Buffer.from('resp-mid-downgrade')), m(2, m(1, Buffer.from('Initial verified text\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"sample"}}')))])),
+    m(30, Buffer.from('Used 4 Neon High model')),
     v(9, 0),
-    v(41, 8),
+    v(41, 3),
     v(42, 2),
   ]);
   f.app.provider.openTurn = () => ({

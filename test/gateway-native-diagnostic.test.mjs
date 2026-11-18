@@ -219,7 +219,7 @@ test('removed Flash compaction cannot add preparation; only existing Argon recov
     ...Array.from({ length: 10 }, () => ({ role: 'assistant', content: 'Recent synthetic history' })),
   ] });
   assert.equal(response.status, 200); await response.text();
-  assert.deepEqual(f.seen.map(x => x.modeCategory), [8, 8]);
+  assert.deepEqual(f.seen.map(x => x.modeCategory), [3, 3]);
   assert.ok(f.seen[0].diagnostic); assert.ok(f.seen[1].diagnostic);
   const report = await result(f.store.directory);
   assert.equal(report.providerAttempts, 2); assert.equal(report.attempts.length, 2);
@@ -237,7 +237,8 @@ test('local HTTP2 success records status/timing/shape but never prompt/reply/tok
       stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '0', 'grpc-message': 'PRIVATE_GRPC_MESSAGE_SENTINEL' }));
       stream.end(frameGrpcMessage(m(1003, m(1, Buffer.concat([
         m(1, Buffer.concat([m(1, Buffer.from('PRIVATE_NATIVE_ID_SENTINEL')), m(2, m(1, Buffer.from('PRIVATE_REPLY_SENTINEL'))), v(19, 2)])),
-        v(9, 1), v(41, 8), v(42, 2),
+        m(30, Buffer.from('Used 4 Neon High model')),
+        v(9, 1), v(41, 3), v(42, 2),
       ])))));
     });
   });

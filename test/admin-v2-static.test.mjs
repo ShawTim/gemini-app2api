@@ -94,7 +94,7 @@ test('demo API actions are synthetic and never call fetch', async () => {
   const overview = await f.api('/overview');
   assert.equal(overview.mode, 'native-direct');
   assert.equal(overview.toolProtocol, 'prompt');
-  assert.deepEqual(overview.models, ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
+  assert.deepEqual(overview.models, ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']);
   assert.ok(overview.accounts.every(a => a.quota.remainingPercent === null));
   assert.equal(calls, 0);
   await f.api('/accounts/acct_primary', { method: 'PATCH', data: { enabled: false } });

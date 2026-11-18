@@ -198,7 +198,7 @@ export function errorPayload(error) {
       message: terminal ? 'Generation ended without output. Gateway recovery is exhausted; this turn has failed.'
         : code === 'MALFORMED_TOOL_CALL' && toolProtocolReason ? `${code}: invalid ${toolProtocolReason} layout. No tool call was released.`
         : code === 'UNSUPPORTED_PARAMETER' && param ? `UNSUPPORTED_PARAMETER: ${param}`
-        : code === 'UNSUPPORTED_MODEL' ? 'UNSUPPORTED_MODEL: supported models are gemini-argon, gemini-hydrogen, gemini-flash-lite'
+        : code === 'UNSUPPORTED_MODEL' ? 'UNSUPPORTED_MODEL: supported models are gemini-neon, gemini-hydrogen, gemini-flash-lite (alias: gemini-argon -> gemini-neon)'
         : code === 'NATIVE_UPSTREAM_UNAVAILABLE' ? 'NATIVE_UPSTREAM_UNAVAILABLE: upstream Google service temporarily unavailable (HTTP 503 / gRPC UNAVAILABLE)'
         : code,
       type:
@@ -336,12 +336,12 @@ export function createGateway({
   const ready = () =>
     !closing && !!store.data.profile && pool.available().length > 0;
   const availability = () => {
-    const eligible = pool.available("gemini-argon");
+    const eligible = pool.available("gemini-neon");
     const verified = eligible.filter(
-      (a) => a.modelStates?.["gemini-argon"]?.state === "verified",
+      (a) => a.modelStates?.["gemini-neon"]?.state === "verified",
     ).length;
     return {
-      defaultModel: "gemini-argon",
+      defaultModel: "gemini-neon",
       eligibleAccounts: eligible.length,
       verifiedAccounts: verified,
       upstreamVerified: verified > 0,
@@ -461,7 +461,7 @@ export function createGateway({
       identity = publicRequest ? resolveSessionIdentity(req.headers, canonical) : { sessionId: undefined, source: "admin" };
       const sid = identity.sessionId;
       description = describeRequest(canonical);
-      if (publicRequest && canonical.model === 'gemini-argon' && !canonical.native_search)
+      if (publicRequest && canonical.model === 'gemini-neon' && !canonical.native_search)
         diagnostic = nativeDiagnostic.claim(id);
       const turn = async (acc, context) => {
         // A fresh attempt inherits nothing from a discarded short fragment.
@@ -583,7 +583,7 @@ export function createGateway({
         path: accountTestId ? "/admin/api/accounts/test" : playground
           ? "/admin/api/playground"
           : `/v1/${route === "responses" ? "responses" : "chat/completions"}`,
-        model: canonical.model ?? "gemini-argon",
+        model: canonical.model ?? "gemini-neon",
         accountId,
         status,
         durationMs: Date.now() - at,
@@ -838,8 +838,9 @@ export function createGateway({
           const input = await readJson(req, 4096);
           if (req.aborted || res.destroyed) return;
           only(input, ["model"]);
-          if (!protocol.NATIVE_MODELS.includes(input.model)) throw fault("UNSUPPORTED_MODEL");
-          return await execute(req, res, { model: input.model, messages: [{ role: "user", content: "Reply with OK." }], thinking_level: 2 }, { owner: "admin-account-test", route: "chat", accountTestId: accountTest[1] });
+          const model = protocol.canonicalModel(input.model);
+          if (!protocol.NATIVE_MODELS.includes(model)) throw fault("UNSUPPORTED_MODEL");
+          return await execute(req, res, { model, messages: [{ role: "user", content: "Reply with OK." }], thinking_level: 2 }, { owner: "admin-account-test", route: "chat", accountTestId: accountTest[1] });
         }
         const subscriptionRefresh = p.match(/^\/admin\/api\/accounts\/([a-zA-Z0-9_-]+)\/subscription$/);
         if (subscriptionRefresh && req.method === "POST") {
@@ -969,7 +970,7 @@ export function createGateway({
         if (url.search) throw fault("UNSUPPORTED_QUERY_PARAMETER");
         if (p === "/v1/models" && req.method === "GET") {
           const contextWindows = {
-            "gemini-argon": 128000,
+            "gemini-neon": 128000,
             "gemini-hydrogen": 512000,
           };
           return json(res, {

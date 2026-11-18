@@ -71,7 +71,7 @@ test("full five-request replay, stable session, real effects and receipts", asyn
   assert.equal(report.callerExecutions, 4);
   assert.equal(report.callerResultsSubmitted, 4);
   assert.deepEqual(report.httpStatuses, [200, 200, 200, 200, 200]);
-  assert.deepEqual(report.resolvedModes, [8, 8, 8, 8, 8]);
+  assert.deepEqual(report.resolvedModes, [3, 3, 3, 3, 3]);
   assert.deepEqual(report.resolvedThinking, [2, 2, 2, 2, 2]);
   assert.equal(requests.length, 5);
   assert.equal(new Set(requests.map((x) => x.headers["X-Session-ID"])).size, 1);

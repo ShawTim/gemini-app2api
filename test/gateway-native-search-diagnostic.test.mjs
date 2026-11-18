@@ -20,7 +20,7 @@ const fixed = {
     uiSource: 1,
   },
 };
-const textFrame = (text = "Synthetic answer", mode = 8, thinking = 2) =>
+const textFrame = (text = "Synthetic answer", mode = 3, thinking = 2) =>
   m(
     1003,
     m(
@@ -33,6 +33,7 @@ const textFrame = (text = "Synthetic answer", mode = 8, thinking = 2) =>
             m(2, m(1, Buffer.from(text))),
           ]),
         ),
+        ...(mode === 3 ? [m(30, Buffer.from("Used 4 Neon High model"))] : []),
         v(9, 1),
         v(11, 0),
         v(31, 0),
@@ -114,7 +115,7 @@ test("uses provider validation and forwards only diagnostic query plus explicit 
   });
   assert.equal(observed.options.messages[0].content, "public query");
   assert.equal(observed.options.allowNativeTools, true);
-  assert.equal(observed.options.modeCategory, 8);
+  assert.equal(observed.options.modeCategory, 3);
   assert.equal(observed.options.thinkingLevel, 2);
   assert.equal(observed.options.temporaryChat, true);
   assert.equal(report.ok, true);
@@ -201,7 +202,7 @@ test("provider stops reject missing completion, downgrade, wrong thinking and na
     ],
     [
       [
-        { type: "frame", bytes: textFrame("answer", 8, 1) },
+        { type: "frame", bytes: textFrame("answer", 3, 1) },
         { type: "end", httpStatus: 200, grpcStatus: 0 },
       ],
       "NATIVE_THINKING_MISMATCH",
@@ -212,7 +213,7 @@ test("provider stops reject missing completion, downgrade, wrong thinking and na
           type: "frame",
           bytes: m(
             1003,
-            m(1, Buffer.concat([v(9, 1), v(41, 8), m(7, Buffer.alloc(0))])),
+            m(1, Buffer.concat([v(9, 1), v(41, 3), m(7, Buffer.alloc(0))])),
           ),
         },
         { type: "end", httpStatus: 200, grpcStatus: 0 },
@@ -270,10 +271,11 @@ test("validated metadata is retained only after provider completion; reset withh
       1,
       Buffer.concat([
         m(1, inner),
+        m(30, Buffer.from("Used 4 Neon High model")),
         v(9, 1),
         v(11, 0),
         v(31, 0),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -301,10 +303,11 @@ test("validated metadata is retained only after provider completion; reset withh
       1,
       Buffer.concat([
         m(1, draftInner),
+        m(30, Buffer.from("Used 4 Neon High model")),
         v(9, 0),
         v(11, 0),
         v(31, 0),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -315,10 +318,11 @@ test("validated metadata is retained only after provider completion; reset withh
       1,
       Buffer.concat([
         m(1, Buffer.concat([m(1, Buffer.from("synthetic-response")), citation])),
+        m(30, Buffer.from("Used 4 Neon High model")),
         v(9, 1),
         v(11, 0),
         v(31, 0),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),
@@ -374,10 +378,11 @@ test("caller abort and aggregate metadata limits withhold diagnostic results", a
             ...Array(64).fill(citation),
           ]),
         ),
+        m(30, Buffer.from("Used 4 Neon High model")),
         v(9, 1),
         v(11, 0),
         v(31, 0),
-        v(41, 8),
+        v(41, 3),
         v(42, 2),
       ]),
     ),

@@ -190,7 +190,7 @@ test("normal completed response without trailers still validates and local clean
     nativeDiagnostic: { event: name => diagnosticEvents.push(name) },
   });
   assert.equal(result.content, "Synthetic complete reply");
-  assert.equal(result.resolvedModeCategory, 8);
+  assert.equal(result.resolvedModeCategory, 3);
   assert.equal(wire.turn.getSafeStatus().ended, true);
   assert.equal(wire.turn.getSafeStatus().http2ResetCode, undefined);
   assert.equal(wire.injections, 0);
@@ -264,7 +264,7 @@ test("real gateway keeps a committed validated SSE tool call from a reset native
   assert.equal(overview.requests[0].nativeEvidence.http2ResetCode, 8);
   assert.equal(overview.requests[0].nativeEvidence.grpcStatus, null);
   assert.equal(
-    f.app.accounts.list()[0].modelStates["gemini-argon"].state,
+    f.app.accounts.list()[0].modelStates["gemini-neon"].state,
     "unverified",
   );
 });

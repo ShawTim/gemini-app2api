@@ -3,6 +3,16 @@ import { safeAccountError } from "./native-evidence.mjs";
 export { NATIVE_MODELS as ACCOUNT_MODELS };
 export const hasHydrogenAttribution = (value) =>
   typeof value === "string" && /\bhydrogen\b/i.test(value);
+export const hasNeonAttribution = (value) =>
+  typeof value === "string" && /\bneon\b/i.test(value);
+const requiresAttribution = (model) =>
+  model === "gemini-hydrogen" || model === "gemini-neon";
+const hasExpectedAttribution = (model, value) =>
+  model === "gemini-hydrogen"
+    ? hasHydrogenAttribution(value)
+    : model === "gemini-neon"
+      ? hasNeonAttribution(value)
+      : true;
 const time = (value) =>
   Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
 const unchecked = () => ({
@@ -28,7 +38,7 @@ export function modelState(account, model) {
     value?.state === "verified" &&
     time(value.checkedAt) &&
     value.mode === MODEL_MODES[model] &&
-    (model !== "gemini-hydrogen" || value.attributionVerified === true)
+    (!requiresAttribution(model) || value.attributionVerified === true)
   )
     return {
       state: "verified",
@@ -74,14 +84,14 @@ export function verifiedState(model, result, now = Date.now()) {
     !NATIVE_MODELS.includes(model) ||
     result?.model !== model ||
     result.resolvedModeCategory !== MODEL_MODES[model] ||
-    (model === "gemini-hydrogen" && !hasHydrogenAttribution(result.attribution))
+    (requiresAttribution(model) && !hasExpectedAttribution(model, result.attribution))
   )
     return null;
   return {
     state: "verified",
     checkedAt: now,
     mode: result.resolvedModeCategory,
-    ...(model === "gemini-hydrogen" ? { attributionVerified: true } : {}),
+    ...(requiresAttribution(model) ? { attributionVerified: true } : {}),
   };
 }
 export function rejectedState(error) {

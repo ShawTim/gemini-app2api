@@ -9,8 +9,9 @@ import { fixture, tools, responseTools } from './gateway-fixture.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 const privateId = 'synthetic-private-response-id';
 const call = key => '```tool_call\n' + JSON.stringify({ name: 'fixture_lookup', arguments: { key } }) + '\n```';
-const snapshot = (text, { id = privateId, complete = false, mode = 8 } = {}) => ({ type: 'frame', bytes: m(1003, m(1, Buffer.concat([
+const snapshot = (text, { id = privateId, complete = false, mode = 3, attribution = mode === 3 ? 'Used 4 Neon High model' : null } = {}) => ({ type: 'frame', bytes: m(1003, m(1, Buffer.concat([
   m(1, Buffer.concat([...(id === null ? [] : [m(1, Buffer.from(id))]), ...(text === null ? [] : [m(2, m(1, Buffer.from(text)))])])),
+  ...(attribution ? [m(30, Buffer.from(attribution))] : []),
   v(9, Number(complete)), v(41, mode), v(42, 2),
 ]))) });
 const end = { type: 'end', httpStatus: 200, grpcStatus: 0 };

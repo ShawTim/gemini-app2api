@@ -156,8 +156,8 @@ test("SSE backpressure is bounded by writeTimeoutMs and AbortSignal, destroying 
     f.app.provider.openTurn = () => ({
       events: (async function* () {
         yield { type: "headers", status: 200 };
-        yield { type: "frame", bytes: textFrame("A".repeat(3000), 8, 2) };
-        yield { type: "frame", bytes: textFrame("A".repeat(3000) + "B".repeat(3000), 8, 2) };
+        yield { type: "frame", bytes: textFrame("A".repeat(3000), 3, 2) };
+        yield { type: "frame", bytes: textFrame("A".repeat(3000) + "B".repeat(3000), 3, 2) };
         await new Promise((r) => setTimeout(r, 400));
         yield { type: "end", httpStatus: 200, grpcStatus: 0 };
       })(),
@@ -205,7 +205,7 @@ test("SSE backpressure is bounded by writeTimeoutMs and AbortSignal, destroying 
   f.store.data.settings.timeoutMs = 180000;
   f.app.provider.openTurn = () => ({
     events: (async function* () {
-      yield { type: "frame", bytes: textFrame("Recovered slot", 8, 2) };
+      yield { type: "frame", bytes: textFrame("Recovered slot", 3, 2) };
       yield { type: "end", httpStatus: 200, grpcStatus: 0 };
     })(),
     cancel() {},
@@ -221,7 +221,8 @@ test("publish() commits publishedContent/publishedCalls only after onDelta resol
     m(1003, m(1, Buffer.concat([
       m(1, Buffer.concat([m(1, Buffer.from("resp-m1")), m(2, m(1, Buffer.from(txt)))])),
       v(9, complete ? 1 : 0),
-      v(41, 8),
+      m(30, Buffer.from("Used 4 Neon High model")),
+      v(41, 3),
       v(42, 2),
     ])));
   for (const rejectOn of ["content", "call"]) {

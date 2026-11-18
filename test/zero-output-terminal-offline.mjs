@@ -20,7 +20,7 @@ const provider = { sessions: new Map(), async runTurn(account, body, onDelta) {
   if (spec.headers) await onDelta({ start: true, response: identity });
   if (spec.text !== undefined) await onDelta({ content: spec.text, response: identity });
   if (!spec.code) return { ...identity, content: spec.text ?? 'SYNTHETIC_OK', calls: [] };
-  const error = Object.assign(fault(spec.code, spec.status), { nativeEvidence: { phase: 'read', upstreamHttpStatus: 200, grpcStatus: null, observedMode: 8, ...(spec.evidence ?? {}) } });
+  const error = Object.assign(fault(spec.code, spec.status), { nativeEvidence: { phase: 'read', upstreamHttpStatus: 200, grpcStatus: null, observedMode: 3, ...(spec.evidence ?? {}) } });
   if (spec.partial) error.partialResult = { ...identity, content: spec.partial, calls: [] };
   throw error;
 } };

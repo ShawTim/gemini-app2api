@@ -355,8 +355,8 @@ test('streaming output is withheld until terminal structured validation passes (
             cancel() {},
             events: (async function* () {
               if (opts.emitHeaders) yield { type: 'headers', status: 200 };
-              yield { type: 'frame', bytes: m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from(chunk1)))), v(9, 0), v(41, 8), v(42, 2)]))) };
-              yield { type: 'frame', bytes: textFrame(chunk2, 8, 2) };
+              yield { type: 'frame', bytes: m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from(chunk1)))), m(30, Buffer.from('Used 4 Neon High model')), v(9, 0), v(41, 3), v(42, 2)]))) };
+              yield { type: 'frame', bytes: textFrame(chunk2, 3, 2) };
               yield end;
             })(),
           };
@@ -436,7 +436,7 @@ test('automaticRecoveryKind classifies structured_output 502s cleanly and provid
     grpcStatus: 0,
     wireEnded: true,
     modelCompleted: true,
-    observedMode: 8,
+    observedMode: 3,
     nativeRefusalPresent: false,
   };
   for (const code of ['INVALID_STRUCTURED_OUTPUT_JSON', 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH']) {
@@ -468,7 +468,7 @@ test('automaticRecoveryKind classifies structured_output 502s cleanly and provid
         return {
           cancel() {},
           events: (async function* () {
-            yield { type: 'frame', bytes: textFrame('{"id":1,"status":"ok"}', 8, 2) };
+            yield { type: 'frame', bytes: textFrame('{"id":1,"status":"ok"}', 3, 2) };
             yield end;
           })(),
         };
@@ -508,7 +508,7 @@ test('cross-branch HTTP structured_output automatic recovery updates ModelTeleme
     return {
       cancel() {},
       events: (async function* () {
-        yield { type: 'frame', bytes: textFrame(reply, 8, 2) };
+        yield { type: 'frame', bytes: textFrame(reply, 3, 2) };
         yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
       })(),
     };
@@ -564,15 +564,15 @@ test('cross-branch HTTP structured_output automatic recovery updates ModelTeleme
     serialized,
     /SECRET_STRUCTURED_CHAT_PROMPT|SECRET_STRUCTURED_RESPONSES_PROMPT|SECRET_UNSTRUCTURED_PREFIX|SECRET_OK_VALUE|SECRET_BAD_SCHEMA|SECRET_DONE_VALUE/,
   );
-  const argon = overview.modelTelemetry.byModel['gemini-argon'];
-  assert.equal(argon.requests, 4);
-  assert.equal(argon.successes, 2);
-  assert.equal(argon.failures, 2);
-  assert.equal(argon.retries, 2);
-  assert.equal(argon.errorCounts.protocol, 2);
-  assert.equal(argon.outputBytes, Buffer.byteLength(validChatJson) + Buffer.byteLength(validResponsesJson));
+  const neon = overview.modelTelemetry.byModel['gemini-neon'];
+  assert.equal(neon.requests, 4);
+  assert.equal(neon.successes, 2);
+  assert.equal(neon.failures, 2);
+  assert.equal(neon.retries, 2);
+  assert.equal(neon.errorCounts.protocol, 2);
+  assert.equal(neon.outputBytes, Buffer.byteLength(validChatJson) + Buffer.byteLength(validResponsesJson));
   const perAccountProtocol = overview.accounts.reduce(
-    (sum, a) => sum + (a.modelTelemetry?.['gemini-argon']?.errorCounts?.protocol || 0),
+    (sum, a) => sum + (a.modelTelemetry?.['gemini-neon']?.errorCounts?.protocol || 0),
     0,
   );
   assert.equal(perAccountProtocol, 2);
@@ -666,7 +666,7 @@ test('unsupported output schema assertion keywords reject upfront with 400 UNSUP
         f.app.provider.openTurn = () => ({
           cancel() {},
           events: (async function* () {
-            yield { type: 'frame', bytes: textFrame('{"status":"bad"}', 8, 2) };
+            yield { type: 'frame', bytes: textFrame('{"status":"bad"}', 3, 2) };
             yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
           })(),
         });
@@ -751,7 +751,7 @@ test('structured output rejects non-schema $ref targets upfront and enforces JSO
         f.app.provider.openTurn = () => ({
           cancel() {},
           events: (async function* () {
-            yield { type: 'frame', bytes: textFrame(reply, 8, 2) };
+            yield { type: 'frame', bytes: textFrame(reply, 3, 2) };
             yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
           })(),
         });

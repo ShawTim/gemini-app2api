@@ -27,8 +27,8 @@ export function filterGeminiModels(models, credential) {
 
 export const MODELS = Object.freeze([
   {
-    id: 'gemini-argon',
-    name: 'Gemini Argon',
+    id: 'gemini-neon',
+    name: 'Gemini Neon',
     api: API_ID,
     provider: PROVIDER_ID,
     baseUrl: BASE_URL,

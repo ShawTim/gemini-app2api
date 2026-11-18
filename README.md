@@ -57,7 +57,7 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 - **Scoped OpenAI Compatibility (`Chat` & `Responses`):** Supports `GET /v1/models`, `POST /v1/chat/completions`, and `POST /v1/responses` with JSON or incremental SSE streaming, Structured Outputs (`json_schema` and `json_object` via Chat `response_format` and Responses `text.format`, schema-validated before delivery), `native_search` public-web `url_citation` annotations, `reasoning_effort` / `reasoning.effort` mapping, and static PNG/JPEG/WebP image input.
 - **Caller-Owned Function Tools:** Clients declare JSON Schema functions (including Responses `type: "namespace"` groups), execute approved calls locally, and replay results. The gateway validates every tool name and argument schema before emission—never executing shell commands or touching your workspace.
 - **Zero-Dependency, Security-First Runtime:** Zero third-party production npm packages. Enforces `0700`/`0600` private state permissions, `scrypt` admin password hashing, SHA-256 API key lookup digests with `0600` private-state key storage (returned only at creation or via authenticated CSRF-protected reveal requests), strict `Origin`/`Host`/`X-CSRF-Token` admin protections, and SSRF-guarded opt-in remote image fetching.
-- **Bilingual Operations Console (`English` / `繁體中文`):** Inspect pool pulse, request-latency snapshot sparklines, and metadata-only per-account × per-model telemetry (`gemini-hydrogen`, `gemini-argon`, `gemini-flash-lite` provider-attempt counters—including failover/recovery retries and explicit account tests—output bytes, retries, soft-errors, and error categories, with zero prompt logging) across `/admin` **Overview** and the slide-over account inspector drawer; review per-account **Current usage** / **Weekly limit** bars and model states, copy ready-to-paste client configs (`Codex CLI`, `Cline`, `cURL`), manage copyable client API keys, explicitly review or accept Gemini Terms of Service, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
+- **Bilingual Operations Console (`English` / `繁體中文`):** Inspect pool pulse, request-latency snapshot sparklines, and metadata-only per-account × per-model telemetry (`gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite` provider-attempt counters—including failover/recovery retries and explicit account tests—output bytes, retries, soft-errors, and error categories, with zero prompt logging) across `/admin` **Overview** and the slide-over account inspector drawer; review per-account **Current usage** / **Weekly limit** bars and model states, copy ready-to-paste client configs (`Codex CLI`, `Cline`, `cURL`), manage copyable client API keys, explicitly review or accept Gemini Terms of Service, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
 
 | Light Theme — Account Inspector & Pool Pulse | Mobile Console — Traditional Chinese (`繁體中文`) |
 |---|---|
@@ -75,7 +75,7 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 > ```sh
 > pi install npm:pi-gemini-app
 > ```
-> Run `/login gemini-app` and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto`. Full guide: [`extensions/pi/README.md`](extensions/pi/README.md).
+> Run `/login gemini-app` and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto` (`gemini-argon` temporarily aliases to `gemini-neon`). Full guide: [`extensions/pi/README.md`](extensions/pi/README.md).
 
 ### 1. Prerequisites
 
@@ -145,7 +145,7 @@ Point any supported **OpenAI-compatible** client at your gateway:
 |---|---|
 | **Base URL** | `http://127.0.0.1:18989/v1` (`http://<service-name>:18989/v1` on a shared Compose network, `http://host.docker.internal:<published-port>/v1` on Docker Desktop where host-loopback routing applies, or your HTTPS reverse-proxy URL `/v1`) |
 | **API Key** | Client key generated in **API keys** (never your admin password or Google token) |
-| **Model** | `gemini-argon` (Pro reasoning/coding), `gemini-hydrogen` (Gemini 4 Hydrogen), or `gemini-flash-lite` |
+| **Model** | `gemini-neon` (Gemini 4 Neon flagship Pro reasoning/coding; `gemini-argon` temporarily aliases here), `gemini-hydrogen` (Gemini 4 Hydrogen), or `gemini-flash-lite` |
 | **Endpoints** | `/v1/chat/completions` or `/v1/responses` ([supported contract](docs/API_SUPPORT.md)) |
 
 Verify model discovery (zero quota used):
@@ -161,7 +161,7 @@ Send a Chat Completions request (add `"stream": true` with `curl -N` for increme
 curl -fsS http://127.0.0.1:18989/v1/chat/completions \
   -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemini-argon","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"gemini-neon","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ### Client Setup Recipes
@@ -170,7 +170,7 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 <summary><strong>Cursor</strong></summary>
 
 1. Open **Cursor Settings → Models**.
-2. Add custom model `gemini-argon` (and optionally `gemini-hydrogen`).
+2. Add custom model `gemini-neon` (and optionally `gemini-hydrogen`).
 3. Enable **Override OpenAI Base URL**, set it to `http://127.0.0.1:18989/v1` (note: Cursor requires a publicly reachable HTTPS tunnel/reverse-proxy if its cloud relay mediates requests in your mode), and paste your gateway client API key.
 
 </details>
@@ -181,17 +181,17 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 1. Choose **API Provider:** `OpenAI Compatible`.
 2. **Base URL:** `http://127.0.0.1:18989/v1`
 3. **API Key:** Your gateway client key.
-4. **Model ID:** `gemini-hydrogen` (recommended quota-friendly option for high-frequency multi-step agent loops) or `gemini-argon` ([quota comparison](#quota-consumption)); both support streaming, caller tool loops, and static image attachments.
+4. **Model ID:** `gemini-hydrogen` (recommended quota-friendly option for high-frequency multi-step agent loops) or `gemini-neon` ([quota comparison](#quota-consumption)); both support streaming, caller tool loops, and static image attachments.
 
 </details>
 
 <details>
 <summary><strong>OpenAI Codex CLI (<code>~/.codex/config.toml</code>)</strong></summary>
 
-Codex CLI speaks the `/v1/responses` protocol natively (including namespace tools and reasoning effort mapping). `gemini-hydrogen` is recommended as the quota-friendly option for high-frequency multi-step agent loops alongside `gemini-argon` ([quota comparison](#quota-consumption)):
+Codex CLI speaks the `/v1/responses` protocol natively (including namespace tools and reasoning effort mapping). `gemini-hydrogen` is recommended as the quota-friendly option for high-frequency multi-step agent loops alongside `gemini-neon` ([quota comparison](#quota-consumption)):
 
 ```toml
-model = "gemini-hydrogen" # or "gemini-argon" for flagship Pro reasoning
+model = "gemini-hydrogen" # or "gemini-neon" for flagship Pro reasoning
 model_provider = "gemini_app2api"
 model_reasoning_summary = "none"
 web_search = "disabled"
@@ -214,14 +214,14 @@ If you use [`@earendil-works/pi-coding-agent`](https://pi.dev) (`pi`) or **Gooey
 pi install npm:pi-gemini-app
 ```
 
-Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste; completing login automatically submits acceptance of Google Gemini Terms of Service for that account) and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto`. See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
+Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste; completing login automatically submits acceptance of Google Gemini Terms of Service for that account) and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto` (`gemini-argon` temporarily aliases to `gemini-neon`). See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
 
 </details>
 
 <details>
 <summary><strong>Cherry Studio / Open WebUI / OpenAI SDKs</strong></summary>
 
-- **Cherry Studio / Open WebUI:** Add an OpenAI provider with API Host `http://127.0.0.1:18989/v1`, paste your gateway client key, and fetch `/v1/models` (`gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite`).
+- **Cherry Studio / Open WebUI:** Add an OpenAI provider with API Host `http://127.0.0.1:18989/v1`, paste your gateway client key, and fetch `/v1/models` (`gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`).
 - **Official JS & Python SDKs:** See runnable caller-tool loop examples in [`examples/client.mjs`](examples/client.mjs) and [`examples/client.py`](examples/client.py). Always replay complete conversation history (including `tool_call_id` / `call_id` pairs) on every turn.
 
 </details>
@@ -232,11 +232,11 @@ Then run `/login gemini-app` (supports both local browser loopback and headless 
 
 | Model Alias | Role & Tier | Native Mode | Advertised Context Metadata |
 |---|---|---:|---|
-| **`gemini-argon`** | **Flagship Pro-tier mode** for complex coding, architecture, and multi-step agent loops | `8` | `context_window: 128000` (advisory client budget) |
+| **`gemini-neon`** | **Gemini 4 Neon** flagship Pro-tier mode for complex coding, architecture, and multi-step agent loops (upstream Neon attribution verified; `gemini-argon` temporarily aliases here) | `PRO` (`3`) | `context_window: 128000` (advisory client budget) |
 | **`gemini-hydrogen`** | **Gemini 4 Hydrogen** for low-latency everyday reasoning and fast interactive tasks (upstream Hydrogen attribution verified) | `FAST` (`1`) | `context_window: 512000` (advisory client budget) |
 | **`gemini-flash-lite`** | High-throughput lightweight tasks | `6` | Not advertised |
 
-> Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. `context_window: 128000` (`gemini-argon`) and `context_window: 512000` (`gemini-hydrogen`) are empirical advisory client budgets calibrated to single-turn recall, prefill latency, and the gateway's `4 MiB` request ceiling—not enforced token caps or official Google SLA guarantees.
+> Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. For backward compatibility while callers migrate from retired upstream Argon (mode `8`), `gemini-argon` is temporarily accepted and transparently routed to `gemini-neon` (`PRO` mode `3`). `context_window: 128000` (`gemini-neon`) and `context_window: 512000` (`gemini-hydrogen`) are empirical advisory client budgets calibrated to single-turn recall, prefill latency, and the gateway's `4 MiB` request ceiling—not enforced token caps or official Google SLA guarantees.
 
 <a id="quota-consumption"></a>
 ### Quota Consumption: gemini-argon vs gemini-hydrogen
@@ -263,8 +263,8 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 | **Function Tools** | Bounded JSON Schema validation, `auto`/`none`/`required`/named `tool_choice`, and Responses function-only `namespace` groups; executed strictly by the caller |
 | **Structured Outputs** | Chat `response_format` and Responses `text.format` (`json_schema` and `json_object`), validated against the bounded JSON Schema validator before response delivery (not combined with `native_search: true`) |
 | **Image Input** | Up to `4` static PNG/JPEG/WebP images (`<= 2 MiB` combined) via `data:` URLs or opt-in SSRF-guarded public HTTP(S) URLs |
-| **Google Search** | Opt-in `"native_search": true` (`gemini-argon`, thinking `2`, text-only `<= 16 KiB`, no caller tools/images in the same turn); maps verified public-web sources to OpenAI `url_citation` annotations when present |
-| **Observability Telemetry** | In-memory per-account × per-model provider-attempt counters (`gemini-hydrogen`, `gemini-argon`, `gemini-flash-lite` attempts including retries and explicit account tests, output bytes, retries, soft-errors, and error categories) in `/admin` **Overview** and the Account Inspector Drawer (zero prompt logging) |
+| **Google Search** | Opt-in `"native_search": true` (`gemini-neon` / aliased `gemini-argon`, thinking `2`, text-only `<= 16 KiB`, no caller tools/images in the same turn); maps verified public-web sources to OpenAI `url_citation` annotations when present |
+| **Observability Telemetry** | In-memory per-account × per-model provider-attempt counters (`gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite` attempts including retries and explicit account tests, output bytes, retries, soft-errors, and error categories) in `/admin` **Overview** and the Account Inspector Drawer (zero prompt logging) |
 | **Thinking Control** | Synchronous `thinking_level` (`0`, `1`, `2`, `4`; default `2`) and OpenAI `reasoning_effort` (`none`/`minimal`→`0`, `low`→`1`, `medium`/`high`/`xhigh`→`2`); async Deep Think (`3`) rejected locally |
 | **Usage Accounting** | Heuristic token estimates (`estimated: true`)—not official Google token counts or billing figures |
 

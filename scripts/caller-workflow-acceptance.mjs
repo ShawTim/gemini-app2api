@@ -159,7 +159,7 @@ export async function runCallerWorkflow({
     sourceHash,
     api,
     stream,
-    selectedModel: "gemini-argon",
+    selectedModel: "gemini-neon",
     requestedThinking: 2,
     httpStatuses: [],
     resolvedModes: [],
@@ -209,7 +209,7 @@ export async function runCallerWorkflow({
     let pendingResults = 0;
     const request = async (choice) => {
       const body = {
-        model: "gemini-argon",
+        model: "gemini-neon",
         thinking_level: 2,
         stream,
         tools:
@@ -265,7 +265,7 @@ export async function runCallerWorkflow({
             ? data.error.code
             : "CALLER_TEST_HTTP_FAILURE",
         );
-      if ((!stream && (mode !== "8" || thinking !== "2")) || (mode !== null && mode !== "8") || (thinking !== null && thinking !== "2") || data.model !== "gemini-argon")
+      if ((!stream && (mode !== "3" || thinking !== "2")) || (mode !== null && mode !== "3") || (thinking !== null && thinking !== "2") || data.model !== "gemini-neon")
         fail("CALLER_TEST_MODEL_MISMATCH");
       report.successfulModelResponses++;
       return { data, assistant: extract(data, api) };
@@ -389,7 +389,7 @@ export async function runCallerWorkflow({
   } finally {
     box?.close();
   }
-  report.nativeModeEvidenceComplete = report.resolvedModes.length > 0 && report.resolvedModes.every(mode => mode === 8);
+  report.nativeModeEvidenceComplete = report.resolvedModes.length > 0 && report.resolvedModes.every(mode => mode === 3);
   return report;
 }
 

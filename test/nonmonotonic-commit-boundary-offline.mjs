@@ -18,7 +18,7 @@ const key = state.createKey('synthetic snapshot boundary');
 const accounts = { list: () => [{ id: 'synthetic', enabled: true, status: 'ready', authenticationStatus: 'signed_in' }], getValidAccessToken: async () => 'synthetic-only', recordProviderSuccess() {}, recordUpstreamError() {}, close() {} };
 const str = (n, s) => m(n, Buffer.from(s));
 const frame = ({ text, id = 'same-id', complete = false }) => m(1003, m(1, Buffer.concat([
-  m(1, Buffer.concat([...(id == null ? [] : [str(1, id)]), m(2, str(1, text))])), v(9, complete ? 1 : 0), v(41, 8), v(42, 2) ])));
+  m(1, Buffer.concat([...(id == null ? [] : [str(1, id)]), m(2, str(1, text))])), v(9, complete ? 1 : 0), str(30, 'Used 4 Neon High model'), v(41, 3), v(42, 2) ])));
 const tools = [{ type: 'function', function: { name: 'probe', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'], additionalProperties: false } } }];
 const tool = value => '```tool_call\n' + JSON.stringify({ name: 'probe', arguments: { value } }) + '\n```\n';
 const short = 'OLD_DRAFT', revised = 'NEW_FINAL', oldLong = 'O'.repeat(2048), newLong = 'N'.repeat(2600);

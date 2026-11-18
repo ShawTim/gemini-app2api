@@ -75,7 +75,7 @@ for (const name of CALLER_CASES) {
     assert.equal(r.actionVerified, true);
     assert.equal(r.followedCallerResult, true);
     assert.deepEqual(r.httpStatuses, [200, 200]);
-    assert.deepEqual(r.resolvedModes, [8, 8]);
+    assert.deepEqual(r.resolvedModes, [3, 3]);
     assert.equal(f.seen.length, 2);
     assert.doesNotMatch(
       JSON.stringify(r),
@@ -244,7 +244,7 @@ for (const [name, api, stream] of [
     assert.equal(report.executions, 1);
     assert.equal(report.followedCallerResult, true);
     assert.deepEqual(report.httpStatuses, [200, 200]);
-    assert.deepEqual(report.resolvedModes, stream ? [null, 8] : [8, 8]);
+    assert.deepEqual(report.resolvedModes, stream ? [null, 3] : [3, 3]);
     assert.equal(report.nativeModeEvidenceComplete, !stream);
     assert.equal(f.seen.length, 2);
   });
@@ -253,7 +253,7 @@ test("caller SSE decoder requires a unique completed terminal and ordered Respon
   const { decodeCallerResponse } =
     await import("../scripts/caller-tools-acceptance.mjs");
   const chunk = JSON.stringify({
-    model: "gemini-argon",
+    model: "gemini-neon",
     choices: [{ delta: { content: "Synthetic" }, finish_reason: "stop" }],
   });
   assert.throws(
@@ -271,7 +271,7 @@ test("caller SSE decoder requires a unique completed terminal and ordered Respon
     {
       type: "response.completed",
       sequence_number: 2,
-      response: { model: "gemini-argon", output: [] },
+      response: { model: "gemini-neon", output: [] },
     },
   ];
   assert.throws(
@@ -286,12 +286,12 @@ test("caller SSE decoder requires a unique completed terminal and ordered Respon
 
 test("acceptance decoder rejects qualified partial completion rather than treating delivery completion as task success", async () => {
   const { decodeCallerResponse } = await import('../scripts/caller-tools-acceptance.mjs');
-  const message = { model: 'gemini-argon', choices: [{ delta: {}, finish_reason: 'stop' }] };
+  const message = { model: 'gemini-neon', choices: [{ delta: {}, finish_reason: 'stop' }] };
   for (const evidence of [{ incomplete: true }, { error: { code: 'NATIVE_STREAM_RESET' } }, { incomplete_details: { reason: 'upstream_interrupted' } }]) {
     const chat = 'data: ' + JSON.stringify({ ...message, ...evidence }) + '\n\ndata: [DONE]\n\n';
     assert.throws(() => decodeCallerResponse(chat, { stream: true }), { code: 'CALLER_RESPONSE_INCOMPLETE' });
     for (const outer of [true, false]) {
-      const response = { status: 'completed', model: 'gemini-argon', output: [], ...(outer ? {} : evidence) };
+      const response = { status: 'completed', model: 'gemini-neon', output: [], ...(outer ? {} : evidence) };
       const event = { type: 'response.completed', sequence_number: 0, response, ...(outer ? evidence : {}) };
       assert.throws(() => decodeCallerResponse('data: ' + JSON.stringify(event) + '\n\n', { api: 'responses', stream: true }), { code: 'CALLER_RESPONSE_INCOMPLETE' });
     }

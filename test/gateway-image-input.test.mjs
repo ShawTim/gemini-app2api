@@ -103,7 +103,7 @@ test('unsupported image roles, details, file IDs and native search conflicts rej
   rejected(() => normalizeChatRequest({ messages: [user()], native_search: true }), 'NATIVE_SEARCH_IMAGES_UNSUPPORTED');
 });
 
-function inspectWire(frames, expected, mode = 8) {
+function inspectWire(frames, expected, mode = 3) {
   assert.equal(frames.length, 3);
   const initial = field(frames[0], 1000), template = field(field(initial, 1001), 1), query = field(template, 1);
   assert.equal(scalar(field(template, 47)), mode); assert.equal(scalar(field(template, 48)), 2);
@@ -169,7 +169,7 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
         reader.finish(); const prompt = inspectWire(frames, readyBlobs.splice(0)); prompts.push(prompt);
         const answer = prompt.includes('TOOL_RESULT_IMAGE_FIXTURE') ? 'Synthetic final' : prompt.includes('fixture_lookup') ? toolBlock : 'Synthetic image answer';
         stream.respond({ ':status': 200, 'content-type': 'application/grpc' }, { waitForTrailers: true });
-        stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '0' })); stream.end(frameGrpcMessage(textFrame(answer, 8, 2)));
+        stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '0' })); stream.end(frameGrpcMessage(textFrame(answer, 3, 2)));
       });
     }
   });
@@ -182,8 +182,8 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
     const body = responses ? { input: [{ role: 'user', content: [{ type: 'input_text', text: 'inspect synthetic image' }, { type: 'input_image', image_url: url(PNG) }] }] } : { messages: [user([{ type: 'text', text: 'inspect synthetic image' }, image()])] };
     const res = await f.api(responses ? '/v1/responses' : '/v1/chat/completions', { method: 'POST', body: { model: 'gemini-argon', stream, ...body } });
     // Short (<2048B) SSE answers hold headers behind the prefix gate until completion, preserving resolved-mode header.
-    assert.equal(res.status, 200); assert.equal(res.headers.get('x-native-mode'), '8');
-    const output = await res.text(); assert.match(output, /Synthetic image answer/); assert.match(output, /gemini-argon/);
+    assert.equal(res.status, 200); assert.equal(res.headers.get('x-native-mode'), '3');
+    const output = await res.text(); assert.match(output, /Synthetic image answer/); assert.match(output, /gemini-neon/);
     if (stream) assert.match(output, responses ? /response\.completed/ : /data: \[DONE\]/);
   }
   const first = await f.api('/v1/chat/completions', { method: 'POST', body: { messages: [user()], tools, tool_choice: 'required' } });

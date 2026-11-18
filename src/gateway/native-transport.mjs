@@ -42,7 +42,7 @@ export function openDirectTurn(
   {
     messages,
     images = [],
-    modeCategory = 8,
+    modeCategory = 3,
     thinkingLevel = 2,
     smartModelSelection = false,
     temporaryChat = true,

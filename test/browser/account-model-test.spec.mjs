@@ -28,9 +28,9 @@ test('compact account model buttons send once to the selected account, show OK/F
     await expect(page.locator('#action-dialog')).not.toBeVisible();
     expect(f.seen).toHaveLength(1); expect(f.seen[0].modeCategory).toBe(1);
     expect(tokens).toEqual(['acc-0']); expect(f.store.data.accounts[0].enabled).toBe(false);
-    await row('gemini-argon').locator('[data-action="test-model"]').click();
-    await expect(row('gemini-argon').locator('[data-model-test-result]')).toHaveText('Fail');
-    await expect(row('gemini-argon').locator('[data-model-test-result]')).toHaveClass(/\bfail\b/);
+    await row('gemini-neon').locator('[data-action="test-model"]').click();
+    await expect(row('gemini-neon').locator('[data-model-test-result]')).toHaveText('Fail');
+    await expect(row('gemini-neon').locator('[data-model-test-result]')).toHaveClass(/\bfail\b/);
     expect(tokens).toEqual(['acc-0', 'acc-0']); expect(f.seen).toHaveLength(2);
     await page.keyboard.press('Escape');
     await expect(drawer).toBeHidden();

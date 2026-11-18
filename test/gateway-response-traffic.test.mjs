@@ -13,7 +13,8 @@ import { frameGrpcMessage } from '../native-wire/robin-current.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 const snapshot = (text, complete = false) => m(1003, m(1, Buffer.concat([
   m(1, Buffer.concat([m(1, Buffer.from('synthetic-snapshot-id')), m(2, m(1, Buffer.from(text)))])),
-  v(9, Number(complete)), v(41, 8), v(42, 2),
+  m(30, Buffer.from('Used 4 Neon High model')),
+  v(9, Number(complete)), v(41, 3), v(42, 2),
 ])));
 const finalCall = '```tool_call\n{"name":"fixture_lookup","arguments":{"key":"final"}}\n```';
 const draft = snapshot('Synthetic repeated draft. ' + 'x'.repeat(32 * 1024));

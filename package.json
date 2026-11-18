@@ -99,8 +99,9 @@
   },
   "keywords": [
     "gemini",
-    "argon",
+    "neon",
     "hydrogen",
+    "argon",
     "http2",
     "openai-api",
     "gateway",

@@ -100,7 +100,7 @@ test('commercial request recovery uses existing evidence and navigation only', a
   page.on('request', r => { if (r.method() !== 'GET' && !r.url().endsWith('/login')) mutations++; });
   await page.route('**/admin/api/overview', async route => {
     const response = await route.fetch(), data = await response.json();
-    data.requests = [{ id: 'req-rejected', at: Date.now(), path: '/v1/responses', model: 'gemini-argon', accountId: 'acc-0', status: 502, durationMs: 100, errorCode: 'NATIVE_PRECONDITION_REQUIRED', nativeEvidence: { upstreamHttpStatus: 200, grpcStatus: 9, upstreamMessage: '<img src=x onerror=alert(1)> Synthetic original' } }, { id: 'req-unknown', at: Date.now(), path: '/v1/responses', status: 502, errorCode: 'SYNTHETIC_UNKNOWN_ERROR' }];
+    data.requests = [{ id: 'req-rejected', at: Date.now(), path: '/v1/responses', model: 'gemini-neon', accountId: 'acc-0', status: 502, durationMs: 100, errorCode: 'NATIVE_PRECONDITION_REQUIRED', nativeEvidence: { upstreamHttpStatus: 200, grpcStatus: 9, upstreamMessage: '<img src=x onerror=alert(1)> Synthetic original' } }, { id: 'req-unknown', at: Date.now(), path: '/v1/responses', status: 502, errorCode: 'SYNTHETIC_UNKNOWN_ERROR' }];
     await route.fulfill({ json: data });
   });
   await page.route('**/admin/api/diagnostics', r => { diagnostics++; return r.fulfill({ json: { synthetic: true } }); });
@@ -113,7 +113,7 @@ test('commercial request recovery uses existing evidence and navigation only', a
   await expect(page.locator('[data-upstream-message]')).toHaveText('<img src=x onerror=alert(1)> Synthetic original');
   await expect(page.locator('#action-dialog img')).toHaveCount(0);
   await page.locator('#request-recovery-link').click();
-  await expect(page).toHaveURL(/#accounts\?account=acc-0&model=gemini-argon/);
+  await expect(page).toHaveURL(/#accounts\?account=acc-0&model=gemini-neon/);
   await expect(page.locator('#account-models-acc-0')).toBeFocused();
   await navigate(page, 'requests'); await page.locator('[data-request-id="req-unknown"]').click();
   await expect(page.locator('[data-request-recovery]')).toContainText('No verified recovery guidance');

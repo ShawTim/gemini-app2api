@@ -220,20 +220,20 @@ export async function runNativeSearchDiagnostic({
     const result = await provider.runTurn(
       "diagnostic",
       {
-        model: "gemini-argon",
+        model: "gemini-neon",
         messages: [{ role: "user", content: query }],
         thinking_level: 2,
       },
       () => {},
       { signal },
     );
-    if (result.resolvedModeCategory !== 8 || result.thinkingLevel !== 2)
+    if (result.resolvedModeCategory !== 3 || result.thinkingLevel !== 2)
       return fail("NATIVE_THINKING_MISMATCH");
     return {
       ok: true,
       answer: result.content,
       query,
-      requestedModel: "gemini-argon",
+      requestedModel: "gemini-neon",
       revisionCount: result.revisionCount,
       resolvedModeCategory: result.resolvedModeCategory,
       requestedThinkingLevel: 2,

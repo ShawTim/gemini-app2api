@@ -15,7 +15,7 @@ const emptyEvidence = (extra = {}) => ({
   grpcStatus: 0,
   wireEnded: true,
   modelCompleted: true,
-  observedMode: 8,
+  observedMode: 3,
   emptyResponseReason: "no_text",
   nativeTextBytes: 0,
   ...extra,
@@ -41,7 +41,7 @@ test("verified empty native output recovers once and does not expose failed outp
   assert.equal(request.providerFailures[0].status, 502);
   assert.equal(request.providerFailures[0].nativeEvidence.emptyResponseReason, "no_text");
   assert.equal(f.seen.length, 2);
-  assert.ok(f.seen.every(options => options.modeCategory === 8));
+  assert.ok(f.seen.every(options => options.modeCategory === 3));
   assert.deepEqual(f.seen[0].messages, f.seen[1].messages);
 });
 

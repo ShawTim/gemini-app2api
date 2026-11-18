@@ -33,9 +33,13 @@ export const toolBlock =
   '```tool_call\n{"name":"fixture_lookup","arguments":{"key":"sample"}}\n```';
 export const textFrame = (
   text,
-  mode = 8,
+  mode = 3,
   thinking = 2,
-  attribution = mode === 1 ? "Used 4 Hydrogen High model" : null,
+  attribution = mode === 1
+    ? "Used 4 Hydrogen High model"
+    : mode === 3
+      ? "Used 4 Neon High model"
+      : null,
 ) =>
   m(
     1003,
@@ -149,7 +153,9 @@ export async function fixture({
                   ? next.attribution
                   : frameMode === 1
                     ? "Used 4 Hydrogen High model"
-                    : null,
+                    : frameMode === 3
+                      ? "Used 4 Neon High model"
+                      : null,
               ),
             };
             yield {

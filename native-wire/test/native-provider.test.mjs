@@ -7,7 +7,7 @@ import { lengthDelimited as m, varintField as v } from '../protobuf.mjs';
 const tools = [{ type: 'function', function: { name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } } }];
 const request = (extra = {}) => ({ messages: [{ role: 'user', content: 'fixture prompt' }], ...extra });
 const fence = '```tool_call\n{"name":"exec_command","arguments":{"cmd":"ls"}}\n```';
-const frame = (text = 'ok', { mode = 8, complete = true, thinking = 2, attribution = mode === 1 ? 'Used 4 Hydrogen High model' : undefined, fallback, downgrade, nativeTools = false } = {}) => m(1003, m(1, Buffer.concat([
+const frame = (text = 'ok', { mode = 3, complete = true, thinking = 2, attribution = mode === 1 ? 'Used 4 Hydrogen High model' : mode === 3 ? 'Used 4 Neon High model' : undefined, fallback, downgrade, nativeTools = false } = {}) => m(1003, m(1, Buffer.concat([
   ...(text === null ? [] : [m(1, m(2, m(1, Buffer.from(text))))]),
   ...(mode === null ? [] : [v(41, mode)]), ...(thinking === null ? [] : [v(42, thinking)]),
   v(9, Number(complete)), ...(fallback === undefined ? [] : [v(11, fallback)]), ...(attribution === undefined || attribution === null ? [] : [m(30, Buffer.from(attribution))]), ...(downgrade === undefined ? [] : [v(31, downgrade)]), ...(nativeTools ? [m(7, Buffer.alloc(0))] : []),
@@ -35,10 +35,10 @@ function response() {
 }
 const rejects = (promise, code, status = 502) => assert.rejects(promise, error => error.code === code && error.status === status && !error.message.includes('fixture'));
 
-test('advertised models are exact modes 8/1/6, selected model labels and unique result ids', async () => {
-  assert.deepEqual(NATIVE_MODELS, ['gemini-argon', 'gemini-hydrogen', 'gemini-flash-lite']);
+test('advertised models are exact modes 3/1/6, selected model labels, gemini-argon alias, and unique result ids', async () => {
+  assert.deepEqual(NATIVE_MODELS, ['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']);
   const ids = new Set();
-  for (const [model, mode] of [['gemini-argon', 8], ['gemini-hydrogen', 1], ['gemini-flash-lite', 6]]) {
+  for (const [model, mode] of [['gemini-neon', 3], ['gemini-hydrogen', 1], ['gemini-flash-lite', 6]]) {
     const { p, state } = fixture([event(frame('ok', { mode })), end()]);
     const result = await p.runTurn('a', request({ model: 'models/' + model }));
     assert.equal(result.model, model); assert.equal(result.content, 'ok');
@@ -52,6 +52,20 @@ test('advertised models are exact modes 8/1/6, selected model labels and unique 
     assert.equal(result.raw, undefined); assert.equal(result.continuation, undefined);
   }
   assert.equal(ids.size, NATIVE_MODELS.length);
+  // Temporary compatibility alias: gemini-argon -> gemini-neon (mode 3 + Neon attribution).
+  for (const aliasModel of ['gemini-argon', 'models/gemini-argon']) {
+    const { p, state } = fixture([event(frame('ok', { mode: 3, attribution: 'Used 4 Neon High model' })), end()]);
+    const result = await p.runTurn('a', request({ model: aliasModel }));
+    assert.equal(result.model, 'gemini-neon');
+    assert.equal(state.options[0].modeCategory, 3);
+    assert.equal(result.resolvedModeCategory, 3);
+    assert.equal(result.attribution, 'Used 4 Neon High model');
+  }
+  // gemini-neon rejects non-Neon or missing field-30 attribution.
+  for (const badAttr of [null, 'Used 4 Argon model', 'Used 4 Hydrogen High model']) {
+    const { p } = fixture([event(frame('ok', { mode: 3, attribution: badAttr })), end()]);
+    await rejects(p.runTurn('a', request({ model: 'gemini-neon' })), 'MODEL_DOWNGRADE_REJECTED');
+  }
 });
 
 test('synchronous thinking values are forwarded; returned thinking is resolved evidence or null', async () => {
@@ -185,10 +199,10 @@ test('continuation is explicitly unsupported; all accounts/owners/sessions repla
 test('final mode, boolean completion evidence, resolved thinking and setup errors fail closed', async () => {
   // Absence on a later metadata/text frame is not an explicit mode change.
   const retained = await fixture([event(frame('o')), event(frame('ok', { mode: null })), end()]).p.runTurn('a', request());
-  assert.equal(retained.model, 'gemini-argon');
+  assert.equal(retained.model, 'gemini-neon');
   await rejects(fixture([event(frame('o')), event(frame('ok', { mode: 0 })), end()]).p.runTurn('a', request()), 'MISSING_NATIVE_MODE_EVIDENCE');
   await rejects(fixture([event(frame('ok', { mode: null })), end()]).p.runTurn('a', request()), 'MISSING_NATIVE_MODE_EVIDENCE');
-  const malformed = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('ok')))), v(41, 8), v(9, 2)])));
+  const malformed = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('ok')))), v(41, 3), v(9, 2)])));
   await rejects(fixture([event(malformed), end()]).p.runTurn('a', request()), 'INVALID_NATIVE_RESPONSE');
   await rejects(fixture([event(frame('ok', { thinking: 5 })), end()]).p.runTurn('a', request()), 'INVALID_NATIVE_THINKING_LEVEL');
   let cancelled = 0;
@@ -299,16 +313,27 @@ test('gemini-hydrogen ignores unresolved legacy thinking heartbeats while failin
     assert.equal(deltas.filter(d => d.content).map(d => d.content).join(''), 'hello world');
   }
 
-  for (const [model, mode] of [['gemini-argon', 8], ['gemini-flash-lite', 6]]) {
+  {
     const { p } = fixture([
       event(frame(null, { mode: 0, attribution: 'Used Legacy model', complete: false })),
-      event(frame('ok', { mode, attribution: null, complete: true })),
+      event(frame('ok', { mode: 6, attribution: null, complete: true })),
       end(),
     ]);
-    const result = await p.runTurn('a', request({ model }));
+    const result = await p.runTurn('a', request({ model: 'gemini-flash-lite' }));
     assert.equal(result.content, 'ok');
-    assert.equal(result.resolvedModeCategory, mode);
+    assert.equal(result.resolvedModeCategory, 6);
     assert.equal(result.attribution, undefined);
+  }
+  {
+    const { p } = fixture([
+      event(frame(null, { mode: 0, attribution: 'Used Legacy model', complete: false })),
+      event(frame('ok', { mode: 3, attribution: 'Used 4 Neon High model', complete: true })),
+      end(),
+    ]);
+    const result = await p.runTurn('a', request({ model: 'gemini-neon' }));
+    assert.equal(result.content, 'ok');
+    assert.equal(result.resolvedModeCategory, 3);
+    assert.equal(result.attribution, 'Used 4 Neon High model');
   }
 
   for (const incrementalOutput of [false, true]) {

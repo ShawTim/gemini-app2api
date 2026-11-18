@@ -25,7 +25,7 @@ test('reset, empty and bad tool JSON recover within one HTTP request and caller 
   assert.equal(response.headers.get('x-gemini-recovery-errors'), 'NATIVE_STREAM_RESET,EMPTY_NATIVE_RESPONSE,INVALID_TOOL_JSON');
   const first = f.app.overview().requests[0];
   assert.equal(first.providerFailures.length, 3); assert.equal(new Set([...first.providerFailures.map(x => x.accountId), first.accountId]).size, 4);
-  assert.ok(f.seen.every(x => x.modeCategory === 8 && x.thinkingLevel === 2));
+  assert.ok(f.seen.every(x => x.modeCategory === 3 && x.thinkingLevel === 2));
   assert.ok(f.seen[3].messages[0].content.includes('[Gateway automatic recovery:'));
   assert.ok(f.seen[3].messages[0].content.includes(input.messages[0].content));
   // Execute only the delivered, validated synthetic tool exactly once.
@@ -105,7 +105,7 @@ test('native refusal and unsupported outputs are terminal rather than regenerate
   for (const clientFields of [[m(13, m(1, Buffer.from('Synthetic refusal')))], [m(1, m(7, Buffer.from('Synthetic alternate text')))]]) {
     const f = await fixture(options); t.after(f.close); let attempts = 0;
     f.app.provider.openTurn = () => { attempts++; return { events: (async function* () {
-      yield { type: 'frame', bytes: m(1003, m(1, Buffer.concat([...clientFields, v(9, 1), v(41, 8), v(42, 2)]))) };
+      yield { type: 'frame', bytes: m(1003, m(1, Buffer.concat([...clientFields, v(9, 1), m(30, Buffer.from('Used 4 Neon High model')), v(41, 3), v(42, 2)]))) };
       yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
     })(), cancel() {} }; };
     const response = await send(f); assert.equal(response.status, 422); await response.text(); assert.equal(attempts, 1);
@@ -113,7 +113,7 @@ test('native refusal and unsupported outputs are terminal rather than regenerate
 });
 
 test('format recovery requires clean verified completion and accepts only fixed correction codes', () => {
-  const e = { code: 'INVALID_TOOL_JSON', status: 502, nativeEvidence: { phase: 'validate', upstreamHttpStatus: 200, grpcStatus: 0, wireEnded: true, modelCompleted: true, observedMode: 8, nativeRefusalPresent: false } };
+  const e = { code: 'INVALID_TOOL_JSON', status: 502, nativeEvidence: { phase: 'validate', upstreamHttpStatus: 200, grpcStatus: 0, wireEnded: true, modelCompleted: true, observedMode: 3, nativeRefusalPresent: false } };
   assert.equal(automaticRecoveryKind(e, input.model), 'tool_protocol');
   for (const patch of [{ modelCompleted: false }, { grpcStatus: null }, { nativeRefusalPresent: true }, { observedMode: 6 }, { http2ResetCode: 8 }, { downgradeReason: 6 }]) assert.equal(automaticRecoveryKind({ ...e, nativeEvidence: { ...e.nativeEvidence, ...patch } }, input.model), null);
   assert.equal(toolRecoveryInstruction('PRIVATE_MODEL_TEXT'), null);
@@ -310,7 +310,7 @@ test('real HTTP/2 503/gRPC 14 matrix covers general failover, automatic recovery
         });
       });
       if (next.text !== undefined) {
-        stream.end(frameGrpcMessage(textFrame(next.text, next.mode ?? 8, 2)));
+        stream.end(frameGrpcMessage(textFrame(next.text, next.mode ?? 3, 2)));
       } else {
         stream.end();
       }
@@ -390,7 +390,7 @@ test('real HTTP/2 503/gRPC 14 matrix covers general failover, automatic recovery
         attempts++;
         return {
           events: (async function* () {
-            yield { type: 'frame', bytes: textFrame('COMMITTED_SHORT_PREFIX', 8, 2) };
+            yield { type: 'frame', bytes: textFrame('COMMITTED_SHORT_PREFIX', 3, 2) };
             // Simulate downstream HTTP headers already flushed before interruption while publishedBytes === 0.
             activeRes.writeHead(200, { 'Content-Type': 'text/event-stream' });
             yield { type: 'end', httpStatus: 200, grpcStatus: 14 };
@@ -417,7 +417,7 @@ test('real HTTP/2 503/gRPC 14 matrix covers general failover, automatic recovery
         longAttempts++;
         return {
           events: (async function* () {
-            yield { type: 'frame', bytes: textFrame('LONG_PREFIX_' + 'x'.repeat(2050), 8, 2) };
+            yield { type: 'frame', bytes: textFrame('LONG_PREFIX_' + 'x'.repeat(2050), 3, 2) };
             yield { type: 'end', httpStatus: 200, grpcStatus: 14 };
           })(),
           getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 14, grpcMessage: '503:Service Unavailable', ended: true, receivedBytes: 2100, requestBytes: 64 }),
