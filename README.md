@@ -33,7 +33,7 @@ Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents,
 
 Ever noticed how Gemini can feel constrained inside the consumer Gemini App—losing thread context or struggling to drive multi-step local engineering workflows? **The bottleneck is rarely the base model; it is the consumer chat harness wrapped around it.**
 
-- **Free the model into real engineering harnesses:** Connect **Cursor, Cline, Roo Code, OpenAI Codex CLI, PI-Desktop, Cherry Studio, or Open WebUI** via standard `/v1/chat/completions` and `/v1/responses` endpoints while keeping full conversation history and local tool execution under your client's control.
+- **Free the model into real engineering harnesses:** Connect **Cursor, Cline, Roo Code, OpenAI Codex CLI, Pi Coding Agent, PI-Desktop, Cherry Studio, or Open WebUI** via standard `/v1/chat/completions` and `/v1/responses` endpoints—or install the native in-process Pi extension (`pi install npm:pi-gemini-app`) with zero gateway server required.
 - **Native HTTP/2 protocol—not brittle web scraping:** Communicates directly with Gemini's Robin HTTP/2 service using pure Node.js built-ins (`node:http2`, `node:crypto`), without headless browsers, cookie scraping, or patching local desktop binaries.
 - **Multi-account pooling for rolling usage windows:** Intensive agentic coding can hit a single account's 5-hour or weekly window quickly. Pool multiple accounts you legitimately own with soft session affinity, read-only official usage bars, and configurable quota failover.
 - **Built to protect agent loops:** Prevents coding agents from discarding 3,000+ bytes of streamed code or infinitely re-sending full conversation histories when upstream streams reset mid-turn (see [Completion Contract](docs/COMPLETION_CONTRACT.md)).
@@ -177,6 +177,19 @@ base_url = "http://127.0.0.1:18989/v1"
 env_key = "GEMINI_GATEWAY_KEY"
 wire_api = "responses"
 ```
+
+</details>
+
+<details>
+<summary><strong>Pi Coding Agent (Native In-Process Extension — No Gateway Server Required)</strong></summary>
+
+If you use [`@earendil-works/pi-coding-agent`](https://pi.dev), install the standalone zero-dependency provider package directly from npm or Pi Marketplace—no local HTTP proxy or Docker container needed:
+
+```sh
+pi install npm:pi-gemini-app
+```
+
+Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste) and `/gemini-quota` inside Pi. See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
 
 </details>
 

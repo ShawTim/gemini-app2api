@@ -128,13 +128,20 @@ test('Release checkFiles rejects forbidden paths, secrets, personal homes, and d
     'const s = "' + 'GOCSPX-' + 'synthetic_fixture_12345";\n',
   );
   assert.throws(() => checkFiles(['src/gateway/app.mjs'], dir), /Potential secret\/private path:/);
-  for (const forbiddenInState of [
-    'token="' + 'ya29.' + 'a'.repeat(20) + '"\n',
-    'refresh="' + '1//' + 'b'.repeat(24) + '"\n',
-    'key="' + 'gsk_' + 'aB3_-'.repeat(5) + '"\n',
-  ]) {
-    fs.writeFileSync(path.join(dir, 'src/gateway/state.mjs'), forbiddenInState);
-    assert.throws(() => checkFiles(['src/gateway/state.mjs'], dir), /Potential secret\/private path:/);
+  fs.writeFileSync(
+    path.join(dir, 'src/gateway/oauth-client-defaults.mjs'),
+    'export const DEFAULT_OAUTH_PROFILE = { clientSecret: "' + 'GOCSPX-' + 'synthetic_fixture_12345" };\n',
+  );
+  checkFiles(['src/gateway/oauth-client-defaults.mjs'], dir);
+  for (const targetFile of ['src/gateway/state.mjs', 'src/gateway/oauth-client-defaults.mjs']) {
+    for (const forbiddenSecret of [
+      'token="' + 'ya29.' + 'a'.repeat(20) + '"\n',
+      'refresh="' + '1//' + 'b'.repeat(24) + '"\n',
+      'key="' + 'gsk_' + 'aB3_-'.repeat(5) + '"\n',
+    ]) {
+      fs.writeFileSync(path.join(dir, targetFile), forbiddenSecret);
+      assert.throws(() => checkFiles([targetFile], dir), /Potential secret\/private path:/);
+    }
   }
 });
 
@@ -315,4 +322,35 @@ test('JS and Python SDK examples reject HTTP 200 incomplete turns before tool ex
       assert.equal(requests.length, 1, `Python example ${mode} must stop before turn 2`);
     }
   }
+});
+
+test('Release checkFiles rejects regular files reached through symlinked intermediate directories', (t) => {
+  const sandbox = fs.mkdtempSync(path.join(scratchBase(), 'release-dir-symlink-'));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+  const stageDir = path.join(sandbox, 'stage');
+  const outsideDir = path.join(sandbox, 'outside');
+  fs.mkdirSync(stageDir, { recursive: true });
+  fs.mkdirSync(outsideDir, { recursive: true });
+  fs.writeFileSync(path.join(outsideDir, 'secret.mjs'), 'export const ok = 1;\n');
+  fs.symlinkSync(outsideDir, path.join(stageDir, 'sub'), 'dir');
+
+  assert.throws(() => checkFiles(['sub/secret.mjs'], stageDir), /Unsafe release file:/);
+});
+
+test('export-release rejects target paths whose parent symlink resolves into protected repository subdirs', (t) => {
+  const sandbox = fs.mkdtempSync(path.join(scratchBase(), 'export-symlink-parent-'));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+  const symlinkParent = path.join(sandbox, 'link-to-extensions');
+  fs.symlinkSync(path.join(root, 'extensions'), symlinkParent, 'dir');
+
+  const res = spawnSync(
+    process.execPath,
+    [path.join(root, 'scripts/export-release.mjs'), path.join(symlinkParent, 'new-export')],
+    { cwd: root, encoding: 'utf8', timeout: 15000 },
+  );
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /Export target must be a new safe directory/);
+  assert.equal(fs.existsSync(path.join(root, 'extensions', 'new-export')), false);
 });

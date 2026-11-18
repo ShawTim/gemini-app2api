@@ -1,0 +1,25 @@
+{
+  "name": "pi-gemini-app",
+  "version": "0.1.0",
+  "description": "In-process Google Gemini App provider extension for Pi (direct native HTTP/2, /login gemini-app, /gemini-quota, zero runtime dependencies).",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "gemini",
+    "gemini-argon",
+    "gemini-hydrogen",
+    "provider",
+    "oauth"
+  ],
+  "piExtensions": [
+    "./extensions/pi/index.js"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

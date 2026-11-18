@@ -1,18 +1,24 @@
-# Google Gemini App Provider Extension for Pi
+# `pi-gemini-app` — Google Gemini App Provider for Pi
 
-Native in-process provider extension for `@earendil-works/pi-coding-agent` (`pi`). Connects directly to Gemini's native HTTP/2 endpoint (`ProcessQuery`) inside the Pi process—no separate HTTP gateway server, Docker container, or extra npm dependencies required.
+Native in-process provider extension for `@earendil-works/pi-coding-agent` (`pi`). Connects directly to Gemini's native HTTP/2 endpoint (`ProcessQuery`) inside the Pi process—no separate HTTP gateway server, Docker container, or extra npm runtime dependencies required.
 
 > **Disclaimer**: Unofficial interoperability software. Not affiliated with, endorsed by, or sponsored by Google. You must authenticate personally with your own eligible Google account.
 
 ## Installation
 
-### Option 1: Install as a Pi package from Git
+### Option 1: Install from npm / Pi Marketplace (Recommended)
+
+```bash
+pi install npm:pi-gemini-app
+```
+
+### Option 2: Install directly from Git
 
 ```bash
 pi install git:github.com/ShawTim/gemini-app2api
 ```
 
-### Option 2: Load from a local clone
+### Option 3: Load from a local clone
 
 ```bash
 git clone https://github.com/ShawTim/gemini-app2api.git
@@ -27,6 +33,11 @@ Or add the extension path to your Pi settings (`~/.pi/agent/settings.json`):
   "extensions": ["/path/to/gemini-app2api/extensions/pi"]
 }
 ```
+
+## Architecture & When to Choose `pi-gemini-app` vs `gemini-app2api`
+
+- **In-Process Direct HTTP/2 (`pi-gemini-app`)**: Runs completely inside Pi using Node.js built-ins (`node:http2`, `node:crypto`). Ideal for single-user Pi terminal sessions with zero background daemons or Docker containers.
+- **Full Standalone Gateway (`gemini-app2api`)**: Use the [main repository](https://github.com/ShawTim/gemini-app2api) if you need multi-account quota pooling/failover, OpenAI-compatible `/v1/chat/completions` & `/v1/responses` endpoints for Cursor/Cline/Codex CLI, or the `/admin` web operations console.
 
 ## Authentication (`/login gemini-app`)
 
@@ -63,3 +74,9 @@ Optional environment overrides if using your own OAuth desktop client:
 ## Commands
 
 - `/gemini-quota` — Fetches and displays your signed-in account's rolling usage percentages and reset timestamps.
+
+## Security & Privacy
+
+- **Zero runtime dependencies**: Ships only pure ESM modules using built-in Node.js APIs; `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` are provided by the Pi host via `peerDependencies`.
+- **No shell or daemon spawning**: Contains zero `child_process` invocations and never starts background services.
+- **Host-managed credentials**: OAuth refresh and scoped access tokens live exclusively in Pi's `CredentialStore` (`auth.json`).

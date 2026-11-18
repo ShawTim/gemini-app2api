@@ -33,7 +33,7 @@
 
 為什麼在官方 Gemini App 內處理大型程式開發時總是綁手綁腳、容易遺失上下文？**瓶頸往往不在底層模型，而在於官方 App 面向一般消費者所設計的封閉外殼（Harness）。**
 
-- **將模型解放到真正的工程工具鏈：** 透過標準 `/v1/chat/completions` 與 `/v1/responses` 介面，直接連接 **Cursor、Cline、Roo Code、OpenAI Codex CLI、PI-Desktop、Cherry Studio 或 Open WebUI**，由你的本地客戶端完整掌管對話歷史與專案工具執行。
+- **將模型解放到真正的工程工具鏈：** 透過標準 `/v1/chat/completions` 與 `/v1/responses` 介面，直接連接 **Cursor、Cline、Roo Code、OpenAI Codex CLI、Pi Coding Agent、PI-Desktop、Cherry Studio 或 Open WebUI**；Pi 用家亦可直接安裝原生 In-Process 擴充套件（`pi install npm:pi-gemini-app`），無須啟動獨立閘道。
 - **原生 HTTP/2 協定直連（非脆弱網頁爬蟲）：** 直接使用 Node.js 內建模組（`node:http2`、`node:crypto`）實作 Gemini Robin 原生 HTTP/2 傳輸與可續傳圖片上傳，不依賴無頭瀏覽器、網頁 Cookie 擷取或修改桌面版二進位檔案。
 - **多帳戶池應對滾動額度視窗：** 高強度 Agent 多輪工具呼叫容易迅速觸及單一帳戶的 5 小時或每週滾動上限。支援匯集多個你合法持有的帳戶，提供軟性 Session 路由偏好、唯讀官方用量進度條與自動配額容錯（Failover）。
 - **專為 Agent 迴圈穩定性設計：** 當上游長連線在中途斷開時，自動保留已送出的可用程式碼與工具呼叫並平穩收尾，防止 Agent 客戶端丟棄數千 bytes 已生成內容或陷入無限重送整份歷史的死循環（詳見[完成與失敗語義](docs/COMPLETION_CONTRACT.md)）。
@@ -177,6 +177,19 @@ base_url = "http://127.0.0.1:18989/v1"
 env_key = "GEMINI_GATEWAY_KEY"
 wire_api = "responses"
 ```
+
+</details>
+
+<details>
+<summary><strong>Pi Coding Agent（原生 In-Process 擴充套件 —— 免啟動閘道伺服器）</strong></summary>
+
+如果你使用 [`@earendil-works/pi-coding-agent`](https://pi.dev)，可直接從 npm / Pi Marketplace 安裝獨立零依賴擴充套件，無須額外執行本地 HTTP 閘道或 Docker 容器：
+
+```sh
+pi install npm:pi-gemini-app
+```
+
+安裝後於 Pi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址）及 `/gemini-quota`。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
 </details>
 

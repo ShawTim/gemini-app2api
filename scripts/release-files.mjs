@@ -81,6 +81,9 @@ const fixed = [
   "scripts/release-files.mjs",
   "scripts/check-release.mjs",
   "scripts/export-release.mjs",
+  "scripts/js-module-scanner.mjs",
+  "scripts/build-pi-package.mjs",
+  "scripts/check-pi-package.mjs",
   "scripts/docker-smoke.mjs",
   "scripts/sdk-smoke.mjs",
   "scripts/live-acceptance.mjs",
@@ -159,6 +162,76 @@ export function sourceFiles(base = root) {
   }
   return curated;
 }
+export function assertContainedRegularFile(
+  baseDir,
+  relPosix,
+  errorPrefix = "Unsafe release file",
+) {
+  if (
+    typeof relPosix !== "string" ||
+    !relPosix ||
+    relPosix.includes("\\") ||
+    path.isAbsolute(relPosix)
+  ) {
+    throw Error(`${errorPrefix}: ${relPosix}`);
+  }
+  const segments = relPosix.split("/");
+  if (
+    segments.length === 0 ||
+    segments.some((seg) => !seg || seg === "." || seg === "..")
+  ) {
+    throw Error(`${errorPrefix}: ${relPosix}`);
+  }
+  const realBase = fs.realpathSync(baseDir);
+  let cursor = baseDir;
+  for (let i = 0; i < segments.length - 1; i++) {
+    cursor = path.join(cursor, segments[i]);
+    const dirStat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (!dirStat || !dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+      throw Error(`${errorPrefix}: ${relPosix}`);
+    }
+  }
+  const fullPath = path.join(cursor, segments[segments.length - 1]);
+  const stat = fs.lstatSync(fullPath, { throwIfNoEntry: false });
+  if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw Error(`${errorPrefix}: ${relPosix}`);
+  }
+  const realFile = fs.realpathSync(fullPath);
+  const expectedReal = path.join(realBase, ...segments);
+  if (realFile !== expectedReal) {
+    throw Error(`${errorPrefix}: ${relPosix}`);
+  }
+  return stat;
+}
+
+export function resolveCanonicalTarget(targetPath) {
+  const resolved = path.resolve(targetPath);
+  const existing = fs.lstatSync(resolved, { throwIfNoEntry: false }) ?? null;
+  if (existing?.isSymbolicLink()) {
+    throw Error(`Refusing to target symlink output path: ${resolved}`);
+  }
+  let cursor = resolved;
+  const tail = [];
+  while (true) {
+    const stat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (stat) {
+      if (stat.isSymbolicLink() && !fs.existsSync(cursor)) {
+        throw Error(`Refusing dangling symlink ancestor: ${cursor}`);
+      }
+      break;
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    tail.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+  const baseStat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+  const realAncestor = baseStat ? fs.realpathSync(cursor) : cursor;
+  const canonical =
+    tail.length > 0 ? path.join(realAncestor, ...tail) : realAncestor;
+  return { resolved, canonical, existing };
+}
+
 export function checkFiles(files, base = root) {
   const tracked = trackedFiles(base);
   for (const name of files) {
@@ -173,16 +246,16 @@ export function checkFiles(files, base = root) {
       throw Error("Forbidden release path: " + name);
     if (tracked && !tracked.has(name))
       throw Error("Untracked release file: " + name);
-    const stat = fs.lstatSync(path.join(base, name));
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)
-      throw Error("Unsafe release file: " + name);
+    assertContainedRegularFile(base, name, "Unsafe release file");
     if (/\.(?:png|jpg)$/.test(name)) continue;
     const text = fs.readFileSync(path.join(base, name), "utf8");
     if (
       /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bya29\.[\w.-]{15,}|\b1\/\/[\w.-]{20,}|\bgsk_[A-Za-z0-9_-]{20,}|\/Users\/[^\s/]+\/|\/home\/[^\s/]+\/|\/Applications\/PI-Desktop[.]app/.test(
         text,
       ) ||
-      (name !== "src/gateway/state.mjs" && /\bGOCSPX-[\w-]{10,}/.test(text))
+      (name !== "src/gateway/state.mjs" &&
+        name !== "src/gateway/oauth-client-defaults.mjs" &&
+        /\bGOCSPX-[\w-]{10,}/.test(text))
     )
       throw Error("Potential secret/private path: " + name);
   }

@@ -24,6 +24,7 @@ runtime.lock
 test-results/
 playwright-report/
 release-source/
+.pi-package-build/
 .venv/
 
 # Generated deliverables and local credential stores are never source commits.

@@ -14,7 +14,7 @@ import {
   GrpcMessageReader,
   frameGrpcMessage,
 } from "../../native-wire/robin-current.mjs";
-import { fault } from "./state.mjs";
+import { fault } from "./oauth-client-defaults.mjs";
 import { PROMPT_MAX_BYTES } from "../openai-contract.mjs";
 import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './native-response-limits.mjs';
 import { observeNative } from './native-diagnostic.mjs';

@@ -68,4 +68,5 @@ export const productTests = Object.freeze([
   'native-wire/test/tool-protocol.test.mjs',
   'native-wire/test/oauth-loopback.test.mjs',
   'test/pi-extension.test.mjs',
+  'test/pi-package-build.test.mjs',
 ]);

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   root,
@@ -6,10 +7,13 @@ import {
   sourceFiles,
   checkFiles,
   sourceDigest,
+  resolveCanonicalTarget,
 } from "./release-files.mjs";
-const target = path.resolve(process.argv[2] || "release-source");
-const protectedRoots = [
+const targetArg = process.argv[2] || "release-source";
+const protectedNames = [
+  ".git",
   "src",
+  "extensions",
   "test",
   "examples",
   "docs",
@@ -17,17 +21,44 @@ const protectedRoots = [
   "native-wire",
   "bin",
   ".github",
-].map((dir) => path.join(root, dir));
-if (
-  target === root ||
-  protectedRoots.some(
-    (dir) => target === dir || target.startsWith(dir + path.sep),
-  ) ||
-  fs.existsSync(target)
-)
+];
+let resolvedTarget;
+try {
+  resolvedTarget = resolveCanonicalTarget(targetArg);
+} catch {
   throw Error(
-    "Export target must be a new directory; never overwrite existing files",
+    "Export target must be a new safe directory outside protected repository paths",
   );
+}
+const { resolved: target, canonical, existing } = resolvedTarget;
+const resolvedRoot = path.resolve(root);
+const realRoot = fs.realpathSync(resolvedRoot);
+const resolvedTmp = path.resolve(os.tmpdir());
+const realTmp = fs.realpathSync(resolvedTmp);
+const hitsProtected = [
+  [target, resolvedRoot, resolvedTmp],
+  [canonical, realRoot, realTmp],
+].some(([candidate, base, tmp]) => {
+  if (
+    candidate === base ||
+    candidate === tmp ||
+    candidate === path.parse(candidate).root ||
+    base.startsWith(candidate + path.sep)
+  ) {
+    return true;
+  }
+  return protectedNames.some((dir) => {
+    const protectedDir = path.join(base, dir);
+    return (
+      candidate === protectedDir || candidate.startsWith(protectedDir + path.sep)
+    );
+  });
+});
+if (hitsProtected || existing !== null) {
+  throw Error(
+    "Export target must be a new safe directory outside protected repository paths",
+  );
+}
 const tracked = trackedFiles(root);
 const files = sourceFiles();
 if (tracked)

@@ -1,6 +1,6 @@
 import { startLoopbackLogin as defaultStartLoopbackLogin, refreshNativeCredential as defaultRefreshNativeCredential } from '../../native-wire/oauth-loopback.mjs';
 import { acceptGoogleMainTerms as defaultAcceptGoogleMainTerms } from '../../src/gateway/terms.mjs';
-import { DEFAULT_OAUTH_PROFILE } from '../../src/gateway/state.mjs';
+import { DEFAULT_OAUTH_PROFILE } from '../../src/gateway/oauth-client-defaults.mjs';
 
 const FLEXIBLE_API_SCOPE = 'https://www.googleapis.com/auth/flexible-api';
 const FALLBACK_REFRESH_SCOPES = [
