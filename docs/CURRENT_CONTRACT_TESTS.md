@@ -1,6 +1,6 @@
 # Current-contract checks and suite architecture
 
-This guide documents the focused six-program current-contract runner (`npm run test:current-contract`) and how it relates to the broader 66-file offline product regression suite (`npm test`).
+This guide documents the focused six-program current-contract runner (`npm run test:current-contract`) and how it relates to the broader 68-file offline product regression suite (`npm test`).
 
 ## Running the current-contract checks
 
@@ -45,6 +45,6 @@ It stages the exact `Dockerfile` `COPY` graph against `.dockerignore`, verifies 
 ## Relationship to the full product suite
 
 - **`npm run test:current-contract`** (`scripts/run-current-contract.mjs`): Fast, high-signal verification of core delivery, namespace, context-metadata and commit-boundary invariants.
-- **`npm test` / `npm run test:product`** (`scripts/run-offline-product.mjs`): Full **66-file** staged offline product regression suite listed in `scripts/offline-product-tests.mjs`. See [test execution boundaries](TEST_EXECUTION_SAFETY.md).
+- **`npm test` / `npm run test:product`** (`scripts/run-offline-product.mjs`): Full **68-file** staged offline product regression suite listed in `scripts/offline-product-tests.mjs`. See [test execution boundaries](TEST_EXECUTION_SAFETY.md).
 - **`npm run test:admin` & `npm run test:browser`**: Static VM checks and Playwright browser verification for the bilingual operations console.
 - **`npm run test:release`** (`scripts/check-release.mjs`): Curated source file list, `npm pack` subset verification, Docker runtime closure and secret/path hygiene checks.

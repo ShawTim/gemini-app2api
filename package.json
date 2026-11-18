@@ -91,7 +91,7 @@
     "test:release": "node scripts/check-release.mjs && node scripts/check-pi-package.mjs",
     "test:python": "node scripts/sdk-smoke.mjs",
     "test:docker": "node scripts/docker-smoke.mjs",
-    "test:prerelease": "npm run test:current-contract && npm run test:product && npm run test:browser && npm run test:python && docker build -t gemini-app2api-smoke . && npm run test:docker && npm run test:release",
+    "test:prerelease": "node scripts/verify-offline-product-runner.mjs && npm run test:current-contract && npm run test:product && npm run test:browser && npm run test:python && docker build -t gemini-app2api-smoke . && npm run test:docker && npm run test:release",
     "test:live": "node scripts/live-acceptance.mjs",
     "release:source": "node scripts/export-release.mjs",
     "preview:admin": "node test/browser/server.mjs",

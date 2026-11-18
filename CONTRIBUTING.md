@@ -6,7 +6,7 @@ Requires Node.js 22+ on Linux or macOS. Install development dependencies with `n
 
 Tests are explicitly separated into two groups:
 
-1. **Group 1 — Pre-release offline & E2E gate (`npm run test:prerelease`)**: Runs `test:current-contract`, `test:product` (66-file isolated manifest via `node scripts/run-offline-product.mjs --run`), `test:browser` (Playwright console E2E), `test:python` (Python SDK smoke), `docker build` + `test:docker` (real Linux container & Compose smoke), and `test:release` (`node scripts/check-release.mjs`). Intended to run once before cutting a release rather than on every routine local edit.
+1. **Group 1 — Pre-release offline & E2E gate (`npm run test:prerelease`)**: Runs `scripts/verify-offline-product-runner.mjs`, `test:current-contract`, `test:product` (68-file isolated manifest via `node scripts/run-offline-product.mjs --run`), `test:browser` (Playwright console E2E), `test:python` (Python SDK smoke), `docker build` + `test:docker` (real Linux container & Compose smoke), and `test:release` (`node scripts/check-release.mjs` + `node scripts/check-pi-package.mjs`). Intended to run once before cutting a release rather than on every routine local edit.
    - Individual offline suites remain callable via `npm test`, `npm run test:current-contract`, `npm run test:admin`, `npm run test:browser`, `npm run test:python`, `npm run test:docker`, and `npm run test:release`.
 2. **Group 2 — Live upstream verification (`npm run test:live`)**: Opt-in real-account verification (`GATEWAY_LIVE_CONFIRM=owned-accounts-only`). Never run automatically; execute only with explicit operator approval (and on demand whenever requested, independent of release timing).
 
