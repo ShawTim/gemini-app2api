@@ -1,6 +1,6 @@
 # `pi-gemini-app` — Google Gemini App Provider for Pi
 
-Native in-process provider extension for `@earendil-works/pi-coding-agent` (`pi`). Connects directly to Gemini's native HTTP/2 endpoint (`ProcessQuery`) inside the Pi process—no separate HTTP gateway server, Docker container, or extra npm runtime dependencies required.
+Native in-process provider extension for `@earendil-works/pi-coding-agent` (`pi`) and GooeyPi. Connects directly to Gemini's native HTTP/2 endpoint (`ProcessQuery`) inside the Pi process—no separate HTTP gateway server, Docker container, or extra npm runtime dependencies required.
 
 > **Disclaimer**: Unofficial interoperability software. Not affiliated with, endorsed by, or sponsored by Google. You must authenticate personally with your own eligible Google account.
 
@@ -36,7 +36,7 @@ Or add the extension path to your Pi settings (`~/.pi/agent/settings.json`):
 
 ## Architecture & When to Choose `pi-gemini-app` vs `gemini-app2api`
 
-- **In-Process Direct HTTP/2 (`pi-gemini-app`)**: Runs completely inside Pi using Node.js built-ins (`node:http2`, `node:crypto`). Ideal for single-user Pi terminal sessions with zero background daemons or Docker containers.
+- **In-Process Direct HTTP/2 (`pi-gemini-app`)**: Runs completely inside Pi / GooeyPi using Node.js built-ins (`node:http2`, `node:crypto`). Ideal for single-user Pi / GooeyPi terminal sessions with zero background daemons or Docker containers.
 - **Full Standalone Gateway (`gemini-app2api`)**: Use the [main repository](https://github.com/ShawTim/gemini-app2api) if you need multi-account quota pooling/failover, OpenAI-compatible `/v1/chat/completions` & `/v1/responses` endpoints for Cursor/Cline/Codex CLI, or the `/admin` web operations console.
 
 ## Authentication (`/login gemini-app`)

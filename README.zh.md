@@ -4,15 +4,16 @@
 
 **你的開發工具、你的 Gemini 訂閱帳戶、一個零依賴的原生 HTTP/2 獨立閘道。**
 
-透過自行部署的純 Node.js 閘道，將你名下合資格的 Gemini 帳戶直接接上 OpenAI 相容 IDE、CLI Agent 與官方 SDK —— 支援增量 SSE 串流、客戶端工具驗證、多帳戶容錯移轉與雙語維運後台。
+透過自行部署的純 Node.js 閘道，將你名下合資格的 Gemini 帳戶直接接上 OpenAI 相容 IDE、CLI Agent 與官方 SDK（支援增量 SSE 串流、客戶端工具驗證、多帳戶容錯移轉與雙語維運後台）—— 或直接於 Pi Coding Agent 與 GooeyPi 內安裝獨立 In-Process 擴充套件 [pi-gemini-app](#pi-extension)，免啟動閘道伺服器。
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
+[![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
 ![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0A84FF)
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-[English](README.md) · **繁體中文** · [快速開始](#quick-start) · [連接客戶端](#connect-your-client) · [API 參考](docs/API_SUPPORT.md) · [維運指南](docs/OPERATIONS.md)
+[English](README.md) · **繁體中文** · [快速開始](#quick-start) · [Pi 擴充套件](#pi-extension) · [連接客戶端](#connect-your-client) · [API 參考](docs/API_SUPPORT.md) · [維運指南](docs/OPERATIONS.md)
 
 </div>
 
@@ -33,7 +34,7 @@
 
 為什麼在官方 Gemini App 內處理大型程式開發時總是綁手綁腳、容易遺失上下文？**瓶頸往往不在底層模型，而在於官方 App 面向一般消費者所設計的封閉外殼（Harness）。**
 
-- **將模型解放到真正的工程工具鏈：** 透過標準 `/v1/chat/completions` 與 `/v1/responses` 介面，直接連接 **Cursor、Cline、Roo Code、OpenAI Codex CLI、Pi Coding Agent、PI-Desktop、Cherry Studio 或 Open WebUI**；Pi 用家亦可直接安裝原生 In-Process 擴充套件（`pi install npm:pi-gemini-app`），無須啟動獨立閘道。
+- **將模型解放到真正的工程工具鏈：** 透過標準 `/v1/chat/completions` 與 `/v1/responses` 介面，直接連接 **Cursor、Cline、Roo Code、OpenAI Codex CLI、Pi Coding Agent、GooeyPi、PI-Desktop、Cherry Studio 或 Open WebUI**；Pi / GooeyPi 用家亦可直接安裝獨立原生 In-Process 擴充套件（`pi install npm:pi-gemini-app`），無須啟動獨立閘道。
 - **原生 HTTP/2 協定直連（非脆弱網頁爬蟲）：** 直接使用 Node.js 內建模組（`node:http2`、`node:crypto`）實作 Gemini Robin 原生 HTTP/2 傳輸與可續傳圖片上傳，不依賴無頭瀏覽器、網頁 Cookie 擷取或修改桌面版二進位檔案。
 - **多帳戶池應對滾動額度視窗：** 高強度 Agent 多輪工具呼叫容易迅速觸及單一帳戶的 5 小時或每週滾動上限。支援匯集多個你合法持有的帳戶，提供軟性 Session 路由偏好、唯讀官方用量進度條與自動配額容錯（Failover）。
 - **專為 Agent 迴圈穩定性設計：** 當上游長連線在中途斷開時，自動保留已送出的可用程式碼與工具呼叫並平穩收尾，防止 Agent 客戶端丟棄數千 bytes 已生成內容或陷入無限重送整份歷史的死循環（詳見[完成與失敗語義](docs/COMPLETION_CONTRACT.md)）。
@@ -66,6 +67,15 @@
 
 <a id="quick-start"></a>
 ## 快速開始
+
+<a id="pi-extension"></a>
+> [!TIP]
+> **使用 Pi Coding Agent 或 GooeyPi？無須啟動獨立閘道伺服器。**
+> 直接從 [npm（`pi-gemini-app`）](https://www.npmjs.com/package/pi-gemini-app) 或 Pi Marketplace 安裝零依賴原生 HTTP/2 擴充套件，免跑本地 HTTP Proxy 或 Docker 容器：
+> ```sh
+> pi install npm:pi-gemini-app
+> ```
+> 安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app` 及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-argon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`。完整說明請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
 ### 1. 準備工作
 
@@ -196,15 +206,15 @@ wire_api = "responses"
 </details>
 
 <details>
-<summary><strong>Pi Coding Agent（原生 In-Process 擴充套件 —— 免啟動閘道伺服器）</strong></summary>
+<summary><strong>Pi Coding Agent / GooeyPi（原生 In-Process 擴充套件 —— 免啟動閘道伺服器）</strong></summary>
 
-如果你使用 [`@earendil-works/pi-coding-agent`](https://pi.dev)，可直接從 npm / Pi Marketplace 安裝獨立零依賴擴充套件，無須額外執行本地 HTTP 閘道或 Docker 容器：
+如果你使用 [`@earendil-works/pi-coding-agent`](https://pi.dev)（`pi`）或 **GooeyPi**，可直接從 [npm（`pi-gemini-app`）](https://www.npmjs.com/package/pi-gemini-app) 或 Pi Marketplace 安裝獨立零依賴擴充套件，無須額外執行本地 HTTP 閘道或 Docker 容器：
 
 ```sh
 pi install npm:pi-gemini-app
 ```
 
-安裝後於 Pi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址；完成登入後會自動代該帳戶確認接受 Google Gemini 服務條款）及 `/gemini-quota`。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
+安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址；完成登入後會自動代該帳戶確認接受 Google Gemini 服務條款）及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-argon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
 </details>
 
@@ -273,6 +283,7 @@ pi install npm:pi-gemini-app
 
 | 文件 | 說明 |
 |---|---|
+| [Pi 擴充套件（`extensions/pi/README.md`）](extensions/pi/README.md) | 適用於 Pi Coding Agent 與 GooeyPi 的獨立 In-Process `pi-gemini-app` 擴充套件（`/login gemini-app`、`/gemini-quota`、免費版 `gemini-auto` 與付費方案自動識別） |
 | [API 支援契約（`docs/API_SUPPORT.md`）](docs/API_SUPPORT.md) | 端點規格、事件順序、結構化輸出、工具驗證、圖片上傳、原生搜尋引用標註與錯誤碼對照 |
 | [維運指南（`docs/OPERATIONS.md`）](docs/OPERATIONS.md) | 私密初始化、`.env` 設定、Docker Compose、遠端 TLS、`launchd` 常駐與排錯 |
 | [帳戶生命週期（`docs/ACCOUNT_LIFECYCLE.md`）](docs/ACCOUNT_LIFECYCLE.md) | Google OAuth 登入、明確條款同意、唯讀訂閱層級與官方配額讀取語義 |

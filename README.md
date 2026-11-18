@@ -4,15 +4,16 @@
 
 **Your coding agents. Your Gemini subscriptions. One zero-dependency native HTTP/2 gateway.**
 
-Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents, and SDKs through a self-hosted Node.js gateway—featuring incremental SSE, caller-owned tool validation, multi-account failover, and a bilingual operations console.
+Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents, and SDKs through a self-hosted Node.js gateway—featuring incremental SSE, caller-owned tool validation, multi-account failover, and a bilingual operations console—or run the standalone in-process [pi-gemini-app](#pi-extension) extension directly inside Pi Coding Agent and GooeyPi.
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
+[![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
 ![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0A84FF)
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Connect Your Client](#connect-your-client) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
+**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Pi Extension](#pi-extension) · [Connect Your Client](#connect-your-client) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
 
 </div>
 
@@ -33,7 +34,7 @@ Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents,
 
 Ever noticed how Gemini can feel constrained inside the consumer Gemini App—losing thread context or struggling to drive multi-step local engineering workflows? **The bottleneck is rarely the base model; it is the consumer chat harness wrapped around it.**
 
-- **Free the model into real engineering harnesses:** Connect **Cursor, Cline, Roo Code, OpenAI Codex CLI, Pi Coding Agent, PI-Desktop, Cherry Studio, or Open WebUI** via standard `/v1/chat/completions` and `/v1/responses` endpoints—or install the native in-process Pi extension (`pi install npm:pi-gemini-app`) with zero gateway server required.
+- **Free the model into real engineering harnesses:** Connect **Cursor, Cline, Roo Code, OpenAI Codex CLI, Pi Coding Agent, GooeyPi, PI-Desktop, Cherry Studio, or Open WebUI** via standard `/v1/chat/completions` and `/v1/responses` endpoints—or install the standalone native in-process Pi extension (`pi install npm:pi-gemini-app`) for Pi Coding Agent & GooeyPi with zero gateway server required.
 - **Native HTTP/2 protocol—not brittle web scraping:** Communicates directly with Gemini's Robin HTTP/2 service using pure Node.js built-ins (`node:http2`, `node:crypto`), without headless browsers, cookie scraping, or patching local desktop binaries.
 - **Multi-account pooling for rolling usage windows:** Intensive agentic coding can hit a single account's 5-hour or weekly window quickly. Pool multiple accounts you legitimately own with soft session affinity, read-only official usage bars, and configurable quota failover.
 - **Built to protect agent loops:** Prevents coding agents from discarding 3,000+ bytes of streamed code or infinitely re-sending full conversation histories when upstream streams reset mid-turn (see [Completion Contract](docs/COMPLETION_CONTRACT.md)).
@@ -66,6 +67,15 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 
 <a id="quick-start"></a>
 ## Quick Start
+
+<a id="pi-extension"></a>
+> [!TIP]
+> **Using Pi Coding Agent or GooeyPi? No gateway server required.**
+> Install the standalone zero-dependency native HTTP/2 extension directly from [npm (`pi-gemini-app`)](https://www.npmjs.com/package/pi-gemini-app) or Pi Marketplace—zero local HTTP proxy or Docker container needed:
+> ```sh
+> pi install npm:pi-gemini-app
+> ```
+> Run `/login gemini-app` and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto`. Full guide: [`extensions/pi/README.md`](extensions/pi/README.md).
 
 ### 1. Prerequisites
 
@@ -196,15 +206,15 @@ wire_api = "responses"
 </details>
 
 <details>
-<summary><strong>Pi Coding Agent (Native In-Process Extension — No Gateway Server Required)</strong></summary>
+<summary><strong>Pi Coding Agent / GooeyPi (Native In-Process Extension — No Gateway Server Required)</strong></summary>
 
-If you use [`@earendil-works/pi-coding-agent`](https://pi.dev), install the standalone zero-dependency provider package directly from npm or Pi Marketplace—no local HTTP proxy or Docker container needed:
+If you use [`@earendil-works/pi-coding-agent`](https://pi.dev) (`pi`) or **GooeyPi**, install the standalone zero-dependency provider package directly from [npm (`pi-gemini-app`)](https://www.npmjs.com/package/pi-gemini-app) or Pi Marketplace—no local HTTP proxy or Docker container needed:
 
 ```sh
 pi install npm:pi-gemini-app
 ```
 
-Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste; completing login automatically submits acceptance of Google Gemini Terms of Service for that account) and `/gemini-quota` inside Pi. See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
+Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste; completing login automatically submits acceptance of Google Gemini Terms of Service for that account) and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-argon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto`. See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
 
 </details>
 
@@ -273,6 +283,7 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 
 | Document | Contents |
 |---|---|
+| [Pi Extension (`extensions/pi/README.md`)](extensions/pi/README.md) | Standalone in-process `pi-gemini-app` provider for Pi Coding Agent & GooeyPi (`/login gemini-app`, `/gemini-quota`, Free `gemini-auto` & paid tiers) |
 | [API Support & Contract (`docs/API_SUPPORT.md`)](docs/API_SUPPORT.md) | Endpoints, request/event schemas, structured outputs, tools, images, native search citations, and error codes |
 | [Operations Guide (`docs/OPERATIONS.md`)](docs/OPERATIONS.md) | Setup, `.env` config, Docker Compose, reverse-proxy TLS, `launchd` supervision, and troubleshooting |
 | [Account Lifecycle (`docs/ACCOUNT_LIFECYCLE.md`)](docs/ACCOUNT_LIFECYCLE.md) | Google OAuth sign-in, explicit Gemini ToS consent, subscription snapshots, and quota semantics |

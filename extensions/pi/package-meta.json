@@ -6,9 +6,11 @@
     "pi-package",
     "pi-extension",
     "pi-coding-agent",
+    "gooeypi",
     "gemini",
     "gemini-argon",
     "gemini-hydrogen",
+    "gemini-auto",
     "provider",
     "oauth"
   ],

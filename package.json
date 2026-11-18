@@ -1,7 +1,7 @@
 {
   "name": "gemini-app2api",
   "version": "1.4.0",
-  "description": "Independent Gemini HTTP2 gateway with an explicit prompt-tool protocol, scoped OpenAI compatibility, secure multi-account routing and operations console.",
+  "description": "Zero-dependency native Gemini HTTP/2 gateway & in-process Pi extension (pi-gemini-app) with OpenAI compatibility, caller-validated tools, multi-account pooling, and operations console.",
   "private": true,
   "repository": {
     "type": "git",
@@ -100,8 +100,14 @@
   "keywords": [
     "gemini",
     "argon",
+    "hydrogen",
+    "http2",
     "openai-api",
     "gateway",
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "gooeypi",
     "cursor",
     "roo-code",
     "cline",
