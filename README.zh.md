@@ -98,6 +98,21 @@ export GATEWAY_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
+亦可直接拉取預建的多架構官方映像檔（支援 `linux/amd64` / `linux/arm64`，隨正式版 Tag 自動發佈至 GHCR，免 `git clone`）：
+
+```sh
+read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
+docker run -d --name gemini-app2api --init --restart unless-stopped \
+  -p 127.0.0.1:18989:18989 -p 127.0.0.1:18765:18765 \
+  -v gemini-gateway-state:/data \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  -e GATEWAY_HOST=0.0.0.0 -e GATEWAY_CALLBACK_HOST=0.0.0.0 -e GATEWAY_ALLOW_REMOTE=1 \
+  -e GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:18989 \
+  -e GATEWAY_ADMIN_PASSWORD \
+  ghcr.io/shawtim/gemini-app2api:latest
+```
+
 > `compose.yaml` 預設僅喺本機 IPv4 loopback 發佈閘道與 OAuth 連接埠（`127.0.0.1:18989:18989`、`127.0.0.1:18765:18765`），並喺容器橋接介面上強制要求 `GATEWAY_ADMIN_PASSWORD`。共用同一個 Docker Compose 網路嘅其他容器可直接透過內部通訊埠呼叫 `http://gateway:18989/v1`（或自訂 `http://<service-name>:18989/v1`）並附上 Bearer API key；喺支援路由至主機 loopback 嘅 Docker Desktop 上，獨立容器亦可連線 `http://host.docker.internal:<published-port>/v1`。`/admin/` 嘅 `Host`/`Origin` 白名單（針對 `GATEWAY_PUBLIC_ORIGIN`，且當其為 `http://` loopback 時同時允許 `localhost` / `[::1]`）係用嚟防止瀏覽器 DNS rebinding 同 CSRF 攻擊，並唔替代本機連接埠綁定、密碼驗證或網路隔離原則。如改用獨立 `docker run`、自訂連接埠或 SSH port forwarding，請參閱 [Docker Compose 部署指南](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈)（預設以 `uid 1000`、唯讀根目錄及最小權限運行）。
 
 ### 3. 登入 Google 帳戶並建立客戶端金鑰
@@ -189,7 +204,7 @@ wire_api = "responses"
 pi install npm:pi-gemini-app
 ```
 
-安裝後於 Pi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址）及 `/gemini-quota`。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
+安裝後於 Pi 內執行 `/login gemini-app`（同時支援本機瀏覽器自動回調與無頭 SSH 貼上重定向網址；完成登入後會自動代該帳戶確認接受 Google Gemini 服務條款）及 `/gemini-quota`。詳情請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
 </details>
 

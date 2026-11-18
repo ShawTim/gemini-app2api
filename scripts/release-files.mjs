@@ -29,6 +29,7 @@ const fixed = [
   "Dockerfile",
   "compose.yaml",
   ".github/workflows/ci.yml",
+  ".github/workflows/docker-publish.yml",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
   "bin/gemini-gateway",

@@ -34,7 +34,7 @@ function formatFriendlyError(error, isAborted) {
     error?.code === 'PROMPT_TOO_LARGE' ||
     error?.code === 'REQUEST_TOO_LARGE'
   ) {
-    return 'Prompt exceeds maximum supported context size.';
+    return '413 request_too_large: Prompt exceeds the context window.';
   }
   if (
     error?.status === 401 ||

@@ -155,6 +155,10 @@ docker compose stop
 unset GATEWAY_ADMIN_PASSWORD
 ```
 
+Or pull the pre-built multi-arch GHCR image (`ghcr.io/shawtim/gemini-app2api:latest`, published for `linux/amd64` and `linux/arm64` on release tags) instead of `docker compose build`—simply set `image: ghcr.io/shawtim/gemini-app2api:latest` or pass `--read-only --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:18989:18989 -p 127.0.0.1:18765:18765` to `docker run`.
+
+亦可直接拉取預建多架構 GHCR 映像檔（`ghcr.io/shawtim/gemini-app2api:latest`，隨 Release Tag 發佈 `linux/amd64` 與 `linux/arm64`）取代 `docker compose build`，並維持相同的唯讀根目錄、`--cap-drop ALL` 與僅綁定 `127.0.0.1` 防護。
+
 To publish on a custom host port, set `GATEWAY_PUBLISHED_PORT` in your untracked `.env`:
 
 ```dotenv

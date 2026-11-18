@@ -98,6 +98,21 @@ export GATEWAY_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
+Or run the pre-built multi-arch image (`linux/amd64` / `linux/arm64`, published on tagged releases) directly without cloning the repo:
+
+```sh
+read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
+docker run -d --name gemini-app2api --init --restart unless-stopped \
+  -p 127.0.0.1:18989:18989 -p 127.0.0.1:18765:18765 \
+  -v gemini-gateway-state:/data \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  -e GATEWAY_HOST=0.0.0.0 -e GATEWAY_CALLBACK_HOST=0.0.0.0 -e GATEWAY_ALLOW_REMOTE=1 \
+  -e GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:18989 \
+  -e GATEWAY_ADMIN_PASSWORD \
+  ghcr.io/shawtim/gemini-app2api:latest
+```
+
 > `compose.yaml` publishes gateway and OAuth ports on IPv4 host loopback (`127.0.0.1:18989:18989`, `127.0.0.1:18765:18765`) and requires `GATEWAY_ADMIN_PASSWORD` on the container bridge listener. Containers sharing the same Docker Compose network can call Bearer-authenticated `http://gateway:18989/v1` (or `http://<service-name>:18989/v1` on internal port `18989`), and separate containers on Docker Desktop backends that route host loopback can use `http://host.docker.internal:<published-port>/v1`. `/admin/` `Host`/`Origin` checks protect browsers against DNS rebinding and CSRF via `GATEWAY_PUBLIC_ORIGIN` (with `localhost` / `[::1]` aliases when `GATEWAY_PUBLIC_ORIGIN` is an `http://` loopback origin), rather than replacing host-loopback publishing or container network policies. For standalone `docker run`, custom ports, or headless SSH port forwarding, review the [Docker Compose & loopback publishing guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) (runs as `uid 1000` with read-only rootfs and dropped capabilities).
 
 ### 3. Sign In and Create a Client Key
@@ -189,7 +204,7 @@ If you use [`@earendil-works/pi-coding-agent`](https://pi.dev), install the stan
 pi install npm:pi-gemini-app
 ```
 
-Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste) and `/gemini-quota` inside Pi. See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
+Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste; completing login automatically submits acceptance of Google Gemini Terms of Service for that account) and `/gemini-quota` inside Pi. See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
 
 </details>
 

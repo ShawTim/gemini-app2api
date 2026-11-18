@@ -1249,6 +1249,17 @@ test('formatFriendlyError surfaces ProtocolError codes and /login hint on auth e
   assert.equal(protoRes.stopReason, 'error');
   assert.match(protoRes.errorMessage, /\[INVALID_TOOL_CALL\]/);
   assert.match(protoRes.errorMessage, /param: tools/);
+
+  for (const overflowCode of ['PROMPT_TOO_LARGE', 'REQUEST_TOO_LARGE']) {
+    const overflowRes = await makeHandler(protocolError(overflowCode, 413))
+      .streamSimple(model, context, { apiKey: 'valid-token' })
+      .result();
+    assert.equal(overflowRes.stopReason, 'error');
+    assert.equal(overflowRes.errorMessage, '413 request_too_large: Prompt exceeds the context window.');
+    assert.match(overflowRes.errorMessage, /^413\b/);
+    assert.match(overflowRes.errorMessage, /request_too_large/i);
+    assert.match(overflowRes.errorMessage, /exceeds the context window/i);
+  }
 });
 
 test('transcript sanitizes lone UTF-16 surrogates in user/tool messages so normalizeChatRequest succeeds', async () => {

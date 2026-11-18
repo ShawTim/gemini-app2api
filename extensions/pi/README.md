@@ -49,6 +49,8 @@ Run inside Pi:
 /login gemini-app
 ```
 
+> **Terms of Service Notice**: Completing `/login gemini-app` exchanges a scoped Gemini credential and **automatically submits acceptance of the Google Gemini Terms of Service** on behalf of the signed-in Google account so native HTTP/2 turns work immediately without an extra prompt (transient `TOS_*` check errors are deferred non-fatally). Sign in only with an eligible account whose Terms of Service you intend to accept.
+
 The login flow supports both local desktop and headless SSH environments simultaneously:
 
 1. **Desktop / Local Browser**: Opens (or prints) the Google OAuth consent URL and listens on a random ephemeral loopback port (`127.0.0.1:0`). Completing sign-in in the browser finishes automatically.
@@ -70,6 +72,8 @@ Optional environment overrides if using your own OAuth desktop client:
 > **Quota Tip**: `gemini-hydrogen` consumes significantly less rolling window quota than `gemini-argon` and responds faster, making it ideal for multi-step coding and tool-calling loops. Reserve `gemini-argon` for complex architecture or deep reasoning tasks.
 >
 > **Usage Accounting**: Token counters reported in Pi are local character-based estimates over message text (`~3.5` chars/token, excluding image payloads and tool schemas) rather than official Google token counts.
+>
+> **Auto-Compaction**: The configured `contextWindow` (`128,000` for Argon/Flash Lite; `512,000` for Hydrogen) works automatically with Pi's proactive compaction (`contextWindow - reserveTokens`) and `413` context-overflow recovery compaction (or manual `/compact`).
 
 ## Commands
 
@@ -80,3 +84,4 @@ Optional environment overrides if using your own OAuth desktop client:
 - **Zero runtime dependencies**: Ships only pure ESM modules using built-in Node.js APIs; `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` are provided by the Pi host via `peerDependencies`.
 - **No shell or daemon spawning**: Contains zero `child_process` invocations and never starts background services.
 - **Host-managed credentials**: OAuth refresh and scoped access tokens live exclusively in Pi's `CredentialStore` (`auth.json`).
+- **Automatic Terms of Service submission**: Completing `/login gemini-app` automatically submits Google Gemini Terms of Service acceptance for that signed-in account.
