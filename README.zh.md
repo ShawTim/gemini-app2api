@@ -4,10 +4,11 @@
 
 **你的開發工具、你的 Gemini 訂閱帳戶、一個零依賴的原生 HTTP/2 獨立閘道。**
 
-透過自行部署的純 Node.js 閘道，將你名下合資格的 Gemini 帳戶直接接上 OpenAI 相容 IDE、CLI Agent 與官方 SDK（支援增量 SSE 串流、客戶端工具驗證、多帳戶容錯移轉與雙語維運後台）—— 或直接於 Pi Coding Agent 與 GooeyPi 內安裝獨立 In-Process 擴充套件 [pi-gemini-app](#pi-extension)，免啟動閘道伺服器。
+透過自行部署的純 Node.js 閘道，將你名下合資格的 Gemini 帳戶直接接上 OpenAI 相容 IDE、CLI Agent 與官方 SDK（支援增量 SSE 串流、客戶端工具驗證、多帳戶容錯移轉與雙語維運後台）—— 或直接安裝零依賴獨立 In-Process 原生插件（適用於 Pi / GooeyPi 的 [`pi-gemini-app`](#pi-extension) 及適用於 OpenClaw 的 [`openclaw-gemini-app`](#openclaw-plugin)），免啟動閘道伺服器。
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
 [![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
+[![openclaw-gemini-app on npm](https://img.shields.io/npm/v/openclaw-gemini-app?logo=npm&label=openclaw-gemini-app)](https://www.npmjs.com/package/openclaw-gemini-app)
 ![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0A84FF)
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
@@ -86,7 +87,7 @@
 
 > [!TIP]
 > **使用 OpenClaw？同樣無須啟動獨立閘道伺服器。**
-> 直接安裝零依賴獨立 Provider 插件 **`openclaw-gemini-app`**（`extensions/openclaw/`），完整共用原生 HTTP/2 傳輸、`HTTPS_PROXY` 支援、15s `PING` 保活、本機與遠端 VPS OAuth 登入，以及 `/usage` 與 `/gemini-quota` 配額整合：
+> 直接從 [npm（`openclaw-gemini-app`）](https://www.npmjs.com/package/openclaw-gemini-app) 安裝零依賴獨立 Provider 插件（`extensions/openclaw/`），完整共用原生 HTTP/2 傳輸、`HTTPS_PROXY` 支援、15s `PING` 保活、本機與遠端 VPS OAuth 登入，以及 `/usage` 與 `/gemini-quota` 配額整合：
 > ```sh
 > openclaw plugins install npm:openclaw-gemini-app
 > ```

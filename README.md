@@ -4,10 +4,11 @@
 
 **Your coding agents. Your Gemini subscriptions. One zero-dependency native HTTP/2 gateway.**
 
-Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents, and SDKs through a self-hosted Node.js gateway—featuring incremental SSE, caller-owned tool validation, multi-account failover, and a bilingual operations console—or run the standalone in-process [pi-gemini-app](#pi-extension) extension directly inside Pi Coding Agent and GooeyPi.
+Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents, and SDKs through a self-hosted Node.js gateway—featuring incremental SSE, caller-owned tool validation, multi-account failover, and a bilingual operations console—or run our standalone zero-dependency in-process extensions ([`pi-gemini-app`](#pi-extension) for Pi / GooeyPi and [`openclaw-gemini-app`](#openclaw-plugin) for OpenClaw) with no gateway server required.
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
 [![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
+[![openclaw-gemini-app on npm](https://img.shields.io/npm/v/openclaw-gemini-app?logo=npm&label=openclaw-gemini-app)](https://www.npmjs.com/package/openclaw-gemini-app)
 ![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0A84FF)
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
@@ -86,7 +87,7 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 
 > [!TIP]
 > **Using OpenClaw? No gateway server required.**
-> Install the standalone zero-dependency **`openclaw-gemini-app`** provider plugin (`extensions/openclaw/`), sharing the same direct HTTP/2 transport, `HTTPS_PROXY` support, 15s `PING` keepalives, OAuth login (local browser & remote VPS), and `/usage` + `/gemini-quota` integration:
+> Install the standalone zero-dependency [npm (`openclaw-gemini-app`)](https://www.npmjs.com/package/openclaw-gemini-app) provider plugin (`extensions/openclaw/`), sharing the same direct HTTP/2 transport, `HTTPS_PROXY` support, 15s `PING` keepalives, OAuth login (local browser & remote VPS), and `/usage` + `/gemini-quota` integration:
 > ```sh
 > openclaw plugins install npm:openclaw-gemini-app
 > ```
