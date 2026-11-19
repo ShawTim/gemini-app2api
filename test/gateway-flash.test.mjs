@@ -57,7 +57,7 @@ test('all four Hydrogen HTTP formats forward FAST and preserve requested/resolve
   const models = await (await f.api('/v1/models')).json();
   assert.ok(models.data.some(m => m.id === HYDROGEN));
   assert.equal(models.data.some(m => m.id === 'gemini-flash'), false);
-  assert.equal(models.data.find(m => m.id === 'gemini-neon').context_window, 128000); // advisory client budget
+  assert.equal(models.data.find(m => m.id === 'gemini-neon').context_window, 512000); // advisory client budget
   assert.equal(models.data.find(m => m.id === HYDROGEN).context_window, 512000); // advisory client budget
   assert.ok(models.data.filter(m => !['gemini-neon', HYDROGEN].includes(m.id)).every(m => !Object.hasOwn(m, 'context_window')));
   const before = (await (await f.admin('accounts')).json()).accounts[0];

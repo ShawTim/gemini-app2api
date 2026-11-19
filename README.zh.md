@@ -235,11 +235,11 @@ pi install npm:pi-gemini-app
 
 | 模型別名 | 定位與用途 | Native Mode | 公布的 Context Metadata |
 |---|---|---:|---|
-| **`gemini-neon`** | **Gemini 4 Neon** 旗艦 Pro 級推理與程式開發模式（嚴格驗證上游 Neon 模型歸屬；`gemini-argon` 暫時自動 alias 至此） | `PRO`（`3`） | `context_window: 128000`（客戶端建議預算） |
+| **`gemini-neon`** | **Gemini 4 Neon** 旗艦 Pro 級推理與程式開發模式（嚴格驗證上游 Neon 模型歸屬；`gemini-argon` 暫時自動 alias 至此） | `PRO`（`3`） | `context_window: 512000`（客戶端建議預算） |
 | **`gemini-hydrogen`** | **Gemini 4 Hydrogen** 低延遲日常推理與快速互動任務（嚴格驗證上游 Hydrogen 模型歸屬） | `FAST`（`1`） | `context_window: 512000`（客戶端建議預算） |
 | **`gemini-flash-lite`** | 高吞吐、輕量級快速回應任務 | `6` | 未公布 |
 
-> 模型別名對應 Gemini App 原生執行模式，並非 Google Cloud Vertex / AI Studio 的固定版本代號；實際可用性取決於各登入帳戶的上游方案權限。為方便舊有設定平滑過渡，原已落架的 `gemini-argon`（原 mode `8`）目前仍暫時支援並自動轉送至 `gemini-neon`（`PRO` mode `3`）。`context_window: 128000`（`gemini-neon`）與 `context_window: 512000`（`gemini-hydrogen`）為根據單輪長上下文召回率、prefill 延遲及閘道 `4 MiB` 請求上限實測訂立之客戶端建議預算，並非閘道強制截斷上限或 Google 官方 SLA 保證容量。
+> 模型別名對應 Gemini App 原生執行模式，並非 Google Cloud Vertex / AI Studio 的固定版本代號；實際可用性取決於各登入帳戶的上游方案權限。為方便舊有設定平滑過渡，原已落架的 `gemini-argon`（原 mode `8`）目前仍暫時支援並自動轉送至 `gemini-neon`（`PRO` mode `3`）。`gemini-neon` 與 `gemini-hydrogen` 公布的 `context_window: 512000` 為根據單輪長上下文召回率、上游靜默截斷安全緩衝、prefill 延遲及閘道 `4 MiB` 請求上限實測訂立之客戶端建議預算，並非閘道強制截斷上限或 Google 官方 SLA 保證容量。
 
 <a id="quota-consumption"></a>
 ### 配額消耗提醒：gemini-argon vs gemini-hydrogen

@@ -1044,12 +1044,12 @@ function poolPulseGrid() {
     el('article', { class: 'pulse-card' },
       el('div', { class: 'pulse-head' }, el('span', {}, L('QUOTA EFFICIENCY', '配額效率策略')), badge(versionTag())),
       el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value mono', style: 'font-size:15px' }, 'gemini-hydrogen'), el('span', { class: 'pulse-sub pulse-accent' }, L('~60× turns vs Pro tier', '約 60× 對話輪數'))),
-      el('div', { class: 'pulse-sub' }, L('512k context · Neon 128k reserved for Plan', '512k 上下文 · Neon 128k 留作架構規劃'))));
+      el('div', { class: 'pulse-sub' }, L('512k context · Neon 512k reserved for Plan', '512k 上下文 · Neon 512k 留作架構規劃'))));
 }
 function presetSnippetText(preset = S.preset) {
   const base = gatewayBaseUrl();
   if (preset === 'cline') {
-    return `// Plan / Architect: gemini-neon (128k Pro reasoning; gemini-argon aliases here)\n// Act / Code:       gemini-hydrogen (512k · ~60x turns)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-hydrogen"\n}`;
+    return `// Plan / Architect: gemini-neon (512k Pro reasoning; gemini-argon aliases here)\n// Act / Code:       gemini-hydrogen (512k · ~60x turns)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-hydrogen"\n}`;
   }
   if (preset === 'curl') {
     return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gemini-hydrogen","messages":[{"role":"user","content":"Hi"}]}'`;

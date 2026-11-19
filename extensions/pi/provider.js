@@ -33,7 +33,7 @@ export const MODELS = Object.freeze([
     provider: PROVIDER_ID,
     baseUrl: BASE_URL,
     type: 'chat',
-    contextWindow: 128000,
+    contextWindow: 512000,
     maxTokens: 16384,
     input: ['text', 'image'],
     reasoning: true,

@@ -14,7 +14,7 @@ Unsupported OpenAI endpoints (image generation/editing, file uploads, audio, Rea
 
 ### Model context metadata
 
-`GET /v1/models` publishes `context_window: 128000` for `gemini-neon` and `context_window: 512000` for `gemini-hydrogen`. Both values are empirical advisory client context budgets calibrated to single-turn recall, prefill latency, and the gateway's `4 MiB` request ceiling—not enforced input-token ceilings, billing figures, or official Google SLA limits. Compatible coding agents can discover this field for local context management while allowing explicit user model overrides to take priority. `gemini-flash-lite` omits `context_window`; callers must not assume a budget for it.
+`GET /v1/models` publishes `context_window: 512000` for both `gemini-neon` and `gemini-hydrogen`. Both values are empirical advisory client context budgets calibrated with safety margin below upstream silent tail truncation, prefill latency, and the gateway's `4 MiB` request ceiling—not enforced input-token ceilings, billing figures, or official Google SLA limits. Compatible coding agents can discover this field for local context management while allowing explicit user model overrides to take priority. `gemini-flash-lite` omits `context_window`; callers must not assume a budget for it.
 
 ## Support depth at a glance
 

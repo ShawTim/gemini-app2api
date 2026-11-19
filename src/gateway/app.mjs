@@ -970,7 +970,7 @@ export function createGateway({
         if (url.search) throw fault("UNSUPPORTED_QUERY_PARAMETER");
         if (p === "/v1/models" && req.method === "GET") {
           const contextWindows = {
-            "gemini-neon": 128000,
+            "gemini-neon": 512000,
             "gemini-hydrogen": 512000,
           };
           return json(res, {

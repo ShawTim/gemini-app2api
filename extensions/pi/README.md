@@ -65,7 +65,7 @@ Optional environment overrides if using your own OAuth desktop client:
 
 | Model ID | Display Name | Context Window | Max Output | Capabilities |
 | :--- | :--- | ---: | ---: | :--- |
-| `gemini-neon` | Gemini Neon | 128,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`); `gemini-argon` temporarily aliases here |
+| `gemini-neon` | Gemini Neon | 512,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`); `gemini-argon` temporarily aliases here |
 | `gemini-hydrogen` | Gemini Hydrogen | 512,000 | 16,384 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
 | `gemini-flash-lite` | Gemini Flash Lite | 128,000 | 8,192 | Text, static images (PNG/JPEG/WebP), tools, thinking (`minimal`–`xhigh`) |
 | `gemini-auto` | Gemini Auto | 128,000 | 8,192 | Smart Model Selection for Free & paid Google accounts (text, static images, tools) |
@@ -76,7 +76,7 @@ Optional environment overrides if using your own OAuth desktop client:
 >
 > **Usage Accounting**: Token counters reported in Pi are local character-based estimates over message text (`~3.5` chars/token, excluding image payloads and tool schemas) rather than official Google token counts.
 >
-> **Auto-Compaction**: The configured `contextWindow` (`128,000` for Neon/Flash Lite/Auto; `512,000` for Hydrogen) works automatically with Pi's proactive compaction (`contextWindow - reserveTokens`) and `413` context-overflow recovery compaction (or manual `/compact`).
+> **Auto-Compaction**: The configured `contextWindow` (`512,000` for Neon/Hydrogen; `128,000` for Flash Lite/Auto) works automatically with Pi's proactive compaction (`contextWindow - reserveTokens`) and `413` context-overflow recovery compaction (or manual `/compact`).
 
 ## Commands
 

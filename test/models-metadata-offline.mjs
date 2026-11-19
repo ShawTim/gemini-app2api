@@ -24,7 +24,7 @@ try {
   const denied = await get('', false); assert.equal(denied.status, 401); await denied.arrayBuffer();
   const res = await get(); assert.equal(res.status, 200);
   const body = await res.json(); assert.equal(body.object, 'list'); assert.deepEqual(body.data.map(m => m.id), [...NATIVE_MODELS]);
-  const contextWindows = { 'gemini-neon': 128000, 'gemini-hydrogen': 512000 };
+  const contextWindows = { 'gemini-neon': 512000, 'gemini-hydrogen': 512000 };
   for (const item of body.data) assert.deepEqual(item, { id: item.id, object: 'model', created: 0, owned_by: 'google',
     ...(Object.hasOwn(contextWindows, item.id) ? { context_window: contextWindows[item.id] } : {}) });
   const repeat = await get(); assert.equal(repeat.status, 200); assert.deepEqual(await repeat.json(), body);
@@ -34,5 +34,5 @@ try {
   const after = JSON.parse(JSON.stringify(store.data));
   after.keys[0].lastUsedAt = null;
   assert.deepEqual(after, JSON.parse(before), 'only normal lastUsedAt accounting may change');
-  console.log('PASS: authenticated context_window (neon=128000, hydrogen=512000), flash-lite unchanged, auth/query checks, repeat stable, zero upstream, settings/accounts preserved');
+  console.log('PASS: authenticated context_window (neon=512000, hydrogen=512000), flash-lite unchanged, auth/query checks, repeat stable, zero upstream, settings/accounts preserved');
 } finally { app.server.closeAllConnections?.(); await app.close(); fs.rmSync(directory, { recursive: true, force: true }); }
