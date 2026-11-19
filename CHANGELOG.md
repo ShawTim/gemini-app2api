@@ -2,6 +2,14 @@
 
 Release notes for Gemini App2API.
 
+## 1.5.2 — 2026-11-19
+
+### Raised tool declaration limits (`256` tools / `512 KiB` / `16,384` nodes), `TOOL_SIZE_LIMIT` `error.param` diagnostics & `pi-gemini-app@0.1.5`
+- Raised aggregate caller function-tool declaration limits on Chat Completions (`POST /v1/chat/completions`), Responses (`POST /v1/responses`, including flattened `type: "namespace"` tools), and the shared `pi-gemini-app` runtime from `64` tools / `256 KiB` / `4,096` nodes to **`256` tool declarations**, **`512 KiB`** serialized declaration JSON, and **`16,384`** aggregate JSON nodes, while keeping per-tool parameter schema / single-call argument / structured-output bounds (`256 KiB` / `4,096` nodes), semantic schema depth (`16`), max calls per turn (`32`), and validation work budget (`65,536`) unchanged ([#1](https://github.com/ShawTim/gemini-app2api/issues/1)).
+- Added dimension-specific `error.param` reporting (`tools.count`, `tools.bytes`, `tools.nodes`, `tools.depth`) on declaration-side `400 TOOL_SIZE_LIMIT` responses by propagating `error.param` through `compileToolPolicy` (`src/tool-protocol.mjs`), `compilePromptTools` (`src/prompt-tool-schema.mjs`), and `normalizeResponsesTools` (`src/responses-tool-namespaces.mjs`).
+- Added `pi.image` catalog banner metadata and README hero preview for `pi-gemini-app@0.1.5` (`extensions/pi/package-meta.json`, `extensions/pi/README.md`, `scripts/build-pi-package.mjs`, `scripts/check-pi-package.mjs`).
+- Fixed a flaky macOS `flock(2)` lock-race test in `test/gateway-foundation.test.mjs` where the lock-holding child could exit early before slower racers executed.
+
 ## 1.5.1 — 2026-11-19
 
 ### Gemini Neon 512k context window, live `neon_pro_policy` quota telemetry & README refresh
