@@ -2,9 +2,10 @@
 // Codex 0.148.0 ResponseItem uses function_call { namespace?, name, ... }.
 // Internal aliases never appear on the Responses wire. Symbols cannot be supplied
 // by JSON clients and survive canonical-body/result object spreads, not JSON output.
+import { PROMPT_TOOL_LIMITS } from './prompt-tool-schema.mjs';
 import { plainObject, protocolError } from './tool-protocol.mjs';
 export const RESPONSE_TOOL_IDENTITIES = Symbol('responseToolIdentities');
-const fail = code => { throw protocolError(code, 400); };
+const fail = (code, param = null) => { throw protocolError(code, 400, param); };
 const keys = (value, allowed) => {
   if (!plainObject(value)) fail('INVALID_TOOL_DECLARATION');
   if (Object.keys(value).some(key => !allowed.includes(key))) fail('UNSUPPORTED_PARAMETER');
@@ -17,14 +18,15 @@ const name = value => {
 export function normalizeResponsesTools(payload) {
   const source = payload.tools === undefined ? [] : payload.tools;
   if (!Array.isArray(source)) fail('INVALID_TOOL_DECLARATION');
-  if (source.length > 64 || Buffer.byteLength(JSON.stringify(source)) > 256 * 1024) fail('TOOL_SIZE_LIMIT');
+  if (source.length > PROMPT_TOOL_LIMITS.tools) fail('TOOL_SIZE_LIMIT', 'tools.count');
+  if (Buffer.byteLength(JSON.stringify(source)) > PROMPT_TOOL_LIMITS.declarationBytes) fail('TOOL_SIZE_LIMIT', 'tools.bytes');
   const declarations = [], namespaces = new Set(), reserved = new Set(), identities = new Map(), aliases = new Map();
   const add = (tool, namespace, description) => {
     keys(tool, ['type', 'name', 'description', 'parameters', 'strict']);
     if (tool.type !== 'function') fail('UNSUPPORTED_TOOL_TYPE');
     name(tool.name);
     if (tool.description !== undefined && typeof tool.description !== 'string') fail('INVALID_TOOL_DECLARATION');
-    if (declarations.length >= 64) fail('TOOL_SIZE_LIMIT');
+    if (declarations.length >= PROMPT_TOOL_LIMITS.tools) fail('TOOL_SIZE_LIMIT', 'tools.count');
     declarations.push({ tool, namespace, description });
     if (namespace === undefined) reserved.add(tool.name);
   };

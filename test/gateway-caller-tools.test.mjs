@@ -298,3 +298,82 @@ test("acceptance decoder rejects qualified partial completion rather than treati
   }
   assert.throws(() => decodeCallerResponse(JSON.stringify({ ...message, incomplete: true })), { code: 'CALLER_RESPONSE_INCOMPLETE' });
 });
+
+test("HTTP Chat and Responses accept 154 tools and report error.param on TOOL_SIZE_LIMIT", async (t) => {
+  const f = await fixture({
+    allowFailover: false,
+    turns: ["ok-chat", "ok-responses"],
+  });
+  t.after(f.close);
+  const headers = {
+    authorization: `Bearer ${f.key.key}`,
+    "content-type": "application/json",
+  };
+  const chatTools = (n) =>
+    Array.from({ length: n }, (_, i) => ({
+      type: "function",
+      function: {
+        name: `tool_${i}`,
+        description: `Tool ${i}`,
+        parameters: { type: "object", properties: { q: { type: "string" } } },
+      },
+    }));
+  const responsesTools = (n) =>
+    Array.from({ length: n }, (_, i) => ({
+      type: "function",
+      name: `tool_${i}`,
+      description: `Tool ${i}`,
+      parameters: { type: "object", properties: { q: { type: "string" } } },
+    }));
+
+  // 154 tools accepted on both Chat Completions and Responses
+  const okChat = await fetch(`${f.base}/v1/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: "gemini-neon",
+      messages: [{ role: "user", content: "hi" }],
+      tools: chatTools(154),
+    }),
+  });
+  assert.equal(okChat.status, 200);
+  const okResp = await fetch(`${f.base}/v1/responses`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: "gemini-neon",
+      input: "hi",
+      tools: responsesTools(154),
+    }),
+  });
+  assert.equal(okResp.status, 200);
+
+  // 257 tools rejected with 400 TOOL_SIZE_LIMIT + error.param = 'tools.count'
+  const badChat = await fetch(`${f.base}/v1/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: "gemini-neon",
+      messages: [{ role: "user", content: "hi" }],
+      tools: chatTools(257),
+    }),
+  });
+  assert.equal(badChat.status, 400);
+  const badChatJson = await badChat.json();
+  assert.equal(badChatJson.error.code, "TOOL_SIZE_LIMIT");
+  assert.equal(badChatJson.error.param, "tools.count");
+
+  const badResp = await fetch(`${f.base}/v1/responses`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: "gemini-neon",
+      input: "hi",
+      tools: responsesTools(257),
+    }),
+  });
+  assert.equal(badResp.status, 400);
+  const badRespJson = await badResp.json();
+  assert.equal(badRespJson.error.code, "TOOL_SIZE_LIMIT");
+  assert.equal(badRespJson.error.param, "tools.count");
+});

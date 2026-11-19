@@ -1,14 +1,37 @@
-const LIMITS = { bytes: 256 * 1024, depth: 16, nodes: 4096, tools: 64, work: 65536 };
+export const PROMPT_TOOL_LIMITS = Object.freeze({
+  bytes: 256 * 1024,
+  declarationBytes: 512 * 1024,
+  depth: 16,
+  nodes: 4096,
+  declarationNodes: 16384,
+  tools: 256,
+  work: 65536,
+});
+const LIMITS = PROMPT_TOOL_LIMITS;
 
-function error(code, message = code, status = 400) {
-  const e = new Error(message); e.code = code; e.status = status; return e;
+function error(code, message = code, status = 400, param = null) {
+  const e = new Error(message); e.code = code; e.status = status;
+  if (param !== null) e.param = param;
+  return e;
 }
 const declaration = (message) => error('INVALID_TOOL_DECLARATION', message);
 const badSchema = (message) => error('UNSUPPORTED_TOOL_SCHEMA', message);
 
-function jsonTree(value, state, depth = 0, seen = new Set(), maxDepth = LIMITS.depth) {
-  if (++state.nodes > LIMITS.nodes || depth > maxDepth) throw error('TOOL_SIZE_LIMIT');
-  const add = n => { state.bytes = (state.bytes || 0) + n; if (state.bytes > LIMITS.bytes) throw error('TOOL_SIZE_LIMIT'); };
+function jsonTree(
+  value,
+  state,
+  depth = 0,
+  seen = new Set(),
+  maxDepth = LIMITS.depth,
+  limits = { maxNodes: LIMITS.nodes, maxBytes: LIMITS.bytes, paramPrefix: 'tools' },
+) {
+  const { maxNodes = LIMITS.nodes, maxBytes = LIMITS.bytes, paramPrefix = 'tools' } = limits;
+  if (++state.nodes > maxNodes) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, paramPrefix ? `${paramPrefix}.nodes` : null);
+  if (depth > maxDepth) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, paramPrefix ? `${paramPrefix}.depth` : null);
+  const add = n => {
+    state.bytes = (state.bytes || 0) + n;
+    if (state.bytes > maxBytes) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, paramPrefix ? `${paramPrefix}.bytes` : null);
+  };
   if (typeof value === 'string') { if (Buffer.from(value).toString('utf8') !== value) throw error('INVALID_TOOL_STRING'); add(Buffer.byteLength(value)); return; }
   if (value === null || typeof value === 'boolean') { add(4); return; }
   if (typeof value === 'number') { if (!Number.isFinite(value)) throw declaration('Non-finite JSON number'); add(8); return; }
@@ -17,8 +40,8 @@ function jsonTree(value, state, depth = 0, seen = new Set(), maxDepth = LIMITS.d
   if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) throw declaration('Non-plain JSON object');
   seen.add(value);
   if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) { if (!Object.hasOwn(value, i)) throw declaration('Sparse array'); jsonTree(value[i], state, depth + 1, seen, maxDepth); }
-  } else for (const key of Object.keys(value)) { add(Buffer.byteLength(key)); jsonTree(value[key], state, depth + 1, seen, maxDepth); }
+    for (let i = 0; i < value.length; i++) { if (!Object.hasOwn(value, i)) throw declaration('Sparse array'); jsonTree(value[i], state, depth + 1, seen, maxDepth, limits); }
+  } else for (const key of Object.keys(value)) { add(Buffer.byteLength(key)); jsonTree(value[key], state, depth + 1, seen, maxDepth, limits); }
   seen.delete(value);
 }
 function clone(v) { return Array.isArray(v) ? v.map(clone) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clone(x)])) : v; }
@@ -144,7 +167,7 @@ function checkSchema(root, { rejectUnsupportedKeywords = false } = {}) {
   const defs = new Map();
   const walked = new WeakSet();
   function walk(s, depth=0, visited=new Set()) {
-    if (depth > LIMITS.depth) throw error('TOOL_SIZE_LIMIT');
+    if (depth > LIMITS.depth) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, 'tools.depth');
     if (typeof s === 'boolean') return;
     if (!s || typeof s !== 'object' || Array.isArray(s)) throw badSchema('Schema must be an object');
     if (visited.has(s)) throw badSchema('Cyclic schema'); visited.add(s); walked.add(s);
@@ -206,10 +229,17 @@ function checkSchema(root, { rejectUnsupportedKeywords = false } = {}) {
 // constraints above are checked strictly. Arbitrary regex/pattern hints are never executed.
 export function compilePromptTools(tools = []) {
   if (!Array.isArray(tools)) throw declaration('Tools must be an array');
-  if (tools.length > LIMITS.tools) throw error('TOOL_SIZE_LIMIT');
-  const state={nodes:0}; jsonTree(tools,state,0,new Set(),LIMITS.depth * 3 + 4);
+  if (tools.length > LIMITS.tools) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, 'tools.count');
+  const state = { nodes: 0 };
+  jsonTree(tools, state, 0, new Set(), LIMITS.depth * 3 + 4, {
+    maxNodes: LIMITS.declarationNodes,
+    maxBytes: LIMITS.declarationBytes,
+    paramPrefix: 'tools',
+  });
   let text; try { text = JSON.stringify(tools); } catch { throw declaration('Tools are not JSON serializable'); }
-  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > LIMITS.bytes) throw error('TOOL_SIZE_LIMIT');
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > LIMITS.declarationBytes) {
+    throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, 'tools.bytes');
+  }
   const out = new Map();
   for (const tool of tools) {
     if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.type !== 'function') throw error('UNSUPPORTED_TOOL_TYPE');
@@ -222,6 +252,11 @@ export function compilePromptTools(tools = []) {
     if(own(fn,'description')&&typeof fn.description!=='string') throw declaration('Invalid description');
     if(own(fn,'strict')&&typeof fn.strict!=='boolean') throw declaration('Invalid strict hint');
     const parameters=own(fn,'parameters')?fn.parameters:{type:'object'};
+    jsonTree(parameters, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4, {
+      maxNodes: LIMITS.nodes,
+      maxBytes: LIMITS.bytes,
+      paramPrefix: 'tools',
+    });
     checkSchema(parameters);
     out.set(fn.name,{name:fn.name,parameters:clone(parameters)});
   }

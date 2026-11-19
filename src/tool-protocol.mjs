@@ -86,7 +86,7 @@ export function parseBoundedJson(text, { status = 400 } = {}) {
 export function compileToolPolicy(tools = [], choice = 'auto') {
   let registry;
   try { registry = compilePromptTools(tools); }
-  catch (error) { throw protocolError(error.code || 'INVALID_TOOLS', 400); }
+  catch (error) { throw protocolError(error.code || 'INVALID_TOOLS', 400, error.param ?? null); }
   let forced = null;
   if (plainObject(choice)) {
     if (Object.keys(choice).some(k => !['type', 'function'].includes(k)) || choice.type !== 'function' || !plainObject(choice.function) || Object.keys(choice.function).some(k => k !== 'name') || typeof choice.function.name !== 'string') fail('UNSUPPORTED_TOOL_CHOICE');

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { compilePromptTools, validatePromptToolArguments } from '../src/prompt-tool-schema.mjs';
 
 const tool = (name, parameters) => ({type:'function',function:{name,parameters}});
-const rejectsCode = (fn, code) => assert.throws(fn, e => e.code === code);
+const rejectsCode = (fn, code, param) => assert.throws(fn, e => e.code === code && (param === undefined || e.param === param));
 
 test('compiles prompt tools with clones, defaults, names and function hints', () => {
   const schema={type:'object',properties:{title:{type:'string'},format:{type:'string'}},required:['title']};
@@ -57,12 +57,19 @@ test('does not execute regex hints and treats title/format as ordinary property 
 });
 
 test('enforces byte, depth, node, tool and union-work bounds', () => {
-  rejectsCode(()=>compilePromptTools(Array.from({length:65},(_,i)=>tool(`t${i}`,{}))),'TOOL_SIZE_LIMIT');
-  rejectsCode(()=>compilePromptTools([tool('big',{type:'string',description:'x'.repeat(270000)})]),'TOOL_SIZE_LIMIT');
+  // Large real-world tool suites (e.g. 154 MCP/agent tools up to 256) compile cleanly
+  assert.equal(compilePromptTools(Array.from({length:154},(_,i)=>tool(`t${i}`,{type:'object',properties:{arg:{type:'string'}}}))).size,154);
+  assert.equal(compilePromptTools(Array.from({length:256},(_,i)=>tool(`t${i}`,{}))).size,256);
+  rejectsCode(()=>compilePromptTools(Array.from({length:257},(_,i)=>tool(`t${i}`,{}))),'TOOL_SIZE_LIMIT','tools.count');
+  // Per-tool schema stays bounded to 256 KiB / 4096 nodes; aggregate declarations bounded to 512 KiB / 16384 nodes
+  rejectsCode(()=>compilePromptTools([tool('big',{type:'string',description:'x'.repeat(270000)})]),'TOOL_SIZE_LIMIT','tools.bytes');
+  rejectsCode(()=>compilePromptTools(Array.from({length:3},(_,i)=>tool(`b${i}`,{type:'string',description:'x'.repeat(200000)}))),'TOOL_SIZE_LIMIT','tools.bytes');
   let deep={type:'string'}; for(let i=0;i<18;i++) deep={type:'array',items:deep};
-  rejectsCode(()=>compilePromptTools([tool('deep',deep)]),'TOOL_SIZE_LIMIT');
+  rejectsCode(()=>compilePromptTools([tool('deep',deep)]),'TOOL_SIZE_LIMIT','tools.depth');
   const wide={type:'object',properties:Object.fromEntries(Array.from({length:2100},(_,i)=>[`p${i}`,{type:'string'}]))};
-  rejectsCode(()=>compilePromptTools([tool('wide',wide)]),'TOOL_SIZE_LIMIT');
+  rejectsCode(()=>compilePromptTools([tool('wide',wide)]),'TOOL_SIZE_LIMIT','tools.nodes');
+  const medium=()=>({type:'object',properties:Object.fromEntries(Array.from({length:100},(_,i)=>[`p${i}`,{type:'string'}]))});
+  rejectsCode(()=>compilePromptTools(Array.from({length:90},(_,i)=>tool(`m${i}`,medium()))),'TOOL_SIZE_LIMIT','tools.nodes');
   const defs={leaf:{type:'integer'}};
   for(let i=0;i<9;i++)defs['n'+i]={anyOf:Array.from({length:4},()=>({$ref:'#/$defs/'+(i?'n'+(i-1):'leaf')}))};
   rejectsCode(()=>validatePromptToolArguments('wrong',{$defs:defs,$ref:'#/$defs/n8'}), 'TOOL_ARGUMENT_SCHEMA_MISMATCH');

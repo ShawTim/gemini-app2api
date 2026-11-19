@@ -13,7 +13,7 @@ const fn = (name = 'echo') => ({ type: 'function', name, description: 'Synthetic
 const ns = (name, tools = [fn()]) => ({ type: 'namespace', name, description: `Synthetic ${name}`, tools });
 const tools = [fn(), ns('alpha'), ns('beta'), fn('ns_0')];
 const normalize = extra => normalizeResponsesRequest({ input: 'synthetic request', tools, ...extra }).body;
-const reject = (extra, code) => assert.throws(() => normalize(extra), e => e.status === 400 && (!code || e.code === code));
+const reject = (extra, code, param) => assert.throws(() => normalize(extra), e => e.status === 400 && (!code || e.code === code) && (param === undefined || e.param === param));
 const parse = (body, name, args = { value: 'fixture' }) => {
   const splitter = createToolCallSplitter({ policy: compileToolPolicy(body.tools, body.tool_choice) });
   return [...splitter.push('```tool_call\n' + JSON.stringify({ name, arguments: args }) + '\n```\n'), ...splitter.flush()].filter(e => e.type === 'call').map(e => e.call);
@@ -81,8 +81,10 @@ reject({ tools: [ns('alpha', [ns('nested')])] });
 reject({ tools: [ns('alpha', [{ ...fn(), parameters: { type: 'nonsense' } }])] }, 'UNSUPPORTED_TOOL_SCHEMA');
 reject({ tools: [ns('alpha', [{ ...fn(), strict: 'true' }])] }, 'INVALID_TOOL_DECLARATION');
 reject({ tools: [ns('alpha', [{ ...fn(), unexpected: true }])] }, 'UNSUPPORTED_PARAMETER');
-reject({ tools: [ns('alpha', Array.from({ length: 65 }, (_, i) => fn('f' + i)))] }, 'TOOL_SIZE_LIMIT');
-reject({ tools: [{ ...ns('alpha'), description: 'x'.repeat(256 * 1024) }] }, 'TOOL_SIZE_LIMIT');
+assert.equal(normalize({ tools: [ns('alpha', Array.from({ length: 154 }, (_, i) => fn('f' + i)))] }).tools.length, 154);
+assert.equal(normalize({ tools: [ns('alpha', Array.from({ length: 256 }, (_, i) => fn('f' + i)))] }).tools.length, 256);
+reject({ tools: [ns('alpha', Array.from({ length: 257 }, (_, i) => fn('f' + i)))] }, 'TOOL_SIZE_LIMIT', 'tools.count');
+reject({ tools: [{ ...ns('alpha'), description: 'x'.repeat(512 * 1024) }] }, 'TOOL_SIZE_LIMIT', 'tools.bytes');
 reject({ native_search: true }, 'NATIVE_SEARCH_TOOL_CONFLICT');
 for (const choice of ['auto', 'required', 'none']) assert.equal(normalize({ tool_choice: choice }).tool_choice, choice);
 assert.throws(() => parse(normalize({ tool_choice: 'none' }), names[1]), { code: 'TOOL_CALL_NOT_ALLOWED' });
