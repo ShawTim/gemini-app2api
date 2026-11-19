@@ -13,7 +13,7 @@ Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents,
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Pi Extension](#pi-extension) · [Connect Your Client](#connect-your-client) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
+**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Pi Extension](#pi-extension) · [OpenClaw Plugin](#openclaw-plugin) · [Connect Your Client](#connect-your-client) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
 
 </div>
 
@@ -68,9 +68,11 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 <a id="quick-start"></a>
 ## Quick Start
 
-<a id="pi-extension"></a>
+<a id="native-extensions"></a>
 
-![pi-gemini-app — Native Pi Extension for Gemini Neon over Direct HTTP/2](docs/assets/pi-extension.jpg)
+![gemini-app2api — Zero-Dependency Native Extensions for Pi & OpenClaw](docs/assets/extensions-overview.jpg)
+
+<a id="pi-extension"></a>
 
 > [!TIP]
 > **Using Pi Coding Agent or GooeyPi? No gateway server required.**
@@ -82,8 +84,13 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 
 <a id="openclaw-plugin"></a>
 
-> [!NOTE]
-> **Using OpenClaw?** Build or install the standalone zero-dependency **`openclaw-gemini-app`** provider plugin (`extensions/openclaw/`), sharing the same direct HTTP/2 transport, `HTTPS_PROXY` support, 15s `PING` keepalives, OAuth login (local & remote VPS), and `/usage` quota integration (`npm run build:openclaw-package -- --clean --pack`). Full guide: [`extensions/openclaw/README.md`](extensions/openclaw/README.md).
+> [!TIP]
+> **Using OpenClaw? No gateway server required.**
+> Install the standalone zero-dependency **`openclaw-gemini-app`** provider plugin (`extensions/openclaw/`), sharing the same direct HTTP/2 transport, `HTTPS_PROXY` support, 15s `PING` keepalives, OAuth login (local browser & remote VPS), and `/usage` + `/gemini-quota` integration:
+> ```sh
+> openclaw plugins install npm:openclaw-gemini-app
+> ```
+> Run `openclaw models auth login --provider gemini-app`, then select `gemini-app/gemini-neon` or `gemini-app/gemini-hydrogen`. Full guide: [`extensions/openclaw/README.md`](extensions/openclaw/README.md).
 
 ### 1. Prerequisites
 

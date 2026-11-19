@@ -13,7 +13,7 @@
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-[English](README.md) · **繁體中文** · [快速開始](#quick-start) · [Pi 擴充套件](#pi-extension) · [連接客戶端](#connect-your-client) · [API 參考](docs/API_SUPPORT.md) · [維運指南](docs/OPERATIONS.md)
+[English](README.md) · **繁體中文** · [快速開始](#quick-start) · [Pi 擴充套件](#pi-extension) · [OpenClaw 插件](#openclaw-plugin) · [連接客戶端](#connect-your-client) · [API 參考](docs/API_SUPPORT.md) · [維運指南](docs/OPERATIONS.md)
 
 </div>
 
@@ -68,9 +68,11 @@
 <a id="quick-start"></a>
 ## 快速開始
 
-<a id="pi-extension"></a>
+<a id="native-extensions"></a>
 
-![pi-gemini-app —— 零伺服器原生 HTTP/2 Pi 擴充套件](docs/assets/pi-extension.jpg)
+![gemini-app2api —— 零依賴原生擴充套件（Pi 與 OpenClaw）](docs/assets/extensions-overview.jpg)
+
+<a id="pi-extension"></a>
 
 > [!TIP]
 > **使用 Pi Coding Agent 或 GooeyPi？無須啟動獨立閘道伺服器。**
@@ -82,8 +84,13 @@
 
 <a id="openclaw-plugin"></a>
 
-> [!NOTE]
-> **使用 OpenClaw？** 本專案亦內建零依賴獨立 Provider 插件 **`openclaw-gemini-app`**（`extensions/openclaw/`），完整共用原生 HTTP/2 傳輸、`HTTPS_PROXY` 支援、15s `PING` 保活、本機與遠端 VPS OAuth 登入及 `/usage` 配額整合（`npm run build:openclaw-package -- --clean --pack`）。完整說明請參閱 [`extensions/openclaw/README.md`](extensions/openclaw/README.md)。
+> [!TIP]
+> **使用 OpenClaw？同樣無須啟動獨立閘道伺服器。**
+> 直接安裝零依賴獨立 Provider 插件 **`openclaw-gemini-app`**（`extensions/openclaw/`），完整共用原生 HTTP/2 傳輸、`HTTPS_PROXY` 支援、15s `PING` 保活、本機與遠端 VPS OAuth 登入，以及 `/usage` 與 `/gemini-quota` 配額整合：
+> ```sh
+> openclaw plugins install npm:openclaw-gemini-app
+> ```
+> 安裝後執行 `openclaw models auth login --provider gemini-app`，即可選用 `gemini-app/gemini-neon` 或 `gemini-app/gemini-hydrogen`。完整說明請參閱 [`extensions/openclaw/README.md`](extensions/openclaw/README.md)。
 
 ### 1. 準備工作
 
