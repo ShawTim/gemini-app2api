@@ -1,13 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import http2 from "node:http2";
 import net from "node:net";
 import {
   openDirectTurn,
   NATIVE_COMPATIBILITY_VERSION,
+  DEFAULT_HTTP2_PING_INTERVAL_MS,
   ensureConnectAttemptTimeout,
   MIN_CONNECT_ATTEMPT_TIMEOUT_MS,
 } from "../src/gateway/native-transport.mjs";
+import {
+  resolveOutboundProxy,
+  createConnectTunnel,
+} from "../src/gateway/outbound-proxy.mjs";
 import { NativeDirectProvider } from "../src/native-provider.mjs";
 import { automaticRecoveryKind } from "../src/gateway/automatic-recovery.mjs";
 import {
@@ -397,4 +403,146 @@ test("outbound connect attempt timeout floor prevents 250ms Happy Eyeballs VPN t
   net.setDefaultAutoSelectFamilyAttemptTimeout(8000);
   ensureConnectAttemptTimeout();
   assert.equal(net.getDefaultAutoSelectFamilyAttemptTimeout(), 8000);
+});
+
+test("native HTTP/2 transport sends periodic PING keepalive frames during silent thinking turns", async (t) => {
+  assert.equal(DEFAULT_HTTP2_PING_INTERVAL_MS, 15_000);
+  let pingsReceived = 0;
+  const server = http2.createServer();
+  server.on("session", (session) => {
+    session.on("ping", () => { pingsReceived++; });
+  });
+  server.on("stream", (stream) => {
+    stream.resume();
+    stream.respond({ ":status": 200, "content-type": "application/grpc" }, { waitForTrailers: true });
+    setTimeout(() => {
+      stream.write(frameGrpcMessage(m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from("Alive")))), v(9, 1), m(30, Buffer.from("Used 4 Neon High model")), v(41, 3), v(42, 2)])))));
+      stream.once("wantTrailers", () => stream.sendTrailers({ "grpc-status": "0" }));
+      stream.end();
+    }, 95);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => server.close(r)));
+
+  const connect = () => http2.connect(`http://127.0.0.1:${server.address().port}`);
+  const turn = openDirectTurn(
+    "synthetic-token",
+    { messages: [{ role: "user", content: "hi" }], pingIntervalMs: 25, timeoutMs: 2000 },
+    { connect },
+  );
+  const events = [];
+  try {
+    for await (const ev of turn.events) events.push(ev);
+  } finally {
+    turn.cancel();
+  }
+  assert.equal(events.at(-1).type, "end");
+  assert.ok(pingsReceived >= 2, `Expected >= 2 HTTP/2 PING keepalives during silent turn, got ${pingsReceived}`);
+});
+
+test("outbound proxy resolver honors HTTPS_PROXY, HTTP_PROXY, ALL_PROXY, and NO_PROXY rules", () => {
+  assert.equal(resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", {}), null);
+  assert.equal(
+    resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", { HTTPS_PROXY: "http://127.0.0.1:7890" })?.href,
+    "http://127.0.0.1:7890/",
+  );
+  assert.equal(
+    resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", { https_proxy: "http://user:pass@127.0.0.1:7890" })?.port,
+    "7890",
+  );
+  assert.equal(
+    resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", { ALL_PROXY: "http://127.0.0.1:8080" })?.port,
+    "8080",
+  );
+  assert.equal(
+    resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", {
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+      NO_PROXY: "localhost, .googleapis.com",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", {
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+      NO_PROXY: "*",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", { HTTPS_PROXY: "socks5://127.0.0.1:1080" }),
+    null,
+  );
+});
+
+test("HTTP CONNECT tunnel forwards HTTP/2 traffic with Proxy-Authorization and fails cleanly on proxy rejection", async (t) => {
+  // Upstream HTTP/2 target
+  const target = http2.createServer();
+  target.on("stream", (stream) => {
+    stream.resume();
+    stream.respond({ ":status": 200, "content-type": "application/grpc" }, { waitForTrailers: true });
+    stream.write(frameGrpcMessage(m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from("Proxied")))), v(9, 1), m(30, Buffer.from("Used 4 Neon High model")), v(41, 3), v(42, 2)])))));
+    stream.once("wantTrailers", () => stream.sendTrailers({ "grpc-status": "0" }));
+    stream.end();
+  });
+  await new Promise((r) => target.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => target.close(r)));
+
+  // Local HTTP CONNECT proxy
+  let seenAuth = null;
+  let rejectNext = false;
+  const proxy = http.createServer();
+  proxy.on("connect", (req, clientSocket, head) => {
+    seenAuth = req.headers["proxy-authorization"] || null;
+    if (rejectNext) {
+      clientSocket.write("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
+      clientSocket.destroy();
+      return;
+    }
+    const [host, port] = req.url.split(":");
+    const upstream = net.connect(Number(port), host, () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head?.length) upstream.write(head);
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    upstream.on("error", () => clientSocket.destroy());
+    clientSocket.on("error", () => upstream.destroy());
+  });
+  await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => proxy.close(r)));
+
+  const proxyUrl = new URL(`http://alice:secret@127.0.0.1:${proxy.address().port}`);
+  const targetPort = target.address().port;
+  const connectViaProxy = () =>
+    http2.connect(`http://127.0.0.1:${targetPort}`, {
+      createConnection: () => createConnectTunnel(proxyUrl, "127.0.0.1", targetPort),
+    });
+
+  const provider = new NativeDirectProvider(
+    { getValidAccessToken: async () => "synthetic-token" },
+    { openTurn: (token, options) => openDirectTurn(token, options, { connect: connectViaProxy }), timeoutMs: 2000 },
+  );
+  const res = await provider.runTurn("synthetic", {
+    model: "gemini-neon",
+    messages: [{ role: "user", content: "hello via proxy" }],
+  });
+  assert.equal(res.content, "Proxied");
+  assert.equal(seenAuth, "Basic " + Buffer.from("alice:secret").toString("base64"));
+
+  // Proxy 407 rejection surfaces cleanly as NATIVE_CONNECTION_FAILED (502)
+  rejectNext = true;
+  await assert.rejects(
+    provider.runTurn("synthetic", {
+      model: "gemini-neon",
+      messages: [{ role: "user", content: "should fail" }],
+    }),
+    (err) => {
+      assert.equal(err.status, 502);
+      assert.ok(
+        ["NATIVE_CONNECTION_FAILED", "NATIVE_STREAM_CLOSED_EARLY", "NATIVE_STREAM_FAILED", "NATIVE_STREAM_RESET"].includes(err.code),
+        `Unexpected proxy error code: ${err.code}`,
+      );
+      return true;
+    },
+  );
 });

@@ -118,7 +118,8 @@ Open `/admin/` → sign in → **Accounts** → **Google sign-in**, and complete
 | `GATEWAY_CALLBACK_HOST` / `GATEWAY_CALLBACK_PORT` | `127.0.0.1` / `18765` (OAuth loopback callback always redirects to `localhost:18765`) |
 | `GATEWAY_QUOTA_FAILOVER=1` | Traverse remaining eligible accounts (at most once each under the request deadline) on explicit `429` quota refusals; default off |
 | `GATEWAY_EMPTY_RESPONSE_FAILOVER=1` | Switch once to another eligible account on a verified empty upstream response; default off |
-| `GATEWAY_AUTOMATIC_RECOVERY=1` | Integrated quota + transport + verified-empty + tool-format recovery (up to `4` non-quota attempts across eligible accounts within the original deadline); default off |
+| `GATEWAY_AUTOMATIC_RECOVERY=1` | Integrated quota + transport + verified-empty + tool-format recovery (up to `4` non-quota attempts across eligible accounts, plus `1` bounded same-account retry for single-account pools on non-quota/non-auth failures, within the original deadline); default off |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Optional standard outbound HTTP(S) `CONNECT` proxy for Google OAuth and native HTTP/2 RPCs (direct connection when unset); native HTTP/2 turns also send `15s` `PING` + TCP keepalives |
 | `GATEWAY_LIVE_VALIDATION=1` | Strict single-attempt validation mode (disables general failover) |
 | `timeoutMs` / `maxConcurrent` | `180,000 ms` / `8` (admin `PATCH` ranges: `1,000–600,000 ms` / `1–64`; per-account concurrency fixed at `2`) |
 | Body / prompt bounds | `4 MiB` HTTP JSON / `4 MiB` rendered UTF-8 prompt (`16 KiB` for `native_search: true`); optional `maxPromptBytes` (`0` = off) |

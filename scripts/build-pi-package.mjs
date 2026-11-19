@@ -43,6 +43,7 @@ export const ALLOWED_PI_RUNTIME_FILES = Object.freeze([
   'src/gateway/native-search-diagnostic.mjs',
   'src/gateway/native-search-metadata.mjs',
   'src/gateway/native-transport.mjs',
+  'src/gateway/outbound-proxy.mjs',
   'src/gateway/output-recovery.mjs',
   'src/gateway/quota-failover.mjs',
   'src/gateway/quota-transport.mjs',

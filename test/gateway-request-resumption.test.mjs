@@ -109,7 +109,7 @@ test('detached failures are discarded; identical later requests enter the provid
 
 for (const route of ['chat/completions', 'responses']) for (const stream of [false, true]) test(`${route} stream=${stream}: zero-output terminal errors retain cause but never negative-cache retries`, async t => {
   const failure = () => Object.assign(Error('Synthetic private reset'), { code: 'NATIVE_STREAM_RESET', status: 502 });
-  const f = await fixture({ accountCount: 1, turns: [failure(), failure(), 'Recovered'], allowAutomaticRecovery: true, allowFailover: false }); t.after(f.close);
+  const f = await fixture({ accountCount: 1, turns: [failure(), failure(), failure(), failure(), 'Recovered'], allowAutomaticRecovery: true, allowFailover: false }); t.after(f.close);
   const value = route === 'responses' ? { model: body.model, input: 'Synthetic resumption.', stream } : { ...body, stream };
   for (let attempt = 1; attempt <= 2; attempt++) {
     const response = await send(f, value, undefined, 'terminal', f.key.key, route);
@@ -120,11 +120,11 @@ for (const route of ['chat/completions', 'responses']) for (const stream of [fal
     assert.equal(error.code, 'GENERATION_FAILED'); assert.equal(error.upstream_code, 'NATIVE_STREAM_RESET');
     assert.equal(error.upstream_status, 502); assert.equal(error.type, 'server_error'); assert.equal(error.param, null);
     assert.equal(error.terminal, true); assert.equal(error.retryable, false); assert.equal(error.client_action, 'stop_turn');
-    assert.equal(f.seen.length, attempt); assert.equal(f.app.overview().requestResumption.retained, 0);
+    assert.equal(f.seen.length, attempt * 2); assert.equal(f.app.overview().requestResumption.retained, 0);
     assert.equal(f.app.overview().requests[0].providerFailures[0].code, 'NATIVE_STREAM_RESET');
   }
   const next = await send(f, value, undefined, 'terminal', f.key.key, route);
-  assert.equal(next.status, 200); assert.match(await next.text(), /Recovered/); assert.equal(f.seen.length, 3);
+  assert.equal(next.status, 200); assert.match(await next.text(), /Recovered/); assert.equal(f.seen.length, 5);
 });
 
 test('ordinary client cancellation is recorded as cancellation and does not block a later identical request', async t => {

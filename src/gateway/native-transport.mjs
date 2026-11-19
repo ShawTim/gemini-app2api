@@ -18,6 +18,8 @@ import { fault } from "./oauth-client-defaults.mjs";
 import { PROMPT_MAX_BYTES } from "../openai-contract.mjs";
 import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './native-response-limits.mjs';
 import { observeNative } from './native-diagnostic.mjs';
+import { connectHttp2 } from './outbound-proxy.mjs';
+export const DEFAULT_HTTP2_PING_INTERVAL_MS = 15_000;
 export const MIN_CONNECT_ATTEMPT_TIMEOUT_MS = 5000;
 // Node v22 defaults Happy Eyeballs per-family attempt timeout to 250ms, which aborts
 // IPv4 connects over high-RTT VPN tunnels when IPv6 returns immediate EHOSTUNREACH.
@@ -48,12 +50,13 @@ export function openDirectTurn(
     temporaryChat = true,
     continuation,
     timeoutMs = 180000,
+    pingIntervalMs = DEFAULT_HTTP2_PING_INTERVAL_MS,
     signal,
     allowNativeTools = false,
     emitHeaders = false,
     diagnostic,
   } = {},
-  { connect = http2.connect } = {},
+  { connect = connectHttp2 } = {},
 ) {
   if (
     typeof token !== "string" ||
@@ -110,6 +113,8 @@ export function openDirectTurn(
     streamCloseCode = null,
     request,
     timer,
+    pingTimer = null,
+    pingInFlight = false,
     closed = false,
     ended = false,
     error = null,
@@ -140,8 +145,16 @@ export function openDirectTurn(
   };
   const socketEnd = () => connectionEnded('end');
   const socketClose = () => connectionEnded('close');
+  const stopPing = () => {
+    if (pingTimer) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
+    pingInFlight = false;
+  };
   const stop = () => {
     clearTimeout(timer);
+    stopPing();
     signal?.removeEventListener("abort", abort);
     detachSocketListeners();
     note('local_stream_close', { requestedCode: ended ? 0 : 8, rstCode: request?.rstCode });
@@ -264,6 +277,7 @@ export function openDirectTurn(
     client = connect(NATIVE_ORIGIN);
     try {
       socket = client.socket;
+      socket?.setKeepAlive?.(true, 15_000);
       socket?.prependOnceListener?.('end', socketEnd);
       socket?.prependOnceListener?.('close', socketClose);
     } catch {
@@ -271,6 +285,18 @@ export function openDirectTurn(
     }
     client.on("error", () => fail("NATIVE_CONNECTION_FAILED"));
     if (diagnostic) client.on('goaway', code => note('peer_goaway', { goawayCode: code }));
+    if (Number.isInteger(pingIntervalMs) && pingIntervalMs > 0 && typeof client.ping === "function") {
+      pingTimer = setInterval(() => {
+        if (closed || ended || client.closed || client.destroyed || pingInFlight) return;
+        pingInFlight = true;
+        try {
+          client.ping(() => { pingInFlight = false; });
+        } catch {
+          pingInFlight = false;
+        }
+      }, pingIntervalMs);
+      pingTimer.unref();
+    }
     request = client.request({
       ":method": "POST",
       ":path": NATIVE_RPC,
@@ -319,6 +345,7 @@ export function openDirectTurn(
         push({ type: "end", httpStatus, grpcStatus });
         ended = true;
         clearTimeout(timer);
+        stopPing();
       } catch {
         fail("NATIVE_FRAME_REJECTED");
       }

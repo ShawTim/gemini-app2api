@@ -1,16 +1,16 @@
 // Native Gemini main-service terms only. Triggered by a user-initiated OAuth login.
-import http2 from "node:http2";
 import crypto from "node:crypto";
 import { parse, lengthDelimited as message, varintField as integer } from "../../native-wire/protobuf.mjs";
 import { GrpcMessageReader, frameGrpcMessage, buildRequestMetadata } from "../../native-wire/robin-current.mjs";
 import { decodeGrpcMessage, sanitizeUpstreamMessage } from "./native-evidence.mjs";
+import { connectHttp2 } from "./outbound-proxy.mjs";
 export const TERMS_VERSION_RPC = "/assistant.mobile.robin.RobinService/GetTermsOfServiceVersion";
 export const TERMS_ACCEPT_RPC = "/assistant.mobile.robin.RobinService/AcceptTermsOfService";
 const origin = "https://robinfrontend-pa.googleapis.com";
 const fail = (code, status = 502) => Object.assign(new Error(code), { code, status });
 const SAFE = new Set(["TOS_CREDENTIAL_REQUIRED", "TOS_CANCELLED", "TOS_TIMEOUT", "TOS_RATE_LIMITED", "TOS_AUTH_REJECTED", "TOS_HTTP_REJECTED", "TOS_INVALID_STATUS", "TOS_PRECONDITION_REQUIRED", "TOS_UPSTREAM_REJECTED", "TOS_CONNECTION_FAILED", "TOS_STREAM_RESET", "TOS_STREAM_FAILED", "TOS_STREAM_CLOSED_EARLY", "TOS_RESPONSE_TOO_LARGE", "TOS_INVALID_RESPONSE", "TOS_INCOMPLETE_RESPONSE", "TOS_VERSION_MISSING", "TOS_COMPLETION_FAILED"]);
 export const termsFailureCode = error => SAFE.has(error?.code) ? error.code : "TOS_COMPLETION_FAILED";
-export async function termsRpc(accessToken, rpc, payload, { signal, timeoutMs = 10000, connect = http2.connect } = {}) {
+export async function termsRpc(accessToken, rpc, payload, { signal, timeoutMs = 10000, connect = connectHttp2 } = {}) {
   if (![TERMS_VERSION_RPC, TERMS_ACCEPT_RPC].includes(rpc) || !Buffer.isBuffer(payload) || payload.length > 4096) throw fail("TOS_INVALID_RESPONSE");
   if (typeof accessToken !== "string" || !accessToken || accessToken.length > 65536 || /\s/.test(accessToken)) throw fail("TOS_CREDENTIAL_REQUIRED", 401);
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15000) throw fail("TOS_INVALID_RESPONSE", 400);

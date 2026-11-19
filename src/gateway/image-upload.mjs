@@ -1,5 +1,5 @@
-import http2 from 'node:http2';
 import { protocolError } from '../tool-protocol.mjs';
+import { connectHttp2 } from './outbound-proxy.mjs';
 
 const ORIGIN = 'https://push.clients6.google.com';
 const MAX_IMAGES = 4, MAX_BYTES = 2 * 1024 * 1024;
@@ -26,7 +26,7 @@ function boundedLocation(value) {
   return parsed;
 }
 
-export async function uploadNativeImages(token, images, { signal, timeoutMs = 60000 } = {}, { connect = http2.connect } = {}) {
+export async function uploadNativeImages(token, images, { signal, timeoutMs = 60000 } = {}, { connect = connectHttp2 } = {}) {
   validateImages(images);
   if (!images.length) return [];
   if (typeof token !== 'string' || !token || token.length > 65536 || /\s|[\x00-\x1f\x7f]/u.test(token) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000 || (signal !== undefined && (!signal || typeof signal.addEventListener !== 'function')) || typeof connect !== 'function') fail('INVALID_RESPONSE');

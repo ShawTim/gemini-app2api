@@ -1,4 +1,5 @@
 import { fault } from "./state.mjs";
+import { fetchWithProxy } from "./outbound-proxy.mjs";
 
 export function validateIdentity(data) {
   if (
@@ -19,7 +20,7 @@ export function validateIdentity(data) {
 // Fixed Google endpoint; never follow redirects or disclose response bodies.
 export async function identifyGoogleAccount(
   tokens,
-  { fetchImpl = fetch, timeoutMs = 8000 } = {},
+  { fetchImpl = fetchWithProxy, timeoutMs = 8000 } = {},
 ) {
   if (
     typeof tokens?.accessToken !== "string" ||

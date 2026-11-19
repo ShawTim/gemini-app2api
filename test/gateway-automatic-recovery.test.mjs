@@ -157,11 +157,28 @@ test('boundary recovery immediately prefers another eligible account without a c
   assert.equal(f.app.overview().requests[0].accountId, recoveredAccount);
 });
 
-test('a sole eligible account can recover immediately on a later request, with no local cooldown or invented quota', async t => {
-  const f = await fixture({ ...options, accountCount: 1, turns: [reset(), 'Recovered'] }); t.after(f.close);
+test('a sole eligible account recovers 1 transient transport drop automatically, exhausts cleanly after 2, and never same-account retries quota/auth', async t => {
+  const closedEarly = () => Object.assign(Error('Synthetic EOF'), { code: 'NATIVE_STREAM_CLOSED_EARLY', status: 502 });
+  // Single transient drop recovers within the same HTTP request (2 attempts on sole account)
+  const auto = await fixture({ ...options, accountCount: 1, turns: [closedEarly(), 'Auto-recovered'] }); t.after(auto.close);
+  const ok = await send(auto); assert.equal(ok.status, 200); assert.match(await ok.text(), /Auto-recovered/);
+  assert.equal(ok.headers.get('x-gemini-provider-attempts'), '2');
+  assert.equal(ok.headers.get('x-gemini-recovery-errors'), 'NATIVE_STREAM_CLOSED_EARLY');
+  assert.equal(auto.seen.length, 2);
+
+  // Two consecutive drops exhaust bounded single-account recovery with no local cooldown; next request succeeds
+  const f = await fixture({ ...options, accountCount: 1, turns: [reset(), reset(), 'Recovered'] }); t.after(f.close);
   const failed = await send(f); assert.equal(failed.status, 422); assert.equal((await failed.json()).error.code, 'GENERATION_FAILED');
-  assert.equal(f.seen.length, 1); assert.equal(Object.hasOwn(f.app.pool.stats('acc-0'), 'cooldownUntil'), false);
-  const retry = await send(f); assert.equal(retry.status, 200); assert.match(await retry.text(), /Recovered/); assert.equal(f.seen.length, 2);
+  assert.equal(failed.headers.get('x-gemini-provider-attempts'), '2');
+  assert.equal(f.seen.length, 2); assert.equal(Object.hasOwn(f.app.pool.stats('acc-0'), 'cooldownUntil'), false);
+  const retry = await send(f); assert.equal(retry.status, 200); assert.match(await retry.text(), /Recovered/); assert.equal(f.seen.length, 3);
+
+  // Quota (429) and auth (403) must NEVER retry on the same sole account
+  for (const terminal of [quota(), Object.assign(Error('Synthetic auth'), { code: 'NATIVE_PERMISSION_OR_AUTH', status: 403 })]) {
+    const q = await fixture({ ...options, accountCount: 1, turns: [terminal, 'Must not run'] }); t.after(q.close);
+    const res = await send(q); assert.equal(res.status, terminal.status); await res.text();
+    assert.equal(q.seen.length, 1);
+  }
 });
 
 test('boundary selection rechecks disabled and busy alternatives, even with extra-attempt recovery switched off', async t => {

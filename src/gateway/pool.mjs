@@ -8,6 +8,30 @@ import { ACCOUNT_MODELS, isProviderRejection } from "./provider-state.mjs";
 import { canonicalModel } from "../openai-contract.mjs";
 import { ModelTelemetry } from "./model-telemetry.mjs";
 const keyOf = (owner, id) => crypto.createHash("sha256").update(owner + "\0" + id).digest("hex");
+const SAME_ACCOUNT_RECOVERY_KINDS = new Set([
+  "transport",
+  "empty_response",
+  "provider_soft_error",
+  "tool_protocol",
+  "structured_output",
+  "incomplete_response",
+]);
+function sleepWithAbort(ms, signal) {
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(fault("REQUEST_CANCELLED", 499));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(fault("REQUEST_CANCELLED", 499));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 export function classifyFailure(error) {
   const code = error?.code ?? "";
   if (error?.status === 429 || error?.grpcStatus === 8 || ["NATIVE_QUOTA_EXHAUSTED", "NATIVE_RATE_LIMITED", "UPSTREAM_QUOTA", "QUOTA_EXHAUSTED"].includes(code)) return "quota";
@@ -23,6 +47,7 @@ export class AccountPool {
     settings = () => ({ maxSessions: 256, sessionTtlMs: 3600000 }),
     now = Date.now, allowFailover = true, allowQuotaFailover = false,
     allowEmptyResponseFailover = false, allowAutomaticRecovery = false,
+    sameAccountRetryDelayMs = 250,
     routingAccountIds = null, onFailover = () => {},
   } = {}) {
     this.accounts = accounts;
@@ -32,6 +57,7 @@ export class AccountPool {
     this.allowQuotaFailover = allowQuotaFailover === true;
     this.allowEmptyResponseFailover = allowEmptyResponseFailover === true;
     this.allowAutomaticRecovery = allowAutomaticRecovery === true;
+    this.sameAccountRetryDelayMs = Number.isInteger(sameAccountRetryDelayMs) && sameAccountRetryDelayMs >= 0 ? sameAccountRetryDelayMs : 250;
     this.onFailover = onFailover;
     const ids = normalizeRoutingAccountIds(routingAccountIds);
     this.#routingAccountIds = ids === null ? null : new Set(ids);
@@ -148,14 +174,23 @@ export class AccountPool {
     // each other's route or require a single request to own the session.
     const preferredId = session.accountId, previousModel = session.model, remembered = session.lastFailure;
     const tried = new Set();
-    let previous = null, emptyRecoveries = 0, shortOutputRecoveries = 0, formatRecoveryCode = null, quotaFailures = 0, outcome = null;
+    let previous = null, emptyRecoveries = 0, shortOutputRecoveries = 0, sameAccountRetries = 0, sameAccountRetryId = null, retryDelayMs = 0, formatRecoveryCode = null, quotaFailures = 0, outcome = null;
     const maxAttempts = this.allowAutomaticRecovery || this.allowQuotaFailover || this.allowEmptyResponseFailover ? 4 : 3;
     try {
       if (signal?.aborted) throw fault('REQUEST_CANCELLED', 499);
       const boundaryRecovery = remembered?.model === model ? remembered : null;
       for (let attempt = 0; attempt < maxAttempts + quotaFailures; attempt++) {
+        if (retryDelayMs > 0) {
+          const delay = retryDelayMs;
+          retryDelayMs = 0;
+          await sleepWithAbort(delay, signal);
+        }
         if (signal?.aborted) throw fault("REQUEST_CANCELLED", 499);
         let choices = this.available(model).filter(a => !tried.has(a.id));
+        if (!choices.length && sameAccountRetryId) {
+          choices = this.available(model).filter(a => a.id === sameAccountRetryId);
+          sameAccountRetryId = null;
+        }
         const carried = attempt === 0 ? boundaryRecovery : null;
         if (carried) {
           const alternatives = choices.filter(a => a.id !== carried.accountId);
@@ -205,7 +240,22 @@ export class AccountPool {
           if (automaticKind === 'tool_protocol' || automaticKind === 'structured_output') formatRecoveryCode = error.code;
           previous = { id: account.id, reason: automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind), quotaFailover: quotaRetry,
             emptyRecovery: emptyRetry, shortOutputRecovery: shortOutputRetry, automaticRecovery: !!automaticKind };
-          if (!this.available(model).some(a => !tried.has(a.id))) throw error;
+          const hasAlternative = this.available(model).some(a => !tried.has(a.id));
+          if (!hasAlternative) {
+            // A 1-account pool still deserves 1 bounded same-account recovery attempt
+            // for transient/empty/format errors; multi-account pools already tried >= 2 distinct accounts.
+            const canRetrySameAccount =
+              this.allowAutomaticRecovery &&
+              tried.size === 1 &&
+              sameAccountRetries < 1 &&
+              (SAME_ACCOUNT_RECOVERY_KINDS.has(automaticKind) || shortOutputRetry);
+            if (!canRetrySameAccount) throw error;
+            sameAccountRetries++;
+            sameAccountRetryId = account.id;
+            if (automaticKind === 'transport' && this.sameAccountRetryDelayMs > 0) {
+              retryDelayMs = this.sameAccountRetryDelayMs;
+            }
+          }
         } finally { this.#releaseAccount(account.id, stat); }
       }
       throw fault("NO_AVAILABLE_ACCOUNTS", 503);

@@ -3,6 +3,7 @@
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { fetchWithProxy } from '../src/gateway/outbound-proxy.mjs';
 
 const AUTH = 'https://accounts.google.com/o/oauth2/auth';
 const TOKEN = 'https://oauth2.googleapis.com/token';
@@ -19,7 +20,7 @@ function validateConfig({ clientId, scopes, refreshScopes, redirectHost, listenH
   if (listenHost !== undefined && !['127.0.0.1','0.0.0.0'].includes(listenHost)) throw new Error('Unsupported bind address');
   if (nativeLoopback !== undefined && typeof nativeLoopback !== 'boolean') throw new Error('Invalid native mode');
 }
-async function tokenRequest(body, config, { fetchImpl = fetch, timeoutMs = 12_000, signal } = {}) {
+async function tokenRequest(body, config, { fetchImpl = fetchWithProxy, timeoutMs = 12_000, signal } = {}) {
   const boundedSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
   const response = await fetchImpl(config.nativeLoopback ? NATIVE_TOKEN : TOKEN, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, redirect: 'error', signal: boundedSignal });
   let data;

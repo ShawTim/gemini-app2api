@@ -2,10 +2,11 @@
 import http2 from 'node:http2';
 import { GrpcMessageReader, frameGrpcMessage } from '../../native-wire/robin-current.mjs';
 import { buildSubscriptionRequest } from './subscription.mjs';
+import { connectHttp2 } from './outbound-proxy.mjs';
 export const SUBSCRIPTION_ORIGIN = 'https://robinfrontend-pa.googleapis.com';
 export const SUBSCRIPTION_RPC = '/assistant.mobile.robin.RobinService/GetUsageInfo';
 const failure = (code, status = 502) => Object.assign(new Error(code), { code, status });
-export async function fetchGoogleSubscription(accessToken, { signal, timeoutMs = 10000, connect = http2.connect } = {}) {
+export async function fetchGoogleSubscription(accessToken, { signal, timeoutMs = 10000, connect = connectHttp2 } = {}) {
   if (typeof accessToken !== 'string' || !accessToken || accessToken.length > 65536 || /\s/.test(accessToken)) throw failure('SUBSCRIPTION_CREDENTIAL_REQUIRED', 401);
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15000) throw failure('INVALID_SUBSCRIPTION_TIMEOUT', 400);
   if (signal?.aborted) throw failure('SUBSCRIPTION_CANCELLED', 499);
