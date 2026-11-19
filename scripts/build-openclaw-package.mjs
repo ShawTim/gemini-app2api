@@ -237,6 +237,9 @@ export function buildOpenClawPackage({
   if (!Array.isArray(meta.openclawExtensions) || !meta.openclawExtensions.includes('./extensions/openclaw/index.js')) {
     throw new Error('extensions/openclaw/package-meta.json must include ./extensions/openclaw/index.js');
   }
+  if (!meta?.openclawCompat?.pluginApi || typeof meta.openclawCompat.pluginApi !== 'string') {
+    throw new Error('extensions/openclaw/package-meta.json must specify openclawCompat.pluginApi');
+  }
   if (!pluginManifest?.id || !pluginManifest?.configSchema || !Array.isArray(pluginManifest?.providers)) {
     throw new Error('extensions/openclaw/openclaw.plugin.json must specify id, configSchema, and providers');
   }
@@ -327,6 +330,8 @@ export function buildOpenClawPackage({
     engines: meta.engines || { node: '>=22.0.0' },
     openclaw: {
       extensions: meta.openclawExtensions,
+      compat: meta.openclawCompat,
+      ...(meta.openclawInstall ? { install: meta.openclawInstall } : {}),
     },
     files: publishedFiles,
     dependencies: {},

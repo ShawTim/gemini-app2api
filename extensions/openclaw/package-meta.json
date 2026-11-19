@@ -30,5 +30,13 @@
   },
   "openclawExtensions": [
     "./extensions/openclaw/index.js"
-  ]
+  ],
+  "openclawCompat": {
+    "pluginApi": ">=2026.11.6"
+  },
+  "openclawInstall": {
+    "npmSpec": "openclaw-gemini-app",
+    "defaultChoice": "npm",
+    "minHostVersion": ">=2026.11.6"
+  }
 }

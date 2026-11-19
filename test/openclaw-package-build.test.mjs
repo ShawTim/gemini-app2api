@@ -39,6 +39,9 @@ test('buildOpenClawPackage and verifyOpenClawPackageStaging produce clean zero-d
   assert.ok(fs.existsSync(path.join(outDir, 'openclaw.plugin.json')));
   assert.ok(fs.existsSync(path.join(outDir, OPENCLAW_BUILD_MARKER)));
   assert.ok(built.tarball && fs.existsSync(built.tarball));
+  const generatedPkg = JSON.parse(fs.readFileSync(path.join(outDir, 'package.json'), 'utf8'));
+  assert.equal(generatedPkg.openclaw?.compat?.pluginApi, '>=2026.11.6');
+  assert.equal(generatedPkg.openclaw?.install?.minHostVersion, '>=2026.11.6');
 
   const verified = await verifyOpenClawPackageStaging({ baseRoot: root });
   assert.equal(verified.verified, true);

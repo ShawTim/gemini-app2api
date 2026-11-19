@@ -45,6 +45,10 @@ export async function verifyOpenClawPackageStaging({ baseRoot } = {}) {
     assert.equal(pkg.type, 'module');
     assert.deepEqual(pkg.dependencies, {});
     assert.deepEqual(pkg.openclaw?.extensions, ['./extensions/openclaw/index.js']);
+    assert.equal(typeof pkg.openclaw?.compat?.pluginApi, 'string');
+    assert.ok(pkg.openclaw.compat.pluginApi.length > 0, 'openclaw.compat.pluginApi must be non-empty');
+    assert.equal(pkg.openclaw?.install?.npmSpec, 'openclaw-gemini-app');
+    assert.equal(typeof pkg.openclaw?.install?.minHostVersion, 'string');
     assert.equal(fs.existsSync(path.join(pkgDir, OPENCLAW_BUILD_MARKER)), false, 'build marker must not leak into tarball');
 
     // Verify openclaw.plugin.json at package root matches OpenClaw manifest contract
