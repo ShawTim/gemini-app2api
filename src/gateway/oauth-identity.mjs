@@ -1,4 +1,4 @@
-import { fault } from "./state.mjs";
+import { fault } from "./oauth-client-defaults.mjs";
 import { fetchWithProxy } from "./outbound-proxy.mjs";
 
 export function validateIdentity(data) {

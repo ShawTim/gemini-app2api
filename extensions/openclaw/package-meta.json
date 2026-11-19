@@ -1,0 +1,34 @@
+{
+  "name": "openclaw-gemini-app",
+  "version": "0.1.0",
+  "description": "Zero-dependency native Google Gemini HTTP/2 provider plugin for OpenClaw (Gemini Neon, Hydrogen, Flash Lite, Auto) using your Google Gemini subscription via OAuth.",
+  "license": "MIT",
+  "author": "shawtim",
+  "homepage": "https://github.com/ShawTim/gemini-app2api#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShawTim/gemini-app2api.git",
+    "directory": "extensions/openclaw"
+  },
+  "bugs": {
+    "url": "https://github.com/ShawTim/gemini-app2api/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "openclaw-provider",
+    "clawhub",
+    "gemini",
+    "gemini-neon",
+    "gemini-hydrogen",
+    "google-gemini",
+    "oauth",
+    "http2"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "openclawExtensions": [
+    "./extensions/openclaw/index.js"
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "id": "gemini-app",
+  "name": "Gemini App",
+  "description": "Zero-dependency native Gemini HTTP/2 provider for OpenClaw (Gemini Neon, Hydrogen, Flash Lite, Auto) using your Google Gemini subscription via OAuth.",
+  "categories": ["models"],
+  "providers": ["gemini-app"],
+  "autoEnableWhenConfiguredProviders": ["gemini-app"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "modelIdNormalization": {
+    "providers": {
+      "gemini-app": {
+        "aliases": {
+          "gemini-argon": "gemini-neon",
+          "neon": "gemini-neon",
+          "hydrogen": "gemini-hydrogen",
+          "flash-lite": "gemini-flash-lite",
+          "auto": "gemini-auto"
+        }
+      }
+    }
+  },
+  "modelCatalog": {
+    "providers": {
+      "gemini-app": {
+        "api": "openai-completions",
+        "baseUrl": "https://robinfrontend-pa.googleapis.com",
+        "family": "gemini-app",
+        "models": [
+          {
+            "id": "gemini-neon",
+            "name": "Gemini Neon",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 512000,
+            "maxTokens": 16384
+          },
+          {
+            "id": "gemini-hydrogen",
+            "name": "Gemini Hydrogen",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 512000,
+            "maxTokens": 16384
+          },
+          {
+            "id": "gemini-flash-lite",
+            "name": "Gemini Flash Lite",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "gemini-auto",
+            "name": "Gemini Auto",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}

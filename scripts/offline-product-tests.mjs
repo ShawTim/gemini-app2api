@@ -69,4 +69,6 @@ export const productTests = Object.freeze([
   'native-wire/test/oauth-loopback.test.mjs',
   'test/pi-extension.test.mjs',
   'test/pi-package-build.test.mjs',
+  'test/openclaw-extension.test.mjs',
+  'test/openclaw-package-build.test.mjs',
 ]);

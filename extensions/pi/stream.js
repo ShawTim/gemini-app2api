@@ -199,6 +199,7 @@ export function createGeminiStreamHandler({
   automaticRecoveryKind = defaultAutomaticRecoveryKind,
   buildChatPayload = defaultBuildChatPayload,
   estimateUsage = defaultEstimateUsage,
+  resolveAccessToken,
 } = {}) {
   if (typeof createAssistantMessageEventStream !== 'function') {
     throw new TypeError('createAssistantMessageEventStream is required');
@@ -315,8 +316,7 @@ export function createGeminiStreamHandler({
       });
 
       try {
-        const apiKey = options?.apiKey;
-        if (!apiKey) {
+        if (typeof resolveAccessToken !== 'function' && !options?.apiKey) {
           throw new Error(
             `No access token for provider ${model.provider}. Run /login gemini-app to sign in.`,
           );
@@ -335,7 +335,22 @@ export function createGeminiStreamHandler({
           : 0;
 
         const authManager = {
-          getValidAccessToken: async () => apiKey,
+          getValidAccessToken: async () => {
+            if (typeof resolveAccessToken === 'function') {
+              const token = await resolveAccessToken({
+                signal: options?.signal,
+                apiKey: options?.apiKey,
+                model,
+              });
+              if (!token) {
+                throw new Error(
+                  `No access token for provider ${model.provider}. Sign in with OAuth first.`,
+                );
+              }
+              return token;
+            }
+            return options.apiKey;
+          },
         };
         const provider = new NativeDirectProvider(authManager, {
           openTurn,

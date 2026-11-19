@@ -9,6 +9,7 @@ export const root = path.resolve(import.meta.dirname, "..");
 export const releaseWalkDirs = [
   "src/gateway",
   "extensions/pi",
+  "extensions/openclaw",
   "test/browser",
   "test/sdk",
   "examples",
@@ -85,6 +86,8 @@ const fixed = [
   "scripts/js-module-scanner.mjs",
   "scripts/build-pi-package.mjs",
   "scripts/check-pi-package.mjs",
+  "scripts/build-openclaw-package.mjs",
+  "scripts/check-openclaw-package.mjs",
   "scripts/docker-smoke.mjs",
   "scripts/sdk-smoke.mjs",
   "scripts/live-acceptance.mjs",

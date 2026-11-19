@@ -80,6 +80,11 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 > ```
 > Run `/login gemini-app` and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto` (`gemini-argon` temporarily aliases to `gemini-neon`). Full guide: [`extensions/pi/README.md`](extensions/pi/README.md).
 
+<a id="openclaw-plugin"></a>
+
+> [!NOTE]
+> **Using OpenClaw?** Build or install the standalone zero-dependency **`openclaw-gemini-app`** provider plugin (`extensions/openclaw/`), sharing the same direct HTTP/2 transport, `HTTPS_PROXY` support, 15s `PING` keepalives, OAuth login (local & remote VPS), and `/usage` quota integration (`npm run build:openclaw-package -- --clean --pack`). Full guide: [`extensions/openclaw/README.md`](extensions/openclaw/README.md).
+
 ### 1. Prerequisites
 
 - **Node.js 22+** (`>= 22.0.0`) on macOS, Linux, or Windows WSL2 — **or Docker Compose** (Windows, macOS, Linux).

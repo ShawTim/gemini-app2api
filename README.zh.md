@@ -80,6 +80,11 @@
 > ```
 > 安裝後於 Pi 或 GooeyPi 內執行 `/login gemini-app` 及 `/gemini-quota`。系統會透過 `GetUsageInfo` 自動偵測帳戶訂閱方案：**免費版（Free）** Google 帳戶會自動篩選為 `gemini-auto`（Smart Model Selection），而 **AI Plus / Pro / Ultra** 付費帳戶則可使用 `gemini-neon`、`gemini-hydrogen`、`gemini-flash-lite` 與 `gemini-auto`（`gemini-argon` 暫時自動 alias 至 `gemini-neon`）。完整說明請參閱 [`extensions/pi/README.md`](extensions/pi/README.md)。
 
+<a id="openclaw-plugin"></a>
+
+> [!NOTE]
+> **使用 OpenClaw？** 本專案亦內建零依賴獨立 Provider 插件 **`openclaw-gemini-app`**（`extensions/openclaw/`），完整共用原生 HTTP/2 傳輸、`HTTPS_PROXY` 支援、15s `PING` 保活、本機與遠端 VPS OAuth 登入及 `/usage` 配額整合（`npm run build:openclaw-package -- --clean --pack`）。完整說明請參閱 [`extensions/openclaw/README.md`](extensions/openclaw/README.md)。
+
 ### 1. 準備工作
 
 - **Node.js 22+**（`>= 22.0.0`）（macOS、Linux 或 Windows WSL2）**或 Docker Compose**（Windows、macOS、Linux）。
