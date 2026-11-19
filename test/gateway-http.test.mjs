@@ -548,3 +548,23 @@ test("account updates and deletion during generation do not cancel accepted work
   assert.equal(later.status, 503); assert.equal((await later.json()).error.code, "NO_AVAILABLE_ACCOUNTS");
   assert.equal(f.seen.length, 1);
 });
+
+test("in-flight generation aborted by gateway shutdown returns retryable 503 SERVER_SHUTDOWN instead of 499 invalid_request_error", async (t) => {
+  const f = await fixture({ accountCount: 1, allowFailover: false, turns: ["Never delivered"] });
+  const release = holdTurns(f, t);
+  const pending = f.api("/v1/chat/completions", { method: "POST", body: chat });
+  await until(() => f.seen.length === 1);
+  const closing = f.close();
+  try {
+    const res = await pending;
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get("retry-after"), "2");
+    const payload = await res.json();
+    assert.equal(payload.error.code, "SERVER_SHUTDOWN");
+    assert.equal(payload.error.type, "server_error");
+    assert.match(payload.error.message, /SERVER_SHUTDOWN/);
+  } finally {
+    release();
+    await closing;
+  }
+});

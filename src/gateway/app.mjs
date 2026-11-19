@@ -200,6 +200,7 @@ export function errorPayload(error) {
         : code === 'UNSUPPORTED_PARAMETER' && param ? `UNSUPPORTED_PARAMETER: ${param}`
         : code === 'UNSUPPORTED_MODEL' ? 'UNSUPPORTED_MODEL: supported models are gemini-neon, gemini-hydrogen, gemini-flash-lite (alias: gemini-argon -> gemini-neon)'
         : code === 'NATIVE_UPSTREAM_UNAVAILABLE' ? 'NATIVE_UPSTREAM_UNAVAILABLE: upstream Google service temporarily unavailable (HTTP 503 / gRPC UNAVAILABLE)'
+        : code === 'SERVER_SHUTDOWN' ? 'SERVER_SHUTDOWN: gateway is restarting; retry the request'
         : code,
       type:
         terminal ? "server_error" : error?.status === 401
@@ -524,6 +525,9 @@ export function createGateway({
     } catch (error) {
       if (controller.signal.reason?.code === 'REQUEST_DEADLINE') {
         error = Object.assign(fault('NATIVE_TURN_TIMEOUT', 504), { nativeEvidence: error.nativeEvidence });
+      } else if (controller.signal.reason?.code === 'SERVER_SHUTDOWN') {
+        error = Object.assign(fault('SERVER_SHUTDOWN', 503), { nativeEvidence: error.nativeEvidence });
+        if (!res.headersSent) res.setHeader('Retry-After', '2');
       }
       status =
         Number.isInteger(error.status) &&
@@ -1059,7 +1063,7 @@ export function createGateway({
     },
     async close() {
       closing = true;
-      for (const c of controllers) c.abort(fault('SERVER_SHUTDOWN', 499));
+      for (const c of controllers) c.abort(fault('SERVER_SHUTDOWN', 503));
       resumption.close();
       await quotaRefreshJobs.close();
       const accountsDrain = Promise.resolve(accounts.close());
