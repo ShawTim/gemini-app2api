@@ -850,6 +850,8 @@ test("runtime lock uses kernel directory locking across threads/processes, races
           if (msg !== "go") return;
           try {
             st.lock();
+            // Keep the winner alive holding dirFd/flock until the parent explicitly SIGKILLs it.
+            setInterval(() => {}, 60_000);
             process.send({ type: "result", ok: true, pid: process.pid });
           } catch (error) {
             process.send({ type: "result", ok: false, code: error?.code ?? null });
