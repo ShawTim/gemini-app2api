@@ -242,19 +242,19 @@ Then run `/login gemini-app` (supports both local browser loopback and headless 
 > Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. For backward compatibility while callers migrate from retired upstream Argon (mode `8`), `gemini-argon` is temporarily accepted and transparently routed to `gemini-neon` (`PRO` mode `3`). `context_window: 512000` for both `gemini-neon` and `gemini-hydrogen` is an empirical advisory client budget calibrated with safety margin below upstream silent tail truncation, prefill latency, and the gateway's `4 MiB` request ceiling—not an enforced token cap or official Google SLA guarantee.
 
 <a id="quota-consumption"></a>
-### Quota Consumption: gemini-argon vs gemini-hydrogen
+### Quota Consumption: gemini-neon vs gemini-hydrogen
 
-> [!WARNING]
-> **`gemini-argon` consumes roughly `60x` more account quota than `gemini-hydrogen` on identical coding workloads.** On a single Gemini AI Pro account, `~4-5` heavy (~15 KB output) coding turns on `gemini-argon` can exhaust an entire 5-hour rolling window (`429 NATIVE_QUOTA_EXHAUSTED`), whereas `gemini-hydrogen` fits `~290` heavy coding turns (or `~1,800` agent `tool_call` steps) in the same 5-hour window while responding `~2x-4x` faster. Use **`gemini-hydrogen`** as your primary multi-step coding and tool-call workhorse, and reserve **`gemini-argon`** for architecture planning, hard debugging, or multi-account pooled setups (`GATEWAY_QUOTA_FAILOVER=1`).
+> [!TIP]
+> **Under Google's `neon_pro_policy`, `gemini-neon` is only `~1.5x–2x` the quota cost of `gemini-hydrogen` on `thinking=2` coding & tool-call workloads** (and `~4x–5x` on `thinking=0` long-text generation)—a massive improvement over retired `gemini-argon` (which used `~60x` more quota and could exhaust a 5-hour window in 4–5 heavy turns). You can comfortably daily-drive **`gemini-neon`** for flagship reasoning and coding (`~20` massive ~57 KB rewrites or `~135` `tool_call` steps per 5-hour window on a single Pro account), while **`gemini-hydrogen`** remains **`~1.7x–2.6x` faster** and **`~1.6x–5x` lighter on quota** for rapid multi-step loops and high-volume generation.
 
-Empirical `GetUsageInfo` measurements on identical non-dummy engineering turns (Gemini AI Pro accounts, Paid & Trial tiers observed at `1:1`):
+Empirical `GetUsageInfo` measurements on identical isolated engineering turns across Gemini AI Pro accounts (`2026-11-19`, `neon_pro_policy`):
 
-| Engineering Workload | `gemini-hydrogen` | `gemini-argon` | Argon Quota Multiple |
+| Engineering Workload | `gemini-hydrogen` (`mode=1`) | `gemini-neon` (`mode=3`) | Neon Quota Multiple |
 |---|---|---|---:|
-| **Heavy ~15 KB code review + rewrite** (`thinking=2`) | `~0.017%` weekly (`< 1%` 5h, `~60s`) | `~1.05%` weekly (`~21%` 5h, `~115s`) | `~61x` |
-| **Multi-tool coding agent `tool_call` step** (`thinking=2`) | `~0.003%` weekly (`< 1%` 5h, `~4.6s`) | `~0.074%` weekly (`~1.5%` 5h, `~9.0s`) | `~27x` |
-| **Standard ~10 KB SQL & migration plan** (`thinking=0`) | `~0.0046%` weekly (`< 1%` 5h, `~13s`) | `~0.44%` weekly (`~8.5%` 5h, `~49s`) | `~75x-95x` |
-| **Single-account 5-hour window capacity** *(weekly pool ≈ `20x` the 5-hour window)* | `~290` heavy turns / `~1,800` tool steps | `~4-5` heavy turns | — |
+| **Massive code review + full rewrite** (`thinking=2`) | `~0.122%` weekly (`+3%` 5h, `37.8 KB`, `~76s`) | `~0.248%` weekly (`+5%` 5h, `57.0 KB`, `~198s`) | `~2.0x` / turn (`~1.35x` / KB) |
+| **Multi-tool coding agent `tool_call` step** (`thinking=2`, 2 calls) | `~0.024%` weekly (`~0.5%` 5h, `305 B`, `~8.2s`) | `~0.037%` weekly (`~0.7%` 5h, `305 B`, `~14.4s`) | `~1.56x` |
+| **Standard ~13–15 KB SQL & migration plan** (`thinking=0`) | `~0.017%` weekly (`~0.3%` 5h, `12.9 KB`, `~28s`) | `~0.086%` weekly (`+2%` 5h, `15.4 KB`, `~36s`) | `~5.1x` / turn (`~4.3x` / KB) |
+| **Single-account 5-hour window capacity** *(weekly pool ≈ `20x` the 5-hour window)* | `~40` massive rewrites / `~210` tool steps | `~20` massive rewrites / `~135` tool steps | — |
 
 These figures are empirical observations via read-only `GetUsageInfo` telemetry (not official Google SLA figures), and upstream quota weights may change at any time.
 

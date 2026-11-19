@@ -242,19 +242,19 @@ pi install npm:pi-gemini-app
 > 模型別名對應 Gemini App 原生執行模式，並非 Google Cloud Vertex / AI Studio 的固定版本代號；實際可用性取決於各登入帳戶的上游方案權限。為方便舊有設定平滑過渡，原已落架的 `gemini-argon`（原 mode `8`）目前仍暫時支援並自動轉送至 `gemini-neon`（`PRO` mode `3`）。`gemini-neon` 與 `gemini-hydrogen` 公布的 `context_window: 512000` 為根據單輪長上下文召回率、上游靜默截斷安全緩衝、prefill 延遲及閘道 `4 MiB` 請求上限實測訂立之客戶端建議預算，並非閘道強制截斷上限或 Google 官方 SLA 保證容量。
 
 <a id="quota-consumption"></a>
-### 配額消耗提醒：gemini-argon vs gemini-hydrogen
+### 配額消耗實測：gemini-neon vs gemini-hydrogen
 
-> [!WARNING]
-> **在相同的程式開發任務下，`gemini-argon` 消耗的帳戶配額約為 `gemini-hydrogen` 的 `60x`。** 以單一 Gemini AI Pro 帳戶為例，在 `gemini-argon` 上僅執行 `~4-5` 輪重度編碼任務（約 15 KB 輸出）即可能耗盡整個 5 小時滾動視窗（觸發 `429 NATIVE_QUOTA_EXHAUSTED`）；相較之下，`gemini-hydrogen` 在同一個 5 小時視窗內可容納約 `~290` 輪重度編碼任務（或約 `~1,800` 步 Agent `tool_call` 工具呼叫），且回應速度快約 `~2x-4x`。建議將 **`gemini-hydrogen`** 作為日常多輪程式開發與工具呼叫的主力模型，並將 **`gemini-argon`** 留給架構規劃、疑難排錯，或已配置多帳戶池自動切換（`GATEWAY_QUOTA_FAILOVER=1`）的環境。
+> [!TIP]
+> **在 Google 現行 `neon_pro_policy` 下，`gemini-neon` 於 `thinking=2` 編碼與多工具呼叫任務中，配額消耗僅為 `gemini-hydrogen` 的 `~1.5x–2x`**（`thinking=0` 長文生成約 `~4x–5x`）——相較舊版已落架的 `gemini-argon`（曾高出 `~60x`、4–5 輪即耗盡 5 小時額度）大幅改善。日常開發已可直接以 **`gemini-neon`** 作為主力（單一 Pro 帳戶 5 小時視窗約可容納 `~20` 輪 `57 KB` 級超重重寫或 `~135` 步 `tool_call`）；而 **`gemini-hydrogen`** 則維持 **`~1.7x–2.6x` 更快速度**與 **`~1.6x–5x` 更低配額消耗**，適合高速多輪迴圈與大量生成任務。
 
-以下為使用相同真實工程任務（非空白測試）透過 `GetUsageInfo` 實測之配額消耗對照（Gemini AI Pro 帳戶，付費與試用方案實測比例為 `1:1`）：
+以下為使用相同獨立工程任務（無外部流量干擾）透過唯讀 `GetUsageInfo` 實測之配額消耗對照（Gemini AI Pro 帳戶，`2026-11-19`，`neon_pro_policy`）：
 
-| 工程任務情境 | `gemini-hydrogen` | `gemini-argon` | Argon 配額消耗倍數 |
+| 工程任務情境 | `gemini-hydrogen`（`mode=1`） | `gemini-neon`（`mode=3`） | Neon 配額消耗倍數 |
 |---|---|---|---:|
-| **重度 ~15 KB 程式碼審查＋重寫**（`thinking=2`） | 每週 `~0.017%`（5h `< 1%`，`~60s`） | 每週 `~1.05%`（5h `~21%`，`~115s`） | `~61x` |
-| **多工具編碼 Agent 單步 `tool_call`**（`thinking=2`） | 每週 `~0.003%`（5h `< 1%`，`~4.6s`） | 每週 `~0.074%`（5h `~1.5%`，`~9.0s`） | `~27x` |
-| **標準 ~10 KB SQL 與遷移方案規劃**（`thinking=0`） | 每週 `~0.0046%`（5h `< 1%`，`~13s`） | 每週 `~0.44%`（5h `~8.5%`，`~49s`） | `~75x-95x` |
-| **單一帳戶 5 小時視窗可用容量**（每週總池約為 5 小時視窗的 `20x`） | `~290` 輪重度任務 / `~1,800` 步工具呼叫 | `~4-5` 輪重度任務 | — |
+| **超重度程式碼審查＋全量重寫**（`thinking=2`） | 每週 `~0.122%`（5h `+3%`，`37.8 KB`，`~76s`） | 每週 `~0.248%`（5h `+5%`，`57.0 KB`，`~198s`） | 每輪 `~2.0x`（按 KB 計 `~1.35x`） |
+| **多工具編碼 Agent 單步 `tool_call`**（`thinking=2`，2 calls） | 每週 `~0.024%`（5h `~0.5%`，`305 B`，`~8.2s`） | 每週 `~0.037%`（5h `~0.7%`，`305 B`，`~14.4s`） | `~1.56x` |
+| **標準 ~13–15 KB SQL 與遷移方案規劃**（`thinking=0`） | 每週 `~0.017%`（5h `~0.3%`，`12.9 KB`，`~28s`） | 每週 `~0.086%`（5h `+2%`，`15.4 KB`，`~36s`） | 每輪 `~5.1x`（按 KB 計 `~4.3x`） |
+| **單一帳戶 5 小時視窗可用容量**（每週總池約為 5 小時視窗的 `20x`） | `~40` 輪超重重寫 / `~210` 步工具呼叫 | `~20` 輪超重重寫 / `~135` 步工具呼叫 | — |
 
 以上數據為透過唯讀 `GetUsageInfo` 介面觀測所得之實測經驗值（並非 Google 官方 SLA 保證數據），上游配額權重與視窗計算方式可能隨時調整。
 

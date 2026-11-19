@@ -1043,18 +1043,18 @@ function poolPulseGrid() {
       el('div', { class: 'spark-bars', 'aria-hidden': true }, sample.length ? sample.map(r => el('i', { class: Number(r.status) >= 400 ? 'err' : null, style: `height:${Math.max(14, Math.round((r.durationMs / maxMs) * 100))}%` })) : el('i', { style: 'height:18%;opacity:0.25' }))),
     el('article', { class: 'pulse-card' },
       el('div', { class: 'pulse-head' }, el('span', {}, L('QUOTA EFFICIENCY', '配額效率策略')), badge(versionTag())),
-      el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value mono', style: 'font-size:15px' }, 'gemini-hydrogen'), el('span', { class: 'pulse-sub pulse-accent' }, L('~60× turns vs Pro tier', '約 60× 對話輪數'))),
-      el('div', { class: 'pulse-sub' }, L('512k context · Neon 512k reserved for Plan', '512k 上下文 · Neon 512k 留作架構規劃'))));
+      el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value mono', style: 'font-size:15px' }, 'gemini-neon / hydrogen'), el('span', { class: 'pulse-sub pulse-accent' }, L('Neon ~1.6–2× quota vs Hydrogen', 'Neon 僅約 Hydrogen 1.6–2× 配額'))),
+      el('div', { class: 'pulse-sub' }, L('Both 512k · Hydrogen ~2× faster', '兩者均為 512k · Hydrogen 快約 2×'))));
 }
 function presetSnippetText(preset = S.preset) {
   const base = gatewayBaseUrl();
   if (preset === 'cline') {
-    return `// Plan / Architect: gemini-neon (512k Pro reasoning; gemini-argon aliases here)\n// Act / Code:       gemini-hydrogen (512k · ~60x turns)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-hydrogen"\n}`;
+    return `// Plan / Daily Flagship: gemini-neon (512k Pro · ~1.6-2x quota; gemini-argon aliases here)\n// Fast / High-Volume:    gemini-hydrogen (512k · ~2x faster)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-neon"\n}`;
   }
   if (preset === 'curl') {
-    return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gemini-hydrogen","messages":[{"role":"user","content":"Hi"}]}'`;
+    return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gemini-neon","messages":[{"role":"user","content":"Hi"}]}'`;
   }
-  return `model = "gemini-hydrogen" # 512k · ~60x quota turns\nmodel_provider = "gemini_app2api"\n[model_providers.gemini_app2api]\nbase_url = ${JSON.stringify(base)}\nenv_key = "GEMINI_GATEWAY_KEY"\nwire_api = "responses"`;
+  return `model = "gemini-neon" # 512k Pro (~1.6-2x quota vs gemini-hydrogen)\nmodel_provider = "gemini_app2api"\n[model_providers.gemini_app2api]\nbase_url = ${JSON.stringify(base)}\nenv_key = "GEMINI_GATEWAY_KEY"\nwire_api = "responses"`;
 }
 function bottomDeck() {
   const o = S.overview || {};

@@ -72,7 +72,7 @@ Optional environment overrides if using your own OAuth desktop client:
 
 > **Subscription Tier Detection**: `/login gemini-app` automatically detects your account's Google AI subscription tier via `GetUsageInfo`. **Free** accounts automatically filter available models to `gemini-auto` (avoiding paid-mode precondition rejections), while **AI Plus**, **AI Pro**, and **AI Ultra** accounts expose all models. Run `/gemini-quota` at any time to check both your detected tier and rolling usage windows.
 >
-> **Quota Tip**: `gemini-hydrogen` consumes significantly less rolling window quota than flagship Pro-tier modes (`gemini-neon`) and responds faster, making it ideal for multi-step coding and tool-calling loops. Reserve `gemini-neon` for complex architecture or deep reasoning tasks.
+> **Quota Tip**: On `thinking=2` coding and tool-call loops, `gemini-neon` uses only `~1.5x–2x` the rolling-window quota of `gemini-hydrogen` (and `~4x–5x` on `thinking=0` generation), so you can daily-drive `gemini-neon` comfortably or switch to `gemini-hydrogen` when you want `~1.7x–2.6x` faster responses and extra quota headroom.
 >
 > **Usage Accounting**: Token counters reported in Pi are local character-based estimates over message text (`~3.5` chars/token, excluding image payloads and tool schemas) rather than official Google token counts.
 >
