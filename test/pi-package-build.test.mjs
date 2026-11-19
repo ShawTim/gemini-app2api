@@ -91,7 +91,10 @@ test('buildPiPackage and verifyPiPackageStaging produce clean 40-file Marketplac
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.repository?.directory, 'extensions/pi');
   assert.ok(pkg.keywords.includes('pi-package'));
-  assert.deepEqual(pkg.pi, { extensions: ['./extensions/pi/index.js'] });
+  assert.deepEqual(pkg.pi, {
+    image: 'https://raw.githubusercontent.com/ShawTim/gemini-app2api/main/docs/assets/pi-extension.jpg',
+    extensions: ['./extensions/pi/index.js'],
+  });
   assert.deepEqual(pkg.peerDependencies, {
     '@earendil-works/pi-ai': '*',
     '@earendil-works/pi-coding-agent': '*',

@@ -50,7 +50,11 @@ export async function verifyPiPackageStaging({
     assert.ok(pkg.repository && typeof pkg.repository.url === 'string', 'repository metadata must be preserved');
     assert.equal(pkg.repository.directory, 'extensions/pi', 'repository.directory must point to extensions/pi');
     assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.includes('pi-package'), 'keywords must include "pi-package"');
-    assert.deepEqual(pkg.pi, { extensions: meta.piExtensions }, 'pi.extensions must match package-meta.json');
+    assert.deepEqual(
+      pkg.pi,
+      { ...(meta.piImage ? { image: meta.piImage } : {}), extensions: meta.piExtensions },
+      'pi manifest must match package-meta.json',
+    );
     assert.equal(pkg.peerDependencies?.['@earendil-works/pi-ai'], '*', 'peerDependencies must declare @earendil-works/pi-ai: "*"');
     assert.equal(pkg.peerDependencies?.['@earendil-works/pi-coding-agent'], '*', 'peerDependencies must declare @earendil-works/pi-coding-agent: "*"');
 

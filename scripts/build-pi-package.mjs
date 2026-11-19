@@ -261,6 +261,17 @@ export function buildPiPackage({
   ) {
     throw new Error('extensions/pi/package-meta.json must specify piExtensions containing ./extensions/pi/index.js');
   }
+  if (meta.piImage !== undefined) {
+    let parsedImage;
+    try {
+      parsedImage = typeof meta.piImage === 'string' ? new URL(meta.piImage) : null;
+    } catch {
+      parsedImage = null;
+    }
+    if (!parsedImage || parsedImage.protocol !== 'https:') {
+      throw new Error('extensions/pi/package-meta.json piImage must be a valid https:// URL');
+    }
+  }
 
   const allowedSet = new Set(allowedRuntimeFiles);
   for (const extEntry of meta.piExtensions) {
@@ -379,6 +390,7 @@ export function buildPiPackage({
     publishConfig: { access: 'public' },
     engines: meta.engines || { node: '>=22.0.0' },
     pi: {
+      ...(meta.piImage ? { image: meta.piImage } : {}),
       extensions: [...meta.piExtensions],
     },
     peerDependencies: { ...(meta.peerDependencies || {}) },
