@@ -2,6 +2,14 @@
 
 Release notes for Gemini App2API.
 
+## 1.5.3 — 2026-11-20
+
+### Transport resilience (HTTP/2 PING keepalive, `HTTPS_PROXY` support, single-account recovery) & Admin UI v2 visual refresh
+- Added periodic `15s` HTTP/2 `PING` keepalives and TCP keepalive to `src/gateway/native-transport.mjs` to prevent 60-second silent-thinking/prefill socket EOF drops (`NATIVE_STREAM_CLOSED_EARLY`).
+- Added zero-dependency outbound HTTP(S) `CONNECT` proxy support (`src/gateway/outbound-proxy.mjs`) honoring `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY` across native HTTP/2 RPCs (generation, quota, subscription, terms, image upload), OAuth token/identity fetches, and `pi-gemini-app`.
+- Enabled `1` bounded same-account recovery retry (with `250ms` cancellable transport backoff; never retrying `429` quota or `401/403` auth) for single-account pools when `GATEWAY_AUTOMATIC_RECOVERY=1` is active (`src/gateway/pool.mjs`).
+- Redesigned Admin UI v2 (`src/admin-v2/styles.css`, `src/admin-v2/index.html`, `src/admin-v2/app.js`) with an obsidian graphite / warm Swiss alabaster theme, high-contrast monochrome primary actions, sapphire & emerald accents, left-aligned account card headers, and refined quota bars & login page while passing all 30 static WCAG AA checks and 70 Playwright browser tests.
+
 ## 1.5.2 — 2026-11-19
 
 ### Raised tool declaration limits (`256` tools / `512 KiB` / `16,384` nodes), `TOOL_SIZE_LIMIT` `error.param` diagnostics & `pi-gemini-app@0.1.5`
