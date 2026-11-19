@@ -38,5 +38,8 @@
     "npmSpec": "openclaw-gemini-app",
     "defaultChoice": "npm",
     "minHostVersion": ">=2026.11.6"
+  },
+  "openclawBuild": {
+    "openclawVersion": "2026.11.6"
   }
 }

@@ -332,6 +332,7 @@ export function buildOpenClawPackage({
       extensions: meta.openclawExtensions,
       compat: meta.openclawCompat,
       ...(meta.openclawInstall ? { install: meta.openclawInstall } : {}),
+      ...(meta.openclawBuild ? { build: meta.openclawBuild } : {}),
     },
     files: publishedFiles,
     dependencies: {},
