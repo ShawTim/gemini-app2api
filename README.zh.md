@@ -69,6 +69,9 @@
 ## 快速開始
 
 <a id="pi-extension"></a>
+
+![pi-gemini-app —— 零伺服器原生 HTTP/2 Pi 擴充套件](docs/assets/pi-extension.jpg)
+
 > [!TIP]
 > **使用 Pi Coding Agent 或 GooeyPi？無須啟動獨立閘道伺服器。**
 > 直接從 [npm（`pi-gemini-app`）](https://www.npmjs.com/package/pi-gemini-app) 或 Pi Marketplace 安裝零依賴原生 HTTP/2 擴充套件，免跑本地 HTTP Proxy 或 Docker 容器：

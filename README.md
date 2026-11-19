@@ -69,6 +69,9 @@ Ever noticed how Gemini can feel constrained inside the consumer Gemini App—lo
 ## Quick Start
 
 <a id="pi-extension"></a>
+
+![pi-gemini-app — Native Pi Extension for Gemini Neon over Direct HTTP/2](docs/assets/pi-extension.jpg)
+
 > [!TIP]
 > **Using Pi Coding Agent or GooeyPi? No gateway server required.**
 > Install the standalone zero-dependency native HTTP/2 extension directly from [npm (`pi-gemini-app`)](https://www.npmjs.com/package/pi-gemini-app) or Pi Marketplace—zero local HTTP proxy or Docker container needed:

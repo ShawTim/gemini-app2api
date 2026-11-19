@@ -152,7 +152,7 @@ export function sourceFiles(base = root) {
   files.push(
     ...fs
       .readdirSync(path.join(base, "docs/assets"))
-      .filter((n) => /^(?:admin-v2-demo-[a-z-]+|mgga)\.(?:png|jpg)$/.test(n))
+      .filter((n) => /^(?:admin-v2-demo-[a-z-]+|mgga|pi-extension)\.(?:png|jpg)$/.test(n))
       .map((n) => "docs/assets/" + n)
       .filter((n) => !tracked || tracked.has(n)),
   );
