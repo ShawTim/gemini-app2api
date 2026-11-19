@@ -2,6 +2,14 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.0 — 2026-11-20
+
+### Standalone zero-dependency OpenClaw provider plugin (`openclaw-gemini-app`) & retryable `503 SERVER_SHUTDOWN` restarts
+- Added a standalone zero-dependency native HTTP/2 provider plugin for **OpenClaw** (`extensions/openclaw/`, published as [`openclaw-gemini-app@0.1.1`](https://www.npmjs.com/package/openclaw-gemini-app)) with manifest-first `openclaw.plugin.json` (`gemini-app` provider, 512k `gemini-neon` / `gemini-hydrogen` and 128k `gemini-flash-lite` / `gemini-auto`, `gemini-argon` alias normalization, Free-tier model filtering), local browser & remote VPS OAuth login with automatic ToS acceptance and `refreshOAuth`, OpenClaw `requestAuth` v1 fresh token resolution with `assertCurrent()`, `/usage` quota snapshot integration + `/gemini-quota` command, failover & context-overflow classifiers, and full parity with the gateway's `15s` HTTP/2 `PING` keepalives, `HTTPS_PROXY` tunneling, and 256-tool support.
+- Added a deterministic OpenClaw package builder (`scripts/build-openclaw-package.mjs`), release verifier (`scripts/check-openclaw-package.mjs`, integrated into `npm run test:release`), and offline test suite (`test/openclaw-extension.test.mjs`, `test/openclaw-package-build.test.mjs`), verified with zero breakages/issues by `@openclaw/plugin-inspector` against `openclaw@2026.11.6` and `clawhub package publish --dry-run`; decoupled `src/gateway/oauth-identity.mjs` from `src/gateway/state.mjs` to eliminate `child_process` from the plugin closure.
+- Fixed in-flight gateway generation requests interrupted by server shutdown/restart (`src/gateway/app.mjs`) to return a standard retryable **`HTTP 503`** (`code: "SERVER_SHUTDOWN"`, `type: "server_error"`, `Retry-After: 2`) instead of non-retryable `499 invalid_request_error / NATIVE_TURN_ABORTED`, with regression coverage in `test/gateway-http.test.mjs`.
+- Added native extension showcase banners (`docs/assets/openclaw-extension.jpg`, `docs/assets/extensions-overview.jpg`) and `openclaw-gemini-app` npm badges across `README.md`, `README.zh.md`, and `extensions/openclaw/README.md`.
+
 ## 1.5.3 — 2026-11-20
 
 ### Transport resilience (HTTP/2 PING keepalive, `HTTPS_PROXY` support, single-account recovery) & Admin UI v2 visual refresh
