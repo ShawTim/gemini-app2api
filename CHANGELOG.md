@@ -2,6 +2,13 @@
 
 Release notes for Gemini App2API.
 
+## 1.5.1 — 2026-11-19
+
+### Gemini Neon 512k context window, live `neon_pro_policy` quota telemetry & README refresh
+- Raised the advertised advisory `context_window` / `contextWindow` for **`gemini-neon`** from `128000` to **`512000`** across `GET /v1/models` (`src/gateway/app.mjs`), `pi-gemini-app@0.1.4` (`extensions/pi/provider.js`), Admin UI v2 (`src/admin-v2/app.js`), and documentation after live needle-in-a-haystack probes confirmed both `gemini-neon` and `gemini-hydrogen` retain start, middle, and tail instructions through `800k` real tokens before upstream silent tail truncation near `~1M`.
+- Updated the empirical `GetUsageInfo` quota comparison across `README.md`, `README.zh.md`, `extensions/pi/README.md`, and Admin UI v2 presets from retired Argon-era `~60x` weights to current `neon_pro_policy` measurements (`gemini-neon` is `~1.5x–2x` the quota cost of `gemini-hydrogen` on `thinking=2` coding & multi-tool turns, and `~4x–5x` on `thinking=0` long-text generation, with `gemini-neon` now promoted in default Admin UI presets).
+- Added the `pi-gemini-app` Chad Dragon banner image (`docs/assets/pi-extension.jpg`) to `README.md`, `README.zh.md`, and the curated release asset allowlist (`scripts/release-files.mjs`).
+
 ## 1.5.0 — 2026-11-19
 
 ### Gemini Neon (`gemini-neon`), `gemini-argon` compatibility alias, tool-result hallucination suppression & `pi-gemini-app@0.1.3`
