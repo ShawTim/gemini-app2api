@@ -2,6 +2,13 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.3 — 2026-11-20
+
+### Clean short-reply stall recovery, tighter idle watchdogs & safe deliverable-output gating (`pi-gemini-app@0.1.8`, `openclaw-gemini-app@0.1.4`)
+- Fixed short (`< 2,048 B`) verified plain-text replies that stall upstream without `completed: true` / `END_STREAM` (`src/native-provider.mjs`, `src/gateway/app.mjs`, `src/gateway/response-delivery.mjs`, `extensions/pi/stream.js`): once all output validations pass (verified mode/attribution, no unclosed `tool_call` fence, tool choice satisfied, no soft-error/refusal, valid structured JSON), the gateway flushes the reply with `finish_reason: "stop"`, `incomplete: true`, and `data: [DONE]` on attempt 1 (eliminating `shortOutputRetry` and client 300s headers-timeout retry loops), and standalone `pi-gemini-app@0.1.8` / `openclaw-gemini-app@0.1.4` finish cleanly with `done` (`stop` / `toolUse`).
+- Tightened upstream idle watchdogs in `src/native-provider.mjs` to **`2s`** (`postCompleteGraceMs`), **`6s`** (`postToolIdleMs`), and **`15s`** (`postOutputIdleMs`), and strictly gated all watchdogs so they **only arm when verified, complete, deliverable output already exists** — preventing premature `504 -> 422 GENERATION_FAILED` aborts during slow mid-`tool_call`, mid-JSON, or prefill pauses.
+- Added npm publish helper scripts (`publish:pi`, `publish:openclaw:npm`, `publish:openclaw:clawhub`, `publish:openclaw`, `publish:extensions`) to `package.json`.
+
 ## 1.6.2 — 2026-11-20
 
 ### Long-context streaming resilience, upstream idle watchdogs & OpenClaw `reasoning_content` compatibility
