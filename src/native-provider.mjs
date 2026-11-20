@@ -11,7 +11,7 @@ import { MODEL_ALIASES, MODEL_MODES, NATIVE_MODELS, canonicalModel, normalizeCha
 import { RESPONSE_TOOL_IDENTITIES } from './responses-tool-namespaces.mjs';
 import { safeNativeEvidence } from './gateway/native-evidence.mjs';
 import { decodePassiveQuota, mergeQuotaObservation } from './gateway/quota.mjs';
-import { uploadNativeImages } from './gateway/image-upload.mjs';
+import { uploadNativeImages, createImageBlobCache } from './gateway/image-upload.mjs';
 import { downloadRemoteImages } from './gateway/image-download.mjs';
 import { quotaDowngradeCode } from './gateway/quota-failover.mjs';
 import { inspectNativeOutput } from './gateway/output-recovery.mjs';
@@ -101,7 +101,7 @@ function safeFailure(error) {
 
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, timeoutMs = 600_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
@@ -114,10 +114,60 @@ export class NativeDirectProvider {
     if (!allowedModels.includes(resolvedAlias)) throw protocolError('UNSUPPORTED_MODEL', 400);
     this.authManager = authManager; this.openTurn = openTurn; this.uploadImages = uploadImages; this.timeoutMs = timeoutMs;
     this.downloadImages = downloadImages;
+    this.blobCache = blobCache ?? null;
     if (typeof allowTextSnapshotReplacement !== 'boolean') throw new TypeError('invalid snapshot policy');
     this.allowTextSnapshotReplacement = allowTextSnapshotReplacement;
     this.allowAutoModel = allowAutoModel;
     this.modelAlias = resolvedAlias; this.continuationEnabled = false;
+  }
+
+  async #resolveImageAttachments(accountId, token, images, { signal, timeoutMs, bypassCache = false } = {}) {
+    if (!images.length) return { attachments: [], usedCachedKeys: [] };
+    const uploadTimeoutMs = Math.min(timeoutMs, 180000);
+    const cache = !bypassCache ? this.blobCache : null;
+    const scope = `${accountId}:${crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 16)}`;
+    const keys = images.map(img => (this.blobCache && Buffer.isBuffer(img.data) ? this.blobCache.keyOf(scope, img.mimeType, img.data) : null));
+    const attachments = new Array(images.length);
+    const usedCachedKeys = [];
+    const missImages = [];
+    const missKeyToSlot = new Map();
+    const missSlotIndices = [];
+    for (let i = 0; i < images.length; i++) {
+      const key = keys[i];
+      const cached = cache && key ? cache.get(key) : null;
+      if (cached && cached.mimeType === images[i].mimeType) {
+        attachments[i] = cached;
+        usedCachedKeys.push(key);
+        continue;
+      }
+      if (key && missKeyToSlot.has(key)) {
+        missSlotIndices[missKeyToSlot.get(key)].push(i);
+      } else {
+        const slot = missImages.length;
+        if (key) missKeyToSlot.set(key, slot);
+        missImages.push(images[i]);
+        missSlotIndices.push([i]);
+      }
+    }
+    if (missImages.length) {
+      const uploaded = await this.uploadImages(token, missImages, { signal, timeoutMs: uploadTimeoutMs });
+      if (
+        !Array.isArray(uploaded) ||
+        uploaded.length !== missImages.length ||
+        uploaded.some((attachment, index) => attachment?.mimeType !== missImages[index].mimeType || typeof attachment.blobId !== 'string' || !attachment.blobId.length)
+      ) {
+        fail('INVALID_NATIVE_IMAGE_UPLOAD');
+      }
+      for (let slot = 0; slot < uploaded.length; slot++) {
+        const item = uploaded[slot];
+        for (const targetIndex of missSlotIndices[slot]) {
+          attachments[targetIndex] = item;
+          const key = keys[targetIndex];
+          if (this.blobCache && key) this.blobCache.set(key, item);
+        }
+      }
+    }
+    return { attachments, usedCachedKeys };
   }
 
   buildTurn(body) { return buildCanonicalPrompt(normalizeChatRequest(body, { allowAutoModel: this.allowAutoModel })); }
@@ -273,19 +323,21 @@ export class NativeDirectProvider {
       catch (error) { if (error instanceof ProtocolError || ['NATIVE_PERMISSION_OR_AUTH','NATIVE_CREDENTIAL_REQUIRED','OAUTH_REFRESH_FAILED','ACCOUNT_LOGIN_REQUIRED'].includes(error?.code)) throw safeFailure(error); fail('NATIVE_AUTH_FAILED', 503); }
       if (controller.signal.aborted) await deadline;
       phase = 'upload';
-      const attachments = images.length ? await bounded(this.uploadImages(token, images, { signal: controller.signal, timeoutMs: Math.min(timeoutMs, 60000) })) : [];
-      if (!Array.isArray(attachments) || attachments.length !== images.length || attachments.some((attachment, index) => attachment?.mimeType !== images[index].mimeType || typeof attachment.blobId !== 'string' || !attachment.blobId.length)) fail('INVALID_NATIVE_IMAGE_UPLOAD');
+      let { attachments, usedCachedKeys } = await bounded(this.#resolveImageAttachments(accountId, token, images, { signal: controller.signal, timeoutMs }));
       if (controller.signal.aborted) await deadline;
       // The product injects its independent transport; historical research ledgers are untouched.
-      phase = 'open';
-      turn = this.openTurn(token, { messages, images: attachments, temporaryChat: true,
-        modeCategory: isAutoModel ? null : modeCategory,
-        thinkingLevel: isAutoModel ? null : body.thinking_level,
-        ...(isAutoModel ? { smartModelSelection: true } : {}),
-        timeoutMs, signal: controller.signal,
-        emitHeaders: incremental,
-        ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
-      iterator = turn.events[Symbol.asyncIterator]();
+      const STALE_BLOB_CODES = new Set(['NATIVE_HTTP_REJECTED', 'NATIVE_INVALID_STATUS', 'NATIVE_PRECONDITION_REQUIRED', 'NATIVE_TURN_FAILED']);
+      for (let blobAttempt = 0; ; blobAttempt++) {
+        phase = 'open';
+        turn = this.openTurn(token, { messages, images: attachments, temporaryChat: true,
+          modeCategory: isAutoModel ? null : modeCategory,
+          thinkingLevel: isAutoModel ? null : body.thinking_level,
+          ...(isAutoModel ? { smartModelSelection: true } : {}),
+          timeoutMs, signal: controller.signal,
+          emitHeaders: incremental,
+          ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
+        iterator = turn.events[Symbol.asyncIterator]();
+        try {
       for (;;) {
         phase = 'read';
         const item = await bounded(iterator.next());
@@ -387,6 +439,25 @@ export class NativeDirectProvider {
           if (event.httpStatus !== 200 || (grpc !== null && grpc !== undefined && grpc !== 0)) fail('NATIVE_TURN_FAILED');
           break;
         } else fail('INVALID_NATIVE_EVENT');
+      }
+          break;
+        } catch (turnErr) {
+          const safeErr = safeFailure(turnErr);
+          const canRetryFreshBlobs =
+            blobAttempt === 0 &&
+            usedCachedKeys.length > 0 &&
+            frames === 0 &&
+            !outputObserved &&
+            !controller.signal.aborted &&
+            STALE_BLOB_CODES.has(safeErr.code);
+          if (!canRetryFreshBlobs) throw turnErr;
+          for (const key of usedCachedKeys) this.blobCache?.delete(key);
+          try { turn?.cancel(); } catch {}
+          turn = null; iterator = null; ended = false; grpc = null; httpStatus = null;
+          phase = 'upload';
+          ({ attachments, usedCachedKeys } = await bounded(this.#resolveImageAttachments(accountId, token, images, { signal: controller.signal, timeoutMs, bypassCache: true })));
+          if (controller.signal.aborted) await deadline;
+        }
       }
       phase = 'validate';
       if (downgrade) fail('MODEL_DOWNGRADE_REJECTED');

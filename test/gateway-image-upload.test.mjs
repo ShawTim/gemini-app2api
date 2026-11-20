@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { uploadNativeImages } from '../src/gateway/image-upload.mjs';
+import { uploadNativeImages, createImageBlobCache } from '../src/gateway/image-upload.mjs';
+import { MAX_IMAGES, MAX_IMAGE_BYTES } from '../src/image-input.mjs';
 
 const TOKEN = 'synthetic-test-token';
 const images = [{ mimeType: 'image/png', data: Buffer.from('png\0bytes') }, { mimeType: 'image/jpeg', data: Buffer.from([0xff, 0xd8, 1]) }];
@@ -34,9 +35,9 @@ async function code(promise, expected) {
   await assert.rejects(promise, error => { assert.equal(error.code, `NATIVE_IMAGE_UPLOAD_${expected}`); return true; });
 }
 
-test('POST then PUT carries exact protocol and raw bytes in image order', async () => {
+test('POST then PUT carries exact protocol and raw bytes in image order (including parallel multiplexing)', async () => {
   const h = harness();
-  const result = await uploadNativeImages(TOKEN, images, {}, { connect: h.connect });
+  const result = await uploadNativeImages(TOKEN, images, { concurrency: 1 }, { connect: h.connect });
   assert.deepEqual(result, [{ blobId: 'blob-id', mimeType: 'image/png' }, { blobId: 'blob-id', mimeType: 'image/jpeg' }]);
   assert.equal(h.calls.length, 4);
   for (let i = 0; i < 2; i++) {
@@ -51,14 +52,56 @@ test('POST then PUT carries exact protocol and raw bytes in image order', async 
     assert.equal(put.headers['x-goog-upload-command'], 'upload, finalize'); assert.equal(put.headers['x-goog-upload-offset'], '0');
     assert.deepEqual(put.body, image.data); assert.equal(put.headers['content-length'], String(image.data.length));
   }
+
+  // Parallel batch of 12 images preserves exact input order even when PUT responses complete out of order.
+  const batch = Array.from({ length: 12 }, (_, i) => ({ mimeType: 'image/png', data: Buffer.from(`img-${i}`) }));
+  let activeStreams = 0, peakStreams = 0, uploadSeq = 0;
+  const session = new EventEmitter();
+  session.destroyed = false; session.closed = false; session.destroy = () => { session.destroyed = true; };
+  session.request = (headers) => {
+    const stream = new EventEmitter(); stream.headers = headers; stream.rstCode = 0;
+    stream.end = (body) => {
+      activeStreams++; peakStreams = Math.max(peakStreams, activeStreams);
+      const delay = headers[':method'] === 'PUT' ? (12 - Number(Buffer.from(body).toString().slice(4))) * 2 : 1;
+      setTimeout(() => {
+        activeStreams--;
+        if (headers[':method'] === 'POST') {
+          const id = ++uploadSeq;
+          stream.emit('response', { ':status': 200, 'x-goog-upload-status': 'active', 'x-goog-upload-url': `https://push.clients6.google.com/upload/session?id=${id}` });
+          stream.emit('end'); stream.emit('close');
+        } else {
+          const label = Buffer.from(body).toString();
+          stream.emit('response', { ':status': 200, 'x-goog-upload-status': 'final' });
+          stream.emit('data', Buffer.from(`blob-${label}`));
+          stream.emit('end'); stream.emit('close');
+        }
+      }, delay);
+    };
+    return stream;
+  };
+  const parallelResult = await uploadNativeImages(TOKEN, batch, { concurrency: 6 }, { connect: () => session });
+  assert.ok(peakStreams >= 2, `expected concurrent HTTP/2 uploads, saw peak=${peakStreams}`);
+  assert.deepEqual(parallelResult.map(r => r.blobId), batch.map((_, i) => `blob-img-${i}`));
+
+  // ImageBlobCache isolates strictly by accountId and expires cleanly by TTL.
+  let now = 1000;
+  const cache = createImageBlobCache({ maxEntries: 2, ttlMs: 5000, now: () => now });
+  const kA = cache.keyOf('acc-a', 'image/png', batch[0].data);
+  const kB = cache.keyOf('acc-b', 'image/png', batch[0].data);
+  assert.notEqual(kA, kB);
+  cache.set(kA, { blobId: 'blob-a', mimeType: 'image/png' });
+  assert.deepEqual(cache.get(kA), { blobId: 'blob-a', mimeType: 'image/png' });
+  assert.equal(cache.get(kB), null);
+  now += 6000;
+  assert.equal(cache.get(kA), null);
 });
 
 test('empty batch avoids token/network work; invalid count, size, MIME and pre-abort send nothing', async () => {
   let connects = 0; const connect = () => { connects++; throw Error(); };
   assert.deepEqual(await uploadNativeImages('', [], {}, { connect }), []); assert.equal(connects, 0);
-  await code(uploadNativeImages(TOKEN, Array(5).fill(images[0]), {}, { connect }), 'INVALID_RESPONSE');
+  await code(uploadNativeImages(TOKEN, Array(MAX_IMAGES + 1).fill(images[0]), {}, { connect }), 'INVALID_RESPONSE');
   await code(uploadNativeImages(TOKEN, [{ mimeType: 'image/gif', data: Buffer.from('x') }], {}, { connect }), 'INVALID_RESPONSE');
-  await code(uploadNativeImages(TOKEN, [{ mimeType: 'image/png', data: Buffer.alloc(2 * 1024 * 1024 + 1) }], {}, { connect }), 'INVALID_RESPONSE');
+  await code(uploadNativeImages(TOKEN, [{ mimeType: 'image/png', data: Buffer.alloc(MAX_IMAGE_BYTES + 1) }], {}, { connect }), 'INVALID_RESPONSE');
   for (const token of ['has space', 'has\ttab', 'x'.repeat(65537)]) await code(uploadNativeImages(token, images.slice(0, 1), {}, { connect }), 'INVALID_RESPONSE');
   await code(uploadNativeImages(TOKEN, images.slice(0, 1), { timeoutMs: 0.5 }, { connect }), 'INVALID_RESPONSE');
   const controller = new AbortController(); controller.abort();

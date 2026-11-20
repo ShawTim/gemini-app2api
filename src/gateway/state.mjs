@@ -54,9 +54,11 @@ function resolveDefaultOAuthProfile(candidate = DEFAULT_OAUTH_PROFILE) {
 }
 // Retired compaction fields may remain in an existing state file, but are never
 // exposed or applied. Do not rewrite operator state merely to upgrade runtime.
+const LEGACY_DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 function currentStoredSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw fault('INVALID_SETTINGS');
   const { contextCompaction: _retiredEnabled, compactionThresholdBytes: _retiredThreshold, ...current } = input;
+  if (current.maxBodyBytes === LEGACY_DEFAULT_MAX_BODY_BYTES) current.maxBodyBytes = defaults.maxBodyBytes;
   return current;
 }
 export const defaults = Object.freeze({
@@ -64,7 +66,7 @@ export const defaults = Object.freeze({
   port: 18989,
   timeoutMs: 180000,
   maxConcurrent: 8,
-  maxBodyBytes: 4 * 1024 * 1024,
+  maxBodyBytes: 128 * 1024 * 1024,
   maxPromptBytes: 0,
   continuation: false,
   allowRemoteImages: false,
@@ -91,7 +93,7 @@ export function validateSettings(input, { partial = false } = {}) {
     port: [0, 65535],
     timeoutMs: [1000, 600000],
     maxConcurrent: [1, 64],
-    maxBodyBytes: [1024, 16 * 1024 * 1024],
+    maxBodyBytes: [1024, 256 * 1024 * 1024],
     maxPromptBytes: [0, 16 * 1024 * 1024],
     sessionTtlMs: [1000, 86400000],
     maxSessions: [1, 4096],

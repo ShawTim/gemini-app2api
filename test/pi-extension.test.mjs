@@ -547,27 +547,26 @@ test('transcript repairs dangling aborted tool_calls and places batched tool ima
   assert.equal(normalized.messages.length, 7);
 });
 
-test('image budget keeps newest 4 valid static images and degrades older, oversized, and unsupported formats to text placeholders', async () => {
+test('image budget keeps large E2E screenshot batches and degrades >256-image, >20MB, and unsupported formats to text placeholders', async () => {
   const model = { id: 'gemini-argon', provider: 'gemini-app', api: 'gemini-app-api' };
-  const oversizedBase64 = Buffer.alloc(2 * 1024 * 1024 + 64, 1).toString('base64');
+  const oversizedBase64 = Buffer.alloc(20 * 1024 * 1024 + 64, 1).toString('base64');
   const context = {
     messages: [
       {
         role: 'user',
         content: [
-          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' }, // 5th newest -> degraded
+          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' }, // 257th newest -> degraded
           { type: 'image', data: 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', mimeType: 'image/gif' }, // unsupported -> degraded
-          { type: 'image', data: oversizedBase64, mimeType: 'image/png' }, // >2MB -> degraded
-          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' }, // #4 newest -> kept
-          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' }, // #3 newest -> kept
+          { type: 'image', data: oversizedBase64, mimeType: 'image/png' }, // >20MB -> degraded
+          ...Array.from({ length: 254 }, () => ({ type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' })),
         ],
         timestamp: 1,
       },
       {
         role: 'user',
         content: [
-          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' }, // #2 newest -> kept
-          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' }, // #1 newest -> kept
+          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' },
+          { type: 'image', data: VALID_PNG_BASE64, mimeType: 'image/png' },
         ],
         timestamp: 2,
       },
@@ -577,13 +576,13 @@ test('image budget keeps newest 4 valid static images and degrades older, oversi
   const { payload } = await buildChatPayload(model, context, {}, systemHelpers);
   const msg1 = payload.messages[0].content;
   assert.equal(msg1[0].type, 'text');
-  assert.match(msg1[0].text, /4-image limit/);
+  assert.match(msg1[0].text, /256-image limit/);
   assert.equal(msg1[1].type, 'text');
   assert.match(msg1[1].text, /unsupported format image\/gif/);
   assert.equal(msg1[2].type, 'text');
-  assert.match(msg1[2].text, /exceeded 2MB limit/);
+  assert.match(msg1[2].text, /exceeded 20MB limit/);
   assert.equal(msg1[3].type, 'image_url');
-  assert.equal(msg1[4].type, 'image_url');
+  assert.equal(msg1[256].type, 'image_url');
 
   const msg2 = payload.messages[1].content;
   assert.equal(msg2[0].type, 'image_url');

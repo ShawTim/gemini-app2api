@@ -1,4 +1,5 @@
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
+import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { NativeDirectProvider as DefaultNativeDirectProvider } from '../../src/native-provider.mjs';
 import { automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
 import { buildChatPayload as defaultBuildChatPayload } from './transcript.js';
@@ -204,6 +205,7 @@ export function createGeminiStreamHandler({
   if (typeof createAssistantMessageEventStream !== 'function') {
     throw new TypeError('createAssistantMessageEventStream is required');
   }
+  const sharedBlobCache = createImageBlobCache();
 
   function executeStream(model, context, options = {}, { simple = false } = {}) {
     const stream = createAssistantMessageEventStream();
@@ -354,6 +356,7 @@ export function createGeminiStreamHandler({
         };
         const provider = new NativeDirectProvider(authManager, {
           openTurn,
+          blobCache: sharedBlobCache,
           modelAlias: model.id,
           allowAutoModel: true,
         });

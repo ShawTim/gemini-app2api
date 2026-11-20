@@ -62,19 +62,20 @@ test('remote/file URLs, noncanonical base64, MIME mismatch, truncation and anima
 });
 
 test('image count, decoded byte/dimension and independent text budgets remain bounded', () => {
-  const atLimit = png({ padding: MAX_IMAGE_BYTES - PNG.length - 12 });
-  assert.equal(atLimit.length, MAX_IMAGE_BYTES); assert.equal(decodeImageDataUrl(url(atLimit)).data.length, MAX_IMAGE_BYTES);
-  assert.equal(normalizeChatRequest({ messages: [user([image(url(atLimit))])] }).messages.length, 1, 'base64 has its own bounded budget');
+  const large = png({ padding: 4 * 1024 * 1024 });
+  assert.equal(decodeImageDataUrl(url(large)).data.length, large.length);
+  assert.equal(normalizeChatRequest({ messages: [user([image(url(large))])] }).messages.length, 1, 'base64 has its own bounded budget');
+  assert.equal(normalizeChatRequest({ messages: [user(Array(32).fill(image()))] }).messages.length, 1, '32-image E2E batches pass without artificial 4-image rejection');
   rejected(() => decodeImageDataUrl(url(png({ padding: MAX_IMAGE_BYTES - PNG.length - 11 }))), 'IMAGE_TOO_LARGE', 413);
   rejected(() => normalizeChatRequest({ messages: [user(Array(MAX_IMAGES + 1).fill(image()))] }), 'IMAGE_COUNT_EXCEEDED', 413);
   assert.equal(collectImageInputs([user(Array(MAX_IMAGES).fill(image()))]).images.length, MAX_IMAGES);
-  const half = png({ padding: Math.floor(MAX_TOTAL_IMAGE_BYTES / 2) });
-  rejected(() => collectImageInputs([user([image(url(half)), image(url(half))])]), 'IMAGES_TOO_LARGE', 413);
+  const resolvedOverTotal = Array.from({ length: 13 }, () => ({ data: { length: MAX_IMAGE_BYTES }, mimeType: 'image/png', width: 1, height: 1 }));
+  rejected(() => collectImageInputs([user(Array(13).fill(image()))], resolvedOverTotal), 'IMAGES_TOO_LARGE', 413);
   rejected(() => decodeImageDataUrl(url(png({ width: 32769 }))), 'IMAGE_DIMENSIONS_TOO_LARGE', 413);
   rejected(() => decodeImageDataUrl(url(png({ width: 10000, height: 10000 }))), 'IMAGE_DIMENSIONS_TOO_LARGE', 413);
   rejected(() => normalizeChatRequest({ messages: [user([{ type: 'text', text: 'x'.repeat(PROMPT_MAX_BYTES - 200) }, image()])] }), 'PROMPT_TOO_LARGE', 413);
   rejected(() => normalizeChatRequest({ messages: [{ role: 'user', content: 'x'.repeat(200000) }, ...Array(21).fill({ role: 'user', content: 'x'.repeat(200000) })] }), 'REQUEST_TOO_LARGE', 413);
-  rejected(() => normalizeChatRequest({ messages: [user()], tools: [{ type: 'function', function: { name: 'x', description: url(atLimit).repeat(2) } }] }), 'REQUEST_TOO_LARGE', 413);
+  rejected(() => normalizeChatRequest({ messages: [user()], tools: [{ type: 'function', function: { name: 'x', description: url(large).repeat(2) } }] }), 'REQUEST_TOO_LARGE', 413);
 });
 
 test('canonical images are idempotent and retain ordered user/history association, never base64 prompt text', () => {
@@ -130,7 +131,7 @@ function inspectWire(frames, expected, mode = 3) {
 test('native codec rejects invalid internal attachments instead of dropping them; text wire stays unchanged', () => {
   const options = { userText: 'text', clientMetadata: { clientType: 21 } };
   assert.deepEqual(buildClientGenerate(options), buildClientGenerate({ ...options, images: [] }));
-  for (const images of [null, {}, Array(5).fill({ mimeType: 'image/png', data: PNG }), [{ mimeType: 'constructor', data: PNG }], [{ mimeType: 'image/png', data: 'not a Buffer' }], [{ mimeType: 'image/png', data: Buffer.alloc(MAX_TOTAL_IMAGE_BYTES + 1) }]]) assert.throws(() => buildClientGenerate({ ...options, images }), TypeError);
+  for (const images of [null, {}, Array(MAX_IMAGES + 1).fill({ mimeType: 'image/png', data: PNG }), [{ mimeType: 'constructor', data: PNG }], [{ mimeType: 'image/png', data: 'not a Buffer' }], [{ mimeType: 'image/png', data: Buffer.alloc(16) }]]) assert.throws(() => buildClientGenerate({ ...options, images }), TypeError);
   for (const blobId of ['', 'invalid id', 'id\nsecret', 'x'.repeat(4097)]) assert.throws(() => buildClientGenerate({ ...options, images: [{ mimeType: 'image/png', blobId }] }), TypeError);
   const request = buildClientGenerate({ ...options, images: [{ mimeType: 'image/png', blobId: 'synthetic_blob_id' }] });
   assert.equal(field(field(parse(field(request, 1)).find(x => x.number === 3).payload, 1), 1).toString(), 'synthetic_blob_id');
@@ -139,8 +140,8 @@ test('native codec rejects invalid internal attachments instead of dropping them
 
 test('Chat/Responses JSON/SSE and caller replay run complete resumable upload -> Blob ID -> generation pipeline', async t => {
   const f = await fixture({ accountCount: 1, allowFailover: false }); t.after(() => f.close());
-  const server = http2.createServer(), uploads = new Map(), readyBlobs = [], allIds = [], prompts = [];
-  let expectedBytes = PNG, number = 0, startCount = 0, putCount = 0;
+  const server = http2.createServer(), uploads = new Map(), allIds = [], prompts = [];
+  let expectedBytes = PNG, number = 0, startCount = 0, putCount = 0, lastUploaded = null;
   server.on('stream', (stream, headers) => {
     stream.on('error', () => {});
     const pathname = headers[':path'];
@@ -157,7 +158,7 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
       assert.ok(item); putCount++;
       stream.on('data', bytes => chunks.push(bytes)); stream.on('end', () => {
         const data = Buffer.concat(chunks); assert.equal(data.length, item.bytes); assert.deepEqual(data, expectedBytes);
-        const blobId = 'synthetic_blob_' + id; readyBlobs.push({ blobId, mimeType: item.mimeType }); allIds.push(blobId);
+        const blobId = 'synthetic_blob_' + id; lastUploaded = { blobId, mimeType: item.mimeType }; allIds.push(blobId);
         stream.respond({ ':status': 200, 'x-goog-upload-status': 'final' }); stream.end(blobId);
       });
     } else {
@@ -166,7 +167,7 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
       const reader = new GrpcMessageReader(), frames = [];
       stream.on('data', bytes => frames.push(...reader.push(bytes)));
       stream.on('end', () => {
-        reader.finish(); const prompt = inspectWire(frames, readyBlobs.splice(0)); prompts.push(prompt);
+        reader.finish(); const prompt = inspectWire(frames, [lastUploaded]); prompts.push(prompt);
         const answer = prompt.includes('TOOL_RESULT_IMAGE_FIXTURE') ? 'Synthetic final' : prompt.includes('fixture_lookup') ? toolBlock : 'Synthetic image answer';
         stream.respond({ ':status': 200, 'content-type': 'application/grpc' }, { waitForTrailers: true });
         stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '0' })); stream.end(frameGrpcMessage(textFrame(answer, 3, 2)));
@@ -191,13 +192,62 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
   const final = await f.api('/v1/chat/completions', { method: 'POST', body: { tools, messages: [user(), assistant, { role: 'tool', tool_call_id: assistant.tool_calls[0].id, content: 'TOOL_RESULT_IMAGE_FIXTURE' }] } });
   assert.equal(final.status, 200); assert.equal((await final.json()).choices[0].message.content, 'Synthetic final');
   assert.match(prompts.at(-1), new RegExp(assistant.tool_calls[0].id));
-  expectedBytes = png({ padding: MAX_IMAGE_BYTES - PNG.length - 12 });
+  expectedBytes = png({ padding: 3 * 1024 * 1024 });
   const large = await f.api('/v1/chat/completions', { method: 'POST', body: { messages: [user([image(url(expectedBytes))])] } });
   assert.equal(large.status, 200); assert.equal((await large.json()).choices[0].message.content, 'Synthetic image answer');
-  assert.equal(prompts.length, 7); assert.equal(startCount, 7); assert.equal(putCount, 7); assert.equal(new Set(allIds).size, 7);
+  // 6 identical PNG turns reuse 1 cached blobId on the same account; 1 distinct 3 MiB PNG uploads fresh = 2 total uploads.
+  assert.equal(prompts.length, 7); assert.equal(startCount, 2); assert.equal(putCount, 2); assert.equal(new Set(allIds).size, 2);
   const diagnostics = await f.admin('diagnostics'); assert.equal(diagnostics.status, 200);
   const safe = JSON.stringify(f.app.overview()) + JSON.stringify(f.store.data) + await diagnostics.text();
   assert.equal(safe.includes(PNG.toString('base64')), false); for (const id of allIds) assert.equal(safe.includes(id), false);
+});
+
+test('per-account blob cache isolates accounts and transparently re-uploads if a cached blob is rejected before frames', async t => {
+  const f = await fixture({ accountCount: 2, allowFailover: false }); t.after(() => f.close());
+  const uploadedByToken = [];
+  let seq = 0, rejectFirstCached = false;
+  f.app.provider.uploadImages = async (token, imgs) => imgs.map(img => {
+    const id = `blob_${++seq}`;
+    uploadedByToken.push({ token, id });
+    return { blobId: id, mimeType: img.mimeType };
+  });
+  const seenTurns = [];
+  f.app.provider.openTurn = (token, options) => {
+    seenTurns.push({ token, blobs: options.images.map(i => i.blobId) });
+    if (rejectFirstCached) {
+      rejectFirstCached = false;
+      return {
+        cancel() {},
+        getSafeStatus() { return { httpStatus: 200, grpcStatus: 3, ended: true }; },
+        events: (async function* () { yield { type: 'end', httpStatus: 200, grpcStatus: 3 }; })(),
+      };
+    }
+    return {
+      cancel() {},
+      getSafeStatus() { return { httpStatus: 200, grpcStatus: 0, ended: true }; },
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame('Synthetic cached ok', 3, 2) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    };
+  };
+  // Turn 1 on acc-0 uploads blob_1; Turn 2 on same session reuses blob_1; Turn 3 with simulated stale blob evicts & re-uploads blob_2.
+  const r1 = await f.api('/v1/chat/completions', { method: 'POST', headers: { 'X-Session-ID': 's1' }, body: { messages: [user()] } });
+  assert.equal(r1.status, 200);
+  const r2 = await f.api('/v1/chat/completions', { method: 'POST', headers: { 'X-Session-ID': 's1' }, body: { messages: [user()] } });
+  assert.equal(r2.status, 200);
+  assert.equal(uploadedByToken.length, 1);
+  assert.deepEqual(seenTurns[1].blobs, ['blob_1']);
+  rejectFirstCached = true;
+  const r3 = await f.api('/v1/chat/completions', { method: 'POST', headers: { 'X-Session-ID': 's1' }, body: { messages: [user()] } });
+  assert.equal(r3.status, 200);
+  assert.equal(uploadedByToken.length, 2);
+  assert.deepEqual(seenTurns.at(-1).blobs, ['blob_2']);
+  // Turn 4 on a different session routed to acc-1 must NOT reuse acc-0's blob_2.
+  const r4 = await f.api('/v1/chat/completions', { method: 'POST', headers: { 'X-Session-ID': 's2' }, body: { messages: [user()] } });
+  assert.equal(r4.status, 200);
+  assert.equal(uploadedByToken.length, 3);
+  assert.deepEqual(seenTurns.at(-1).blobs, ['blob_3']);
 });
 
 test('bad images fail before auth; upload failure/missing IDs never starts generation or emits SSE', async t => {

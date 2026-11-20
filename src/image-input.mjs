@@ -1,10 +1,11 @@
 import { parseRemoteImageUrl } from './image-url.mjs';
 import { protocolError } from './tool-protocol.mjs';
 
-export const MAX_IMAGES = 4;
-export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-export const MAX_TOTAL_IMAGE_BYTES = 2 * 1024 * 1024;
-export const MAX_IMAGE_URL_BYTES = Math.ceil(MAX_TOTAL_IMAGE_BYTES / 3) * 4 + 1024;
+export const MAX_IMAGES = 256;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_TOTAL_IMAGE_BYTES = 256 * 1024 * 1024;
+export const MAX_IMAGE_URL_BYTES = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 1024;
+export const MAX_TOTAL_IMAGE_URL_BYTES = Math.ceil(MAX_TOTAL_IMAGE_BYTES / 3) * 4 + MAX_IMAGES * 1024;
 const MAX_PIXELS = 40_000_000;
 const fail = (code, status = 400) => { throw protocolError(code, status); };
 const pngMagic = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

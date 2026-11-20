@@ -78,7 +78,7 @@ test('byte budget includes all inline and remote images; header and streaming ov
   });
   await rejected(downloadRemoteImages([{ url: remote }], {}, h), 'IMAGES_TOO_LARGE', 413);
   mode = 'stream';
-  await rejected(downloadRemoteImages([{ url: remote }, { data: Buffer.alloc(MAX_TOTAL_IMAGE_BYTES - 10) }], {}, h), 'IMAGES_TOO_LARGE', 413);
+  await rejected(downloadRemoteImages([{ url: remote }, { data: { length: MAX_TOTAL_IMAGE_BYTES - 10 } }], {}, h), 'IMAGES_TOO_LARGE', 413);
 });
 
 test('HTTP failures, wrong MIME/bytes, compression and truncated bodies fail without retry', async t => {

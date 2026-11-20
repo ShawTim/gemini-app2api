@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
-import { decodeImageDataUrl } from '../../src/image-input.mjs';
+import {
+  decodeImageDataUrl,
+  MAX_IMAGES,
+  MAX_IMAGE_BYTES,
+  MAX_TOTAL_IMAGE_BYTES,
+  MAX_IMAGE_URL_BYTES,
+} from '../../src/image-input.mjs';
 
-const MAX_IMAGES = 4;
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const MAX_TOTAL_IMAGE_BYTES = 2 * 1024 * 1024;
-const MAX_IMAGE_URL_BYTES = Math.ceil(MAX_TOTAL_IMAGE_BYTES / 3) * 4 + 1024;
 const ALLOWED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
 function sanitizeText(value) {
@@ -176,15 +178,15 @@ function planImageBudget(messages) {
       const byteLength = Buffer.byteLength(compactBase64, 'base64');
       const dataUrl = `data:${mimeType};base64,${compactBase64}`;
       if (byteLength <= 0 || byteLength > MAX_IMAGE_BYTES || Buffer.byteLength(dataUrl) > MAX_IMAGE_URL_BYTES) {
-        degraded.set(key, `[Image omitted: ${mimeType} exceeded 2MB limit]`);
+        degraded.set(key, `[Image omitted: ${mimeType} exceeded ${Math.round(MAX_IMAGE_BYTES / (1024 * 1024))}MB limit]`);
         continue;
       }
       if (count >= MAX_IMAGES) {
-        degraded.set(key, `[Image omitted: ${mimeType} exceeded 4-image limit]`);
+        degraded.set(key, `[Image omitted: ${mimeType} exceeded ${MAX_IMAGES}-image limit]`);
         continue;
       }
       if (totalBytes + byteLength > MAX_TOTAL_IMAGE_BYTES) {
-        degraded.set(key, `[Image omitted: ${mimeType} exceeded 2MB total image budget]`);
+        degraded.set(key, `[Image omitted: ${mimeType} exceeded ${Math.round(MAX_TOTAL_IMAGE_BYTES / (1024 * 1024))}MB total image budget]`);
         continue;
       }
       try {

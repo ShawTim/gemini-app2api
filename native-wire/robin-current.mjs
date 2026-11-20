@@ -55,8 +55,9 @@ export function buildRequestMetadata({ clientType, languageCode, interfaceLangua
 // Query.attachments (field 3) -> Attachment.blob (field 1), name (field 2).
 // Blob fields: ID (1), type (2 = 1), MIME (3), source (4 = 1).
 // Upload completes beforehand; raw image bytes are never inline-encoded here.
+export const MAX_NATIVE_IMAGE_ATTACHMENTS = 256;
 function imageAttachments(images) {
-  if (!Array.isArray(images) || images.length > 4) throw new TypeError('Invalid native images');
+  if (!Array.isArray(images) || images.length > MAX_NATIVE_IMAGE_ATTACHMENTS) throw new TypeError('Invalid native images');
   return images.map((image, index) => {
     const extension = image?.mimeType === 'image/png' ? 'png' : image?.mimeType === 'image/jpeg' ? 'jpg' : image?.mimeType === 'image/webp' ? 'webp' : null;
     const id = image?.blobId;

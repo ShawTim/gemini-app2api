@@ -16,7 +16,7 @@ export async function downloadRemoteImages(images, { signal, timeoutMs = 30000 }
 } = {}) {
   if (!Array.isArray(images) || images.length > MAX_IMAGES) fail('IMAGE_COUNT_EXCEEDED', 413);
   if (!images.some(image => image.url)) return images;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) fail('INVALID_IMAGE_DOWNLOAD_TIMEOUT');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 180000) fail('INVALID_IMAGE_DOWNLOAD_TIMEOUT');
   if (signal?.aborted) fail('IMAGE_DOWNLOAD_ABORTED', 499);
   const controller = new AbortController();
   let rejectStop;
