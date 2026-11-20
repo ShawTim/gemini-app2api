@@ -194,9 +194,17 @@ test('Chat/Responses JSON/SSE and caller replay run complete resumable upload ->
   assert.match(prompts.at(-1), new RegExp(assistant.tool_calls[0].id));
   expectedBytes = png({ padding: 3 * 1024 * 1024 });
   const large = await f.api('/v1/chat/completions', { method: 'POST', body: { messages: [user([image(url(expectedBytes))])] } });
-  assert.equal(large.status, 200); assert.equal((await large.json()).choices[0].message.content, 'Synthetic image answer');
-  // 6 identical PNG turns reuse 1 cached blobId on the same account; 1 distinct 3 MiB PNG uploads fresh = 2 total uploads.
-  assert.equal(prompts.length, 7); assert.equal(startCount, 2); assert.equal(putCount, 2); assert.equal(new Set(allIds).size, 2);
+  assert.equal(large.status, 200);
+  const largeBody = await large.json();
+  assert.equal(largeBody.choices[0].message.content, 'Synthetic image answer');
+  // Base64 image data (~4 MiB chars) must be excluded from text prompt_tokens and counted as fixed vision tokens (258/image).
+  assert.ok(largeBody.usage.prompt_tokens >= 258 && largeBody.usage.prompt_tokens < 1000, `expected compact image token estimate, got ${largeBody.usage.prompt_tokens}`);
+  const largeResp = await f.api('/v1/responses', { method: 'POST', body: { input: [{ role: 'user', content: [{ type: 'input_text', text: 'check usage' }, { type: 'input_image', image_url: url(expectedBytes) }] }] } });
+  assert.equal(largeResp.status, 200);
+  const largeRespBody = await largeResp.json();
+  assert.ok(largeRespBody.usage.input_tokens >= 258 && largeRespBody.usage.input_tokens < 1000, `expected compact Responses image token estimate, got ${largeRespBody.usage.input_tokens}`);
+  // 6 identical small PNG turns reuse 1 cached blobId; 2 identical 3 MiB PNG turns reuse 1 cached blobId = 2 total uploads.
+  assert.equal(prompts.length, 8); assert.equal(startCount, 2); assert.equal(putCount, 2); assert.equal(new Set(allIds).size, 2);
   const diagnostics = await f.admin('diagnostics'); assert.equal(diagnostics.status, 200);
   const safe = JSON.stringify(f.app.overview()) + JSON.stringify(f.store.data) + await diagnostics.text();
   assert.equal(safe.includes(PNG.toString('base64')), false); for (const id of allIds) assert.equal(safe.includes(id), false);

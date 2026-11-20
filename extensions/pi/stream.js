@@ -3,7 +3,7 @@ import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { NativeDirectProvider as DefaultNativeDirectProvider } from '../../src/native-provider.mjs';
 import { automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
 import { buildChatPayload as defaultBuildChatPayload } from './transcript.js';
-import { estimateUsage as defaultEstimateUsage } from '../../src/openai-usage.mjs';
+import { estimateUsage as defaultEstimateUsage, measurePromptImagePayload } from '../../src/openai-usage.mjs';
 
 const PREFIX_BYTES = 2048;
 
@@ -239,6 +239,7 @@ export function createGeminiStreamHandler({
       let hasToolCalls = false;
 
       let promptChars = 0;
+      let imageCount = 0;
 
       function ensureTextBlock() {
         if (!textBlock) {
@@ -335,6 +336,7 @@ export function createGeminiStreamHandler({
         promptChars = Array.isArray(body?.messages)
           ? body.messages.reduce((n, m) => n + contentChars(m?.content), 0)
           : 0;
+        ({ imageCount } = measurePromptImagePayload(body));
 
         const authManager = {
           getValidAccessToken: async () => {
@@ -480,7 +482,7 @@ export function createGeminiStreamHandler({
         await startOutput({ flushAll: true });
         endTextBlock();
 
-        const est = estimateUsage({ promptChars, outputBytes: publishedBytes });
+        const est = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
         partial.usage = {
           input: est.prompt_tokens,
           output: est.completion_tokens,
@@ -502,8 +504,8 @@ export function createGeminiStreamHandler({
           error?.code === 'NATIVE_TURN_ABORTED' ||
           error?.code === 'REQUEST_CANCELLED';
         const stopReason = isAborted ? 'aborted' : 'error';
-        if (publishedBytes > 0 || promptChars > 0) {
-          const est = estimateUsage({ promptChars, outputBytes: publishedBytes });
+        if (publishedBytes > 0 || promptChars > 0 || imageCount > 0) {
+          const est = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
           partial.usage = {
             input: est.prompt_tokens,
             output: est.completion_tokens,

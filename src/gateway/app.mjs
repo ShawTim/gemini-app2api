@@ -16,6 +16,7 @@ import { RequestResumption } from './request-resumption.mjs';
 import { QuotaRefreshJobs } from './quota-refresh-jobs.mjs';
 import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
+import { measurePromptImagePayload } from '../openai-usage.mjs';
 const uiRoot = new URL("../admin-v2/", import.meta.url);
 const assets = new Map([
   ["/admin", "index.html"],
@@ -435,10 +436,12 @@ export function createGateway({
       }, settings.timeoutMs + 1000);
     timer.unref();
     controllers.add(controller);
+    const { imageCount, imageUrlChars } = measurePromptImagePayload(body);
     const delivery = createResponseDelivery(res, { route, stream: outputStreaming, model: canonical.model,
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
-      promptChars: body.__promptChars, deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
+      promptChars: Math.max(0, (body.__promptChars ?? 0) - imageUrlChars), imageCount,
+      deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
       signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000) });
     let resolveInFlight;
     const inFlightPromise = new Promise((r) => { resolveInFlight = r; });

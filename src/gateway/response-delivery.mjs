@@ -61,7 +61,7 @@ async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
     else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000 } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000 } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
     requestedThinkingLevel: thinkingLevel, ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }) };
   let started = false, settled = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
@@ -94,7 +94,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // Ordinary upstream responses carry no token accounting. Usage is therefore a
   // labelled estimate over the caller request and the delivered output, never a
   // value read from Google.
-  const estimateUsage = (outputBytes = bytes) => estimateTokenUsage({ promptChars, outputBytes });
+  const estimateUsage = (outputBytes = bytes) => estimateTokenUsage({ promptChars, imageCount, outputBytes });
   const output = [];
   const sendWire = async chunk => {
     await write(res, chunk, signal, writeTimeoutMs);
