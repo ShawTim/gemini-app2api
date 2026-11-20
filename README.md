@@ -2,9 +2,9 @@
 
 # Gemini App2API
 
-**Your coding agents. Your Gemini subscriptions. One zero-dependency native HTTP/2 gateway.**
+**Your coding agents. Your Gemini subscriptions. Zero-dependency native HTTP/2.**
 
-Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents, and SDKs through a self-hosted Node.js gateway—featuring incremental SSE, caller-owned tool validation, multi-account failover, and a bilingual operations console—or run our standalone zero-dependency in-process extensions ([`pi-gemini-app`](#pi-extension) for Pi / GooeyPi and [`openclaw-gemini-app`](#openclaw-plugin) for OpenClaw) with no gateway server required.
+Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **Cursor**, **Cline**, **Roo Code**, **Codex CLI**, and OpenAI SDKs—via standalone in-process plugins (no server needed) or a self-hosted Node.js gateway with multi-account pooling.
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
 [![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
@@ -14,164 +14,83 @@ Connect your own eligible Gemini accounts to OpenAI-compatible IDEs, CLI agents,
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Pi Extension](#pi-extension) · [OpenClaw Plugin](#openclaw-plugin) · [Connect Your Client](#connect-your-client) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
+**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Connect Client](#connect-your-client) · [Models & Quota](#quota-consumption) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
 
 </div>
 
 > [!IMPORTANT]
-> **Unofficial interoperability research project.** Not affiliated with, endorsed by, or sponsored by Google. Using third-party clients or gateways may violate Google's Terms of Service—your accounts, your responsibility. You must sign in personally with your own eligible Google accounts; no user credentials, tokens, accounts, or Google binaries are distributed. Read the full [Disclaimer](DISCLAIMER.md).
-
-![Gemini App2API Operations Console — Dark Theme (synthetic demo data)](docs/assets/admin-v2-demo-dark-desktop.png)
-
----
-
-## Why Gemini App2API?
-
-<p align="center">
-  <img src="docs/assets/mgga.jpg" alt="MGGA — GigaChad Gemini Model vs Derpy Consumer App Harness" width="400" />
-  <br />
-  <sub><strong>🧢 MGGA — Make Gemini Great Again:</strong> A frontier GigaChad model trapped inside a consumer chat harness.</sub>
-</p>
-
-Ever noticed how Gemini can feel constrained inside the consumer Gemini App—losing thread context or struggling to drive multi-step local engineering workflows? **The bottleneck is rarely the base model; it is the consumer chat harness wrapped around it.**
-
-- **Free the model into real engineering harnesses:** Connect **Cursor, Cline, Roo Code, OpenAI Codex CLI, Pi Coding Agent, GooeyPi, PI-Desktop, Cherry Studio, or Open WebUI** via standard `/v1/chat/completions` and `/v1/responses` endpoints—or install the standalone native in-process Pi extension (`pi install npm:pi-gemini-app`) for Pi Coding Agent & GooeyPi with zero gateway server required.
-- **Native HTTP/2 protocol—not brittle web scraping:** Communicates directly with Gemini's Robin HTTP/2 service using pure Node.js built-ins (`node:http2`, `node:crypto`), without headless browsers, cookie scraping, or patching local desktop binaries.
-- **Multi-account pooling for rolling usage windows:** Intensive agentic coding can hit a single account's 5-hour or weekly window quickly. Pool multiple accounts you legitimately own with soft session affinity, read-only official usage bars, and configurable quota failover.
-- **Built to protect agent loops:** Prevents coding agents from discarding 3,000+ bytes of streamed code or infinitely re-sending full conversation histories when upstream streams reset mid-turn (see [Completion Contract](docs/COMPLETION_CONTRACT.md)).
-- **Honest upstream boundaries:** Decoupling the local client harness does **not** bypass Google's servers—all upstream context limits, rate limits, safety filters, and account entitlements remain enforced by Google.
-
-### How It Compares
-
-| Dimension | **Gemini App2API** | Web / Cookie Scrapers | Desktop App Injection / MITM |
-|---|---|---|---|
-| **Transport** | Direct native HTTP/2 (`ProcessQuery`) + resumable image upload | Fragile web DOM or reverse-engineered browser cookies | Binary hooks or local traffic interception |
-| **Auth lifecycle** | Standard Google OAuth + refresh tokens in `0600` local state | Frequent cookie expiration & CAPTCHA friction | Coupled to a single running desktop GUI session |
-| **Tool calling** | Schema-validated prompt protocol + Responses `namespace` support | Unvalidated text regex or unsupported | Limited to built-in consumer UI capabilities |
-| **Multi-account** | Pooled routing, soft session affinity, batch usage & tier telemetry | Manual cookie swapping | Single active desktop user |
-| **Runtime footprint** | Pure Node.js `>= 22`, **0 production npm dependencies** | Playwright / Puppeteer / heavy Python stacks | OS-specific app bundle & binary version lock |
-
----
-
-## Key Features
-
-- **Scoped OpenAI Compatibility (`Chat` & `Responses`):** Supports `GET /v1/models`, `POST /v1/chat/completions`, and `POST /v1/responses` with JSON or incremental SSE streaming, Structured Outputs (`json_schema` and `json_object` via Chat `response_format` and Responses `text.format`, schema-validated before delivery), `native_search` public-web `url_citation` annotations, `reasoning_effort` / `reasoning.effort` mapping, and static PNG/JPEG/WebP image input.
-- **Caller-Owned Function Tools:** Clients declare JSON Schema functions (including Responses `type: "namespace"` groups), execute approved calls locally, and replay results. The gateway validates every tool name and argument schema before emission—never executing shell commands or touching your workspace.
-- **Zero-Dependency, Security-First Runtime:** Zero third-party production npm packages. Enforces `0700`/`0600` private state permissions, `scrypt` admin password hashing, SHA-256 API key lookup digests with `0600` private-state key storage (returned only at creation or via authenticated CSRF-protected reveal requests), strict `Origin`/`Host`/`X-CSRF-Token` admin protections, and SSRF-guarded opt-in remote image fetching.
-- **Bilingual Operations Console (`English` / `繁體中文`):** Inspect pool pulse, request-latency snapshot sparklines, and metadata-only per-account × per-model telemetry (`gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite` provider-attempt counters—including failover/recovery retries and explicit account tests—output bytes, retries, soft-errors, and error categories, with zero prompt logging) across `/admin` **Overview** and the slide-over account inspector drawer; review per-account **Current usage** / **Weekly limit** bars and model states, copy ready-to-paste client configs (`Codex CLI`, `Cline`, `cURL`), manage copyable client API keys, explicitly review or accept Gemini Terms of Service, and inspect sanitized HTTP/gRPC diagnostics across desktop and mobile.
-
-| Light Theme — Account Inspector & Pool Pulse | Mobile Console — Traditional Chinese (`繁體中文`) |
-|---|---|
-| ![Light theme account inspector drawer and pool telemetry, synthetic demo data](docs/assets/admin-v2-demo-light-desktop.png) | ![Mobile management console, synthetic demo data](docs/assets/admin-v2-demo-zh-hk-mobile.png) |
+> **Unofficial interoperability research project.** Not affiliated with or endorsed by Google. Sign in personally with your own eligible Google accounts—no credentials, tokens, or Google binaries are distributed. Read [DISCLAIMER.md](DISCLAIMER.md).
 
 ---
 
 <a id="quick-start"></a>
 ## Quick Start
 
-<a id="native-extensions"></a>
+### Path A — Standalone Native Plugins (No Server Required)
 
 ![gemini-app2api — Zero-Dependency Native Extensions for Pi & OpenClaw](docs/assets/extensions-overview.jpg)
 
-<a id="pi-extension"></a>
+<a id="pi-extension"></a><a id="openclaw-plugin"></a>
 
-> [!TIP]
-> **Using Pi Coding Agent or GooeyPi? No gateway server required.**
-> Install the standalone zero-dependency native HTTP/2 extension directly from [npm (`pi-gemini-app`)](https://www.npmjs.com/package/pi-gemini-app) or Pi Marketplace—zero local HTTP proxy or Docker container needed:
-> ```sh
-> pi install npm:pi-gemini-app
-> ```
-> Run `/login gemini-app` and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto` (`gemini-argon` temporarily aliases to `gemini-neon`). Full guide: [`extensions/pi/README.md`](extensions/pi/README.md).
+| Host | Install | Sign In & Quota | Guide |
+|---|---|---|---|
+| **Pi / GooeyPi** | `pi install npm:pi-gemini-app` | `/login gemini-app` · `/gemini-quota` | [`extensions/pi/README.md`](extensions/pi/README.md) |
+| **OpenClaw** | `openclaw plugins install npm:openclaw-gemini-app` *(or ClawHub)* | `openclaw models auth login --provider gemini-app` · `/usage` | [`extensions/openclaw/README.md`](extensions/openclaw/README.md) |
 
-<a id="openclaw-plugin"></a>
+Both plugins run in-process over direct HTTP/2 (`15s` PING keepalives, `HTTPS_PROXY` support, 256 tools, parallel multimodal image uploads, automatic Free-tier `gemini-auto` filtering).
 
-> [!TIP]
-> **Using OpenClaw? No gateway server required.**
-> Install the standalone zero-dependency [npm (`openclaw-gemini-app`)](https://www.npmjs.com/package/openclaw-gemini-app) provider plugin (`extensions/openclaw/`), sharing the same direct HTTP/2 transport, `HTTPS_PROXY` support, 15s `PING` keepalives, OAuth login (local browser & remote VPS), and `/usage` + `/gemini-quota` integration:
-> ```sh
-> openclaw plugins install npm:openclaw-gemini-app
-> ```
-> Run `openclaw models auth login --provider gemini-app`, then select `gemini-app/gemini-neon` or `gemini-app/gemini-hydrogen`. Full guide: [`extensions/openclaw/README.md`](extensions/openclaw/README.md).
+### Path B — Self-Hosted OpenAI-Compatible Gateway
 
-### 1. Prerequisites
+Requires **Node.js `>= 22`** (macOS / Linux / WSL2) or **Docker Compose**, plus a Google account with Gemini access (AI Studio API keys are a different service).
 
-- **Node.js 22+** (`>= 22.0.0`) on macOS, Linux, or Windows WSL2 — **or Docker Compose** (Windows, macOS, Linux).
-- A modern browser and a Google account with Gemini access (a Google AI Studio API key is a different service and cannot be substituted).
-
-### 2. Start the Gateway
-
-**Option A — Node.js (macOS / Linux / WSL2):**
+**Node.js:**
 
 ```sh
-git clone https://github.com/ShawTim/gemini-app2api.git
-cd gemini-app2api
+git clone https://github.com/ShawTim/gemini-app2api.git && cd gemini-app2api
 npm ci --omit=dev --ignore-scripts
-
-# Optional: create a private 0600 .env without overwriting an existing one:
-test -e .env || (cp .env.example .env && chmod 600 .env)
-# Edit .env to set GATEWAY_ADMIN_PASSWORD (12–256 chars) if desired; leave blank for loopback-only access.
-
 npm start
 ```
 
-**Option B — Docker Compose (Windows / macOS / Linux):**
+**Docker Compose:**
 
 ```sh
-git clone https://github.com/ShawTim/gemini-app2api.git
-cd gemini-app2api
-read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
-export GATEWAY_ADMIN_PASSWORD
-docker compose up -d --build
+git clone https://github.com/ShawTim/gemini-app2api.git && cd gemini-app2api
+read -r -s -p 'Admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
+export GATEWAY_ADMIN_PASSWORD && docker compose up -d --build
 ```
 
-Or run the pre-built multi-arch image (`linux/amd64` / `linux/arm64`, published on tagged releases) directly without cloning the repo:
+<details>
+<summary><strong>Or run pre-built GHCR image directly (<code>linux/amd64</code> &amp; <code>linux/arm64</code>)</strong></summary>
 
 ```sh
-read -r -s -p 'Runtime admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
+read -r -s -p 'Admin password (>= 12 chars): ' GATEWAY_ADMIN_PASSWORD; echo
 docker run -d --name gemini-app2api --init --restart unless-stopped \
   -p 127.0.0.1:18989:18989 -p 127.0.0.1:18765:18765 \
   -v gemini-gateway-state:/data \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
   -e GATEWAY_HOST=0.0.0.0 -e GATEWAY_CALLBACK_HOST=0.0.0.0 -e GATEWAY_ALLOW_REMOTE=1 \
-  -e GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:18989 \
-  -e GATEWAY_ADMIN_PASSWORD \
+  -e GATEWAY_PUBLIC_ORIGIN=http://127.0.0.1:18989 -e GATEWAY_ADMIN_PASSWORD \
   ghcr.io/shawtim/gemini-app2api:latest
 ```
 
-> `compose.yaml` publishes gateway and OAuth ports on IPv4 host loopback (`127.0.0.1:18989:18989`, `127.0.0.1:18765:18765`) and requires `GATEWAY_ADMIN_PASSWORD` on the container bridge listener. Containers sharing the same Docker Compose network can call Bearer-authenticated `http://gateway:18989/v1` (or `http://<service-name>:18989/v1` on internal port `18989`), and separate containers on Docker Desktop backends that route host loopback can use `http://host.docker.internal:<published-port>/v1`. `/admin/` `Host`/`Origin` checks protect browsers against DNS rebinding and CSRF via `GATEWAY_PUBLIC_ORIGIN` (with `localhost` / `[::1]` aliases when `GATEWAY_PUBLIC_ORIGIN` is an `http://` loopback origin), rather than replacing host-loopback publishing or container network policies. For standalone `docker run`, custom ports, or headless SSH port forwarding, review the [Docker Compose & loopback publishing guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) (runs as `uid 1000` with read-only rootfs and dropped capabilities).
+See [Operations Guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--linux-docker-本機發佈) for custom ports, TLS reverse proxies, and SSH tunneling.
 
-### 3. Sign In and Create a Client Key
+</details>
 
-Open **http://127.0.0.1:18989/admin/** (or **http://localhost:18989/admin/**) in your browser:
-
-1. Sign in with your `GATEWAY_ADMIN_PASSWORD` (if left empty, passwordless admin is restricted strictly to loopback—see [Remote access with TLS](docs/OPERATIONS.md#remote-access-with-tls--遠端-tls)).
-2. Under **Accounts**, click **+ Google sign-in** and complete Google OAuth + MFA in your browser.
-3. Click **Test** on the account card to verify live model access (note: **Test** sends one real request and uses quota; OAuth sign-in alone does not verify model entitlement).
-4. Open **API keys → Create key** to generate and copy a client API key (you can copy, reveal, or revoke active keys there anytime).
+**Finish setup in browser:** Open **http://127.0.0.1:18989/admin/** → **Accounts → + Google sign-in** → click **Test** to verify entitlement → **API keys → Create key**.
 
 ---
 
 <a id="connect-your-client"></a>
 ## Connect Your Client
 
-Point any supported **OpenAI-compatible** client at your gateway:
-
 | Setting | Value |
 |---|---|
-| **Base URL** | `http://127.0.0.1:18989/v1` (`http://<service-name>:18989/v1` on a shared Compose network, `http://host.docker.internal:<published-port>/v1` on Docker Desktop where host-loopback routing applies, or your HTTPS reverse-proxy URL `/v1`) |
-| **API Key** | Client key generated in **API keys** (never your admin password or Google token) |
-| **Model** | `gemini-neon` (Gemini 4 Neon flagship Pro reasoning/coding; `gemini-argon` temporarily aliases here), `gemini-hydrogen` (Gemini 4 Hydrogen), or `gemini-flash-lite` |
-| **Endpoints** | `/v1/chat/completions` or `/v1/responses` ([supported contract](docs/API_SUPPORT.md)) |
-
-Verify model discovery (zero quota used):
-
-```sh
-curl -fsS http://127.0.0.1:18989/v1/models \
-  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY"
-```
-
-Send a Chat Completions request (add `"stream": true` with `curl -N` for incremental SSE):
+| **Base URL** | `http://127.0.0.1:18989/v1` *(or `http://gateway:18989/v1` inside Compose / your HTTPS proxy URL)* |
+| **API Key** | Client key from **API keys** |
+| **Models** | `gemini-neon` *(flagship Pro; `gemini-argon` aliases here)*, `gemini-hydrogen` *(fast)*, `gemini-flash-lite` |
+| **Endpoints** | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/responses` ([full contract](docs/API_SUPPORT.md)) |
 
 ```sh
 curl -fsS http://127.0.0.1:18989/v1/chat/completions \
@@ -180,118 +99,80 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
   -d '{"model":"gemini-neon","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-### Client Setup Recipes
-
 <details>
-<summary><strong>Cursor</strong></summary>
+<summary><strong>Client Recipes — Codex CLI, Cursor, Cline / Roo Code, Cherry Studio, OpenAI SDKs</strong></summary>
 
-1. Open **Cursor Settings → Models**.
-2. Add custom model `gemini-neon` (and optionally `gemini-hydrogen`).
-3. Enable **Override OpenAI Base URL**, set it to `http://127.0.0.1:18989/v1` (note: Cursor requires a publicly reachable HTTPS tunnel/reverse-proxy if its cloud relay mediates requests in your mode), and paste your gateway client API key.
+- **OpenAI Codex CLI (`~/.codex/config.toml`)** — native `/v1/responses` + namespace tools:
+  ```toml
+  model = "gemini-hydrogen" # or "gemini-neon"
+  model_provider = "gemini_app2api"
+  model_reasoning_summary = "none"
+  web_search = "disabled"
 
-</details>
-
-<details>
-<summary><strong>Cline / Roo Code (VS Code)</strong></summary>
-
-1. Choose **API Provider:** `OpenAI Compatible`.
-2. **Base URL:** `http://127.0.0.1:18989/v1`
-3. **API Key:** Your gateway client key.
-4. **Model ID:** `gemini-hydrogen` (recommended quota-friendly option for high-frequency multi-step agent loops) or `gemini-neon` ([quota comparison](#quota-consumption)); both support streaming, caller tool loops, and static image attachments.
-
-</details>
-
-<details>
-<summary><strong>OpenAI Codex CLI (<code>~/.codex/config.toml</code>)</strong></summary>
-
-Codex CLI speaks the `/v1/responses` protocol natively (including namespace tools and reasoning effort mapping). `gemini-hydrogen` is recommended as the quota-friendly option for high-frequency multi-step agent loops alongside `gemini-neon` ([quota comparison](#quota-consumption)):
-
-```toml
-model = "gemini-hydrogen" # or "gemini-neon" for flagship Pro reasoning
-model_provider = "gemini_app2api"
-model_reasoning_summary = "none"
-web_search = "disabled"
-
-[model_providers.gemini_app2api]
-name = "Gemini App2API"
-base_url = "http://127.0.0.1:18989/v1"
-env_key = "GEMINI_GATEWAY_KEY"
-wire_api = "responses"
-```
-
-</details>
-
-<details>
-<summary><strong>Pi Coding Agent / GooeyPi (Native In-Process Extension — No Gateway Server Required)</strong></summary>
-
-If you use [`@earendil-works/pi-coding-agent`](https://pi.dev) (`pi`) or **GooeyPi**, install the standalone zero-dependency provider package directly from [npm (`pi-gemini-app`)](https://www.npmjs.com/package/pi-gemini-app) or Pi Marketplace—no local HTTP proxy or Docker container needed:
-
-```sh
-pi install npm:pi-gemini-app
-```
-
-Then run `/login gemini-app` (supports both local browser loopback and headless SSH redirect URL paste; completing login automatically submits acceptance of Google Gemini Terms of Service for that account) and `/gemini-quota` inside Pi or GooeyPi. Subscription tier is detected automatically via `GetUsageInfo`: **Free** Google accounts automatically filter to `gemini-auto` (Smart Model Selection), while **AI Plus / Pro / Ultra** accounts expose `gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`, and `gemini-auto` (`gemini-argon` temporarily aliases to `gemini-neon`). See [`extensions/pi/README.md`](extensions/pi/README.md) for full details.
-
-</details>
-
-<details>
-<summary><strong>Cherry Studio / Open WebUI / OpenAI SDKs</strong></summary>
-
-- **Cherry Studio / Open WebUI:** Add an OpenAI provider with API Host `http://127.0.0.1:18989/v1`, paste your gateway client key, and fetch `/v1/models` (`gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite`).
-- **Official JS & Python SDKs:** See runnable caller-tool loop examples in [`examples/client.mjs`](examples/client.mjs) and [`examples/client.py`](examples/client.py). Always replay complete conversation history (including `tool_call_id` / `call_id` pairs) on every turn.
+  [model_providers.gemini_app2api]
+  name = "Gemini App2API"
+  base_url = "http://127.0.0.1:18989/v1"
+  env_key = "GEMINI_GATEWAY_KEY"
+  wire_api = "responses"
+  ```
+- **Cline / Roo Code:** API Provider `OpenAI Compatible`, Base URL `http://127.0.0.1:18989/v1`, Model `gemini-hydrogen` or `gemini-neon`.
+- **Cursor:** Settings → Models → add `gemini-neon` / `gemini-hydrogen` → Override OpenAI Base URL (HTTPS tunnel required if Cursor's cloud relay is active).
+- **Cherry Studio / Open WebUI / SDKs:** OpenAI provider with `http://127.0.0.1:18989/v1`; see [`examples/client.mjs`](examples/client.mjs) and [`examples/client.py`](examples/client.py).
 
 </details>
 
 ---
-
-## Models and Capabilities
-
-| Model Alias | Role & Tier | Native Mode | Advertised Context Metadata |
-|---|---|---:|---|
-| **`gemini-neon`** | **Gemini 4 Neon** flagship Pro-tier mode for complex coding, architecture, and multi-step agent loops (upstream Neon attribution verified; `gemini-argon` temporarily aliases here) | `PRO` (`3`) | `context_window: 512000` (advisory client budget) |
-| **`gemini-hydrogen`** | **Gemini 4 Hydrogen** for low-latency everyday reasoning and fast interactive tasks (upstream Hydrogen attribution verified) | `FAST` (`1`) | `context_window: 512000` (advisory client budget) |
-| **`gemini-flash-lite`** | High-throughput lightweight tasks | `6` | Not advertised |
-
-> Model aliases map to native Gemini App modes rather than pinned Google Cloud Vertex/AI Studio version strings, and model availability depends on each signed-in account's upstream entitlement. For backward compatibility while callers migrate from retired upstream Argon (mode `8`), `gemini-argon` is temporarily accepted and transparently routed to `gemini-neon` (`PRO` mode `3`). `context_window: 512000` for both `gemini-neon` and `gemini-hydrogen` is an empirical advisory client budget calibrated with safety margin below upstream silent tail truncation, prefill latency, and the gateway's `4 MiB` request ceiling—not an enforced token cap or official Google SLA guarantee.
 
 <a id="quota-consumption"></a>
-### Quota Consumption: gemini-neon vs gemini-hydrogen
+## Models & Quota
 
-> [!TIP]
-> **Under Google's `neon_pro_policy`, `gemini-neon` is only `~1.5x–2x` the quota cost of `gemini-hydrogen` on `thinking=2` coding & tool-call workloads** (and `~4x–5x` on `thinking=0` long-text generation)—a massive improvement over retired `gemini-argon` (which used `~60x` more quota and could exhaust a 5-hour window in 4–5 heavy turns). You can comfortably daily-drive **`gemini-neon`** for flagship reasoning and coding (`~20` massive ~57 KB rewrites or `~135` `tool_call` steps per 5-hour window on a single Pro account), while **`gemini-hydrogen`** remains **`~1.7x–2.6x` faster** and **`~1.6x–5x` lighter on quota** for rapid multi-step loops and high-volume generation.
+| Model | Role | Native Mode | Advisory `context_window` |
+|---|---|---:|---|
+| **`gemini-neon`** | Gemini 4 Neon flagship Pro reasoning & coding (`gemini-argon` aliases here) | `PRO` (`3`) | `512,000` |
+| **`gemini-hydrogen`** | Gemini 4 Hydrogen low-latency reasoning (~1.7–2.6× faster, lighter quota) | `FAST` (`1`) | `512,000` |
+| **`gemini-flash-lite`** | High-throughput lightweight tasks | `6` | — |
 
-Empirical `GetUsageInfo` measurements on identical isolated engineering turns across Gemini AI Pro accounts (`2026-11-19`, `neon_pro_policy`):
+Empirical `GetUsageInfo` observations on Gemini AI Pro accounts (`neon_pro_policy`; not official Google SLA figures):
 
-| Engineering Workload | `gemini-hydrogen` (`mode=1`) | `gemini-neon` (`mode=3`) | Neon Quota Multiple |
+| Workload | `gemini-hydrogen` | `gemini-neon` | Neon Multiple |
 |---|---|---|---:|
-| **Massive code review + full rewrite** (`thinking=2`) | `~0.122%` weekly (`+3%` 5h, `37.8 KB`, `~76s`) | `~0.248%` weekly (`+5%` 5h, `57.0 KB`, `~198s`) | `~2.0x` / turn (`~1.35x` / KB) |
-| **Multi-tool coding agent `tool_call` step** (`thinking=2`, 2 calls) | `~0.024%` weekly (`~0.5%` 5h, `305 B`, `~8.2s`) | `~0.037%` weekly (`~0.7%` 5h, `305 B`, `~14.4s`) | `~1.56x` |
-| **Standard ~13–15 KB SQL & migration plan** (`thinking=0`) | `~0.017%` weekly (`~0.3%` 5h, `12.9 KB`, `~28s`) | `~0.086%` weekly (`+2%` 5h, `15.4 KB`, `~36s`) | `~5.1x` / turn (`~4.3x` / KB) |
-| **Single-account 5-hour window capacity** *(weekly pool ≈ `20x` the 5-hour window)* | `~40` massive rewrites / `~210` tool steps | `~20` massive rewrites / `~135` tool steps | — |
-
-These figures are empirical observations via read-only `GetUsageInfo` telemetry (not official Google SLA figures), and upstream quota weights may change at any time.
-
-### Supported Capabilities
-
-| Capability | Supported Scope |
-|---|---|
-| **Endpoints** | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses` |
-| **Function Tools** | Bounded JSON Schema validation, `auto`/`none`/`required`/named `tool_choice`, and Responses function-only `namespace` groups; executed strictly by the caller |
-| **Structured Outputs** | Chat `response_format` and Responses `text.format` (`json_schema` and `json_object`), validated against the bounded JSON Schema validator before response delivery (not combined with `native_search: true`) |
-| **Image Input** | Up to `4` static PNG/JPEG/WebP images (`<= 2 MiB` combined) via `data:` URLs or opt-in SSRF-guarded public HTTP(S) URLs |
-| **Google Search** | Opt-in `"native_search": true` (`gemini-neon` / aliased `gemini-argon`, thinking `2`, text-only `<= 16 KiB`, no caller tools/images in the same turn); maps verified public-web sources to OpenAI `url_citation` annotations when present |
-| **Observability Telemetry** | In-memory per-account × per-model provider-attempt counters (`gemini-neon`, `gemini-hydrogen`, `gemini-flash-lite` attempts including retries and explicit account tests, output bytes, retries, soft-errors, and error categories) in `/admin` **Overview** and the Account Inspector Drawer (zero prompt logging) |
-| **Thinking Control** | Synchronous `thinking_level` (`0`, `1`, `2`, `4`; default `2`) and OpenAI `reasoning_effort` (`none`/`minimal`→`0`, `low`→`1`, `medium`/`high`/`xhigh`→`2`); async Deep Think (`3`) rejected locally |
-| **Usage Accounting** | Heuristic token estimates (`estimated: true`)—not official Google token counts or billing figures |
+| Massive code review + rewrite (`thinking=2`) | `~0.12%` weekly (`~76s`) | `~0.25%` weekly (`~198s`) | `~2.0×` |
+| Multi-tool agent `tool_call` step (`thinking=2`) | `~0.024%` weekly (`~8s`) | `~0.037%` weekly (`~14s`) | `~1.56×` |
+| Standard ~14 KB plan (`thinking=0`) | `~0.017%` weekly (`~28s`) | `~0.086%` weekly (`~36s`) | `~5.1×` |
+| Est. 5-hour single-account capacity | `~40` rewrites / `~210` tool steps | `~20` rewrites / `~135` tool steps | — |
 
 ---
 
-## Security and Operational Principles
+## Why Gemini App2API?
 
-- **Keep private state off Git and public networks:** Never share `.env`, refresh tokens, client API keys, custom `oauth-profile*.json` overrides, or `GATEWAY_DATA_DIR`. See [SECURITY.md](SECURITY.md).
-- **Client-owned history & permissions:** The gateway never runs shell/file tools, never truncates or summarizes conversation history behind your back, and rejects silent upstream model downgrades.
-- **Explicit incomplete-turn semantics:** Interrupted streams that already flushed usable output close cleanly with `incomplete: true` metadata so coding agents keep delivered work; always check `incomplete` when exact upstream completion matters. See [COMPLETION_CONTRACT.md](docs/COMPLETION_CONTRACT.md).
-- **Deliberate recovery budgets:** Enabling `GATEWAY_QUOTA_FAILOVER=1` or `GATEWAY_AUTOMATIC_RECOVERY=1` helps survive single-account limits or transient resets, at the cost of additional upstream attempts when failures occur. See [OPERATIONS.md](docs/OPERATIONS.md#configuration--設定) and [LOCKS_AND_LIMITS.md](docs/LOCKS_AND_LIMITS.md).
+<p align="center">
+  <img src="docs/assets/mgga.jpg" alt="MGGA — GigaChad Gemini Model vs Derpy Consumer App Harness" width="320" />
+  <br />
+  <sub><strong>MGGA — Make Gemini Great Again:</strong> Free frontier Gemini models from a consumer chat harness into real engineering tools.</sub>
+</p>
+
+| Dimension | **Gemini App2API** | Web / Cookie Scrapers | Desktop Injection / MITM |
+|---|---|---|---|
+| **Transport** | Pure Node.js native HTTP/2 (`ProcessQuery`) + parallel image uploads | Fragile DOM / browser cookies | Binary hooks / local MITM |
+| **Auth & Pool** | Standard Google OAuth (`0600` local state), multi-account failover & quota bars | Frequent cookie expiry / CAPTCHA | Single active desktop GUI |
+| **Agent Safety** | Schema-validated tools (256 declarations), hallucinated tool-result suppression, `incomplete: true` contract | Unvalidated regex / broken loops | Consumer UI limits |
+| **Footprint** | Node.js `>= 22`, **`0` production npm dependencies** | Playwright / Python stacks | OS & binary version locked |
+
+**Highlights:**
+- **Resilient HTTP/2 & Proxy Support:** `15s` HTTP/2 `PING` + TCP keepalives, zero-dependency `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` `CONNECT` tunneling, retryable `503 SERVER_SHUTDOWN` restarts, and bounded automatic recovery.
+- **Built for Long E2E & Agent Loops:** Up to `256` caller tool declarations (`512 KiB` / `16,384` nodes), structured outputs (`json_schema` / `json_object`), opt-in `native_search` citations, and parallel HTTP/2 multimodal image uploads (`256` images / `20 MiB` per image safety bounds + per-account in-memory `blobId` caching).
+- **Zero-Dependency Security & Bilingual Console:** `0700`/`0600` private state, `scrypt` admin auth, SHA-256 key vault, CSRF/Origin guards, and live per-account × per-model telemetry (`English` / `繁體中文`, zero prompt logging).
+
+![Gemini App2API Operations Console — Dark Theme (synthetic demo data)](docs/assets/admin-v2-demo-dark-desktop.png)
+
+<details>
+<summary><strong>More Console Screenshots (Light Theme &amp; Mobile 繁體中文)</strong></summary>
+
+| Light Theme — Account Inspector | Mobile — Traditional Chinese (`繁體中文`) |
+|---|---|
+| ![Light theme](docs/assets/admin-v2-demo-light-desktop.png) | ![Mobile console](docs/assets/admin-v2-demo-zh-hk-mobile.png) |
+
+</details>
 
 ---
 
@@ -299,22 +180,20 @@ These figures are empirical observations via read-only `GetUsageInfo` telemetry 
 
 | Document | Contents |
 |---|---|
-| [Pi Extension (`extensions/pi/README.md`)](extensions/pi/README.md) | Standalone in-process `pi-gemini-app` provider for Pi Coding Agent & GooeyPi (`/login gemini-app`, `/gemini-quota`, Free `gemini-auto` & paid tiers) |
-| [API Support & Contract (`docs/API_SUPPORT.md`)](docs/API_SUPPORT.md) | Endpoints, request/event schemas, structured outputs, tools, images, native search citations, and error codes |
-| [Operations Guide (`docs/OPERATIONS.md`)](docs/OPERATIONS.md) | Setup, `.env` config, Docker Compose, reverse-proxy TLS, `launchd` supervision, and troubleshooting |
-| [Account Lifecycle (`docs/ACCOUNT_LIFECYCLE.md`)](docs/ACCOUNT_LIFECYCLE.md) | Google OAuth sign-in, explicit Gemini ToS consent, subscription snapshots, and quota semantics |
-| [Completion Contract (`docs/COMPLETION_CONTRACT.md`)](docs/COMPLETION_CONTRACT.md) | Partial-output preservation, `GENERATION_FAILED` zero-output handling, and caller dispositions |
-| [Locks & Limits (`docs/LOCKS_AND_LIMITS.md`)](docs/LOCKS_AND_LIMITS.md) | Concurrency caps, wire/payload bounds, coalescing rules, and non-locking session design |
-| [Verification & Testing (`docs/CURRENT_CONTRACT_TESTS.md`)](docs/CURRENT_CONTRACT_TESTS.md) | Offline synthetic test suites, [test safety boundaries](docs/TEST_EXECUTION_SAFETY.md), and [dev dependencies](docs/DEPENDENCIES.md) |
-| [Security (`SECURITY.md`)](SECURITY.md) · [Contributing (`CONTRIBUTING.md`)](CONTRIBUTING.md) | Security model, vulnerability reporting, and contribution workflow |
-| [Changelog (`CHANGELOG.md`)](CHANGELOG.md) · [Disclaimer (`DISCLAIMER.md`)](DISCLAIMER.md) | Release history and legal/account-risk notice |
+| [Pi Extension (`extensions/pi/README.md`)](extensions/pi/README.md) | Standalone `pi-gemini-app` plugin for Pi Coding Agent & GooeyPi |
+| [OpenClaw Plugin (`extensions/openclaw/README.md`)](extensions/openclaw/README.md) | Standalone `openclaw-gemini-app` provider plugin for OpenClaw & ClawHub |
+| [API Support (`docs/API_SUPPORT.md`)](docs/API_SUPPORT.md) | Endpoints, tools, structured outputs, images, `native_search`, error codes |
+| [Operations (`docs/OPERATIONS.md`)](docs/OPERATIONS.md) | `.env` config, Docker Compose, TLS reverse proxy, `launchd`, troubleshooting |
+| [Completion Contract (`docs/COMPLETION_CONTRACT.md`)](docs/COMPLETION_CONTRACT.md) | Partial-output preservation, zero-output `GENERATION_FAILED`, agent loop safety |
+| [Account Lifecycle (`docs/ACCOUNT_LIFECYCLE.md`)](docs/ACCOUNT_LIFECYCLE.md) · [Limits (`docs/LOCKS_AND_LIMITS.md`)](docs/LOCKS_AND_LIMITS.md) | OAuth, ToS consent, quota telemetry, concurrency & payload bounds |
+| [Testing (`docs/CURRENT_CONTRACT_TESTS.md`)](docs/CURRENT_CONTRACT_TESTS.md) · [Security (`SECURITY.md`)](SECURITY.md) · [Changelog (`CHANGELOG.md`)](CHANGELOG.md) | Offline E2E suites, security model, release history |
 
 ---
 
 <div align="center">
 
-[MIT License](LICENSE) · [Disclaimer](DISCLAIMER.md) · [Security Policy](SECURITY.md)
+[MIT License](LICENSE) · [Disclaimer](DISCLAIMER.md) · [Security Policy](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-<sub>Unofficial self-hosted interoperability software. No Google binaries, user credentials, tokens, accounts, or model quota are distributed.</sub>
+<sub>Unofficial self-hosted interoperability software. No Google binaries, credentials, tokens, accounts, or quota are distributed.</sub>
 
 </div>
