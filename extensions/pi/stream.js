@@ -448,6 +448,14 @@ export function createGeminiStreamHandler({
             break;
           } catch (turnError) {
             if (
+              !options?.signal?.aborted &&
+              turnError?.code === 'NATIVE_TURN_TIMEOUT' &&
+              turnError?.unverifiedOutput !== true &&
+              (hasToolCalls || turnError?.postOutputIdleStall === true || publishedBytes >= PREFIX_BYTES)
+            ) {
+              break;
+            }
+            if (
               !started &&
               attempts === 0 &&
               !options?.signal?.aborted &&

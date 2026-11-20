@@ -290,7 +290,9 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     }
     if (!started) await start(partial);
     // Decide from what the caller has actually seen, before the held prefix flushes.
-    const usable = publishedBytes >= PREFIX_BYTES || calls.length > 0;
+    // Verified post-output upstream silence (HTTP 200, no reset/EOF, clean text) also
+    // finishes cleanly with incomplete metadata instead of trapping callers in retries.
+    const usable = publishedBytes >= PREFIX_BYTES || calls.length > 0 || (error?.postOutputIdleStall === true && content.trim().length > 0);
     // Deliver whatever the prefix gate was still holding before the error.
     await emitHeld();
     if (route === 'chat') {

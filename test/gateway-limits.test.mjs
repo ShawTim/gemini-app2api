@@ -508,29 +508,57 @@ test("post-complete and post-output upstream idle watchdogs stop hung streams wi
   assert.match(text3, /"incomplete":true/);
   assert.match(text3, /data: \[DONE\]/);
 
-  // 4. Short (<2048B) uncommitted text with modelComplete === false must NOT trip postOutputIdleMs into a NATIVE_TURN_TIMEOUT retry loop.
-  f.app.provider.openTurn = () => ({
-    events: (async function* () {
-      yield { type: "headers", status: 200 };
-      yield { type: "frame", bytes: incompleteFrame("Short reply waiting for completion.") };
-      await new Promise((r) => setTimeout(r, 150));
-      yield { type: "frame", bytes: textFrame("Short reply waiting for completion.", 3, 2) };
-      yield { type: "end", httpStatus: 200, grpcStatus: 0 };
-    })(),
-    cancel() {},
-  });
+  // 4. Short (<2048B) verified plain text with modelComplete === false that stalls silently finishes cleanly
+  //    on attempt 1 with stop + incomplete:true + [DONE] (no 300s headers timeout and no shortOutputRetry loop).
+  let shortAttempts = 0;
+  let shortCancelled = false;
+  f.app.provider.openTurn = () => {
+    shortAttempts++;
+    return {
+      events: (async function* () {
+        yield { type: "headers", status: 200 };
+        yield { type: "frame", bytes: incompleteFrame("Short verified reply stalled before completion flag.") };
+        await new Promise(() => {});
+      })(),
+      cancel() { shortCancelled = true; },
+    };
+  };
+  const tShort = Date.now();
   const resShort = await f.api("/v1/chat/completions", {
     method: "POST",
-    body: { model: "gemini-neon", stream: true, messages: [{ role: "user", content: "short delayed finalize" }] },
+    body: { model: "gemini-neon", stream: true, messages: [{ role: "user", content: "short stalled reply" }] },
   });
   assert.equal(resShort.status, 200);
   const textShort = await resShort.text();
-  assert.match(textShort, /Short reply waiting for completion\./);
+  assert.ok(Date.now() - tShort < 3000, "short stalled reply must finish promptly");
+  assert.equal(shortAttempts, 1, "clean post-output stall must not waste a shortOutputRetry");
+  assert.equal(shortCancelled, true);
+  assert.match(textShort, /Short verified reply stalled before completion flag\./);
   assert.match(textShort, /"finish_reason":"stop"/);
-  assert.equal(textShort.includes('"incomplete":true'), false);
+  assert.match(textShort, /"incomplete":true/);
   assert.match(textShort, /data: \[DONE\]/);
 
-  // 5. Long prefill / thinking silence BEFORE any output (> all idle thresholds) must NOT trip any idle watchdog.
+  // 5. Short (<2048B) text ending in an UNCLOSED/truncated tool_call fence must NOT be treated as a clean post-output stall.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      yield { type: "frame", bytes: incompleteFrame('Checking.\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"half') };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  const resBrokenTool = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, tools: toolSpec, messages: [{ role: "user", content: "truncated tool stall" }] },
+  });
+  assert.equal(resBrokenTool.status, 200);
+  const textBrokenTool = await resBrokenTool.text();
+  assert.match(textBrokenTool, /"NATIVE_TURN_TIMEOUT"/);
+  assert.equal(textBrokenTool.includes('"finish_reason":"stop"'), false);
+  assert.equal(textBrokenTool.includes('"finish_reason":"tool_calls"'), false);
+  assert.equal(textBrokenTool.includes("data: [DONE]"), false);
+
+  // 6. Long prefill / thinking silence BEFORE any output (> all idle thresholds) must NOT trip any idle watchdog.
   f.app.provider.openTurn = () => ({
     events: (async function* () {
       yield { type: "headers", status: 200 };

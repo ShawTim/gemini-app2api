@@ -108,7 +108,7 @@ const validateIdleMs = (value, name) => {
 const IDLE_TIMEOUT_SENTINEL = Symbol('IDLE_TIMEOUT_SENTINEL');
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 8_000, postToolIdleMs = 15_000, postOutputIdleMs = 45_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 8_000, postToolIdleMs = 15_000, postOutputIdleMs = 25_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
@@ -360,12 +360,29 @@ export class NativeDirectProvider {
           ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
         iterator = turn.events[Symbol.asyncIterator]();
         try {
+      const isCleanPostOutputIdleStall = () => {
+        if (!rawText.trim()) return false;
+        if (/^\s*I'm on it\.\s*Responses with Deep Think can take some time, so check back in a bit\.\s*https?:\/\/googleusercontent\.com\/agentic_processing_chip\/\d+\s*$/i.test(rawText)) return false;
+        try {
+          const probe = createToolCallSplitter({ policy });
+          const probeItems = [...probe.push(rawText), ...probe.flush()];
+          const probeCalls = probeItems.filter(it => it.type === 'call').map(it => it.call);
+          const probeContent = probeItems.filter(it => it.type === 'content').map(it => it.text).join('');
+          if (!outputShape.nativeStructuredOutputPresent && softErrorReason(probeContent, body, probeCalls.length)) return false;
+          if (body.parallel_tool_calls === false && probeCalls.length > 1) return false;
+          validateToolCompletion(probeCalls, policy);
+          if (!probeCalls.length && !probeContent.trim()) return false;
+          if (body.response_format && !probeCalls.length) validateStructuredOutputText(probeContent, body.response_format);
+          return true;
+        } catch {
+          return false;
+        }
+      };
       const nextEventWithIdle = async () => {
         const verified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
-        const committed = committedOutput();
         const idleKind = modelComplete ? 'post_complete'
           : (verified && liveCalls.length > 0 ? 'post_tool'
-            : (verified && committed.publishedBytes > 0 ? 'post_output' : null));
+            : (verified && rawText.trim().length > 0 ? 'post_output' : null));
         const idleMs = idleKind === 'post_complete' ? postCompleteGraceMs
           : idleKind === 'post_tool' ? postToolIdleMs
           : idleKind === 'post_output' ? postOutputIdleMs
@@ -405,7 +422,11 @@ export class NativeDirectProvider {
             textBytes: Buffer.byteLength(rawText),
           });
           try { turn?.cancel(); } catch {}
-          throw protocolError('NATIVE_TURN_TIMEOUT', 504);
+          const idleError = protocolError('NATIVE_TURN_TIMEOUT', 504);
+          if (idleKind === 'post_output' && item.verified && isCleanPostOutputIdleStall()) {
+            idleError.postOutputIdleStall = true;
+          }
+          throw idleError;
         }
         if (item.done) break;
         const event = item.value;

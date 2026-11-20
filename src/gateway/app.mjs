@@ -498,7 +498,7 @@ export function createGateway({
           // Only content the caller actually received commits this turn. A held
           // tiny prefix is still replaceable by one retry.
           error.responseStarted = res.headersSent === true || delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
-          if (!error.responseStarted && !error.unverifiedOutput && delivery.retryableShortfall) error.shortOutput = true;
+          if (!error.responseStarted && !error.unverifiedOutput && !error.postOutputIdleStall && delivery.retryableShortfall) error.shortOutput = true;
           const evidence = safeNativeEvidence(error.nativeEvidence);
           const failure = { accountId: acc, status: Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502,
             code: errorPayload(error).error.code, ...(evidence ? { nativeEvidence: evidence } : {}) };
