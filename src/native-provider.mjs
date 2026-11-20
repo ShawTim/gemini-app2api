@@ -108,7 +108,7 @@ const validateIdleMs = (value, name) => {
 const IDLE_TIMEOUT_SENTINEL = Symbol('IDLE_TIMEOUT_SENTINEL');
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 4_000, postOutputIdleMs = 8_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 6_000, postOutputIdleMs = 15_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
@@ -380,9 +380,11 @@ export class NativeDirectProvider {
       };
       const nextEventWithIdle = async () => {
         const verified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
-        const idleKind = modelComplete ? 'post_complete'
+        // Never arm an idle timer unless we already have verified, complete, deliverable output;
+        // otherwise a slow mid-tool-call or mid-JSON pause would be falsely killed with 504 -> 422.
+        const idleKind = (modelComplete && verified && rawText.trim().length > 0) ? 'post_complete'
           : (verified && liveCalls.length > 0 ? 'post_tool'
-            : (verified && rawText.trim().length > 0 ? 'post_output' : null));
+            : (verified && liveCalls.length === 0 && isCleanPostOutputIdleStall() ? 'post_output' : null));
         const idleMs = idleKind === 'post_complete' ? postCompleteGraceMs
           : idleKind === 'post_tool' ? postToolIdleMs
           : idleKind === 'post_output' ? postOutputIdleMs

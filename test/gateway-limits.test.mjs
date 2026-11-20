@@ -538,25 +538,28 @@ test("post-complete and post-output upstream idle watchdogs stop hung streams wi
   assert.match(textShort, /"incomplete":true/);
   assert.match(textShort, /data: \[DONE\]/);
 
-  // 5. Short (<2048B) text ending in an UNCLOSED/truncated tool_call fence must NOT be treated as a clean post-output stall.
+  // 5. Slow mid-tool-call pause (> postOutputIdleMs) while tool_call fence is still unclosed MUST NOT
+  //    be killed prematurely with 504 -> 422; once the closing fence arrives, it completes cleanly.
   f.app.provider.openTurn = () => ({
     events: (async function* () {
       yield { type: "headers", status: 200 };
       yield { type: "frame", bytes: incompleteFrame('Checking.\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"half') };
-      await new Promise(() => {});
+      await new Promise((r) => setTimeout(r, 140));
+      yield { type: "frame", bytes: textFrame('Checking.\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"half-done"}}\n```\n', 3, 2) };
+      yield { type: "end", httpStatus: 200, grpcStatus: 0 };
     })(),
     cancel() {},
   });
-  const resBrokenTool = await f.api("/v1/chat/completions", {
+  const resMidToolPause = await f.api("/v1/chat/completions", {
     method: "POST",
-    body: { model: "gemini-neon", stream: true, tools: toolSpec, messages: [{ role: "user", content: "truncated tool stall" }] },
+    body: { model: "gemini-neon", stream: true, tools: toolSpec, messages: [{ role: "user", content: "slow mid-tool pause" }] },
   });
-  assert.equal(resBrokenTool.status, 200);
-  const textBrokenTool = await resBrokenTool.text();
-  assert.match(textBrokenTool, /"NATIVE_TURN_TIMEOUT"/);
-  assert.equal(textBrokenTool.includes('"finish_reason":"stop"'), false);
-  assert.equal(textBrokenTool.includes('"finish_reason":"tool_calls"'), false);
-  assert.equal(textBrokenTool.includes("data: [DONE]"), false);
+  assert.equal(resMidToolPause.status, 200);
+  const textMidToolPause = await resMidToolPause.text();
+  assert.match(textMidToolPause, /half-done/);
+  assert.match(textMidToolPause, /"finish_reason":"tool_calls"/);
+  assert.equal(textMidToolPause.includes('"incomplete":true'), false);
+  assert.match(textMidToolPause, /data: \[DONE\]/);
 
   // 6. Long prefill / thinking silence BEFORE any output (> all idle thresholds) must NOT trip any idle watchdog.
   f.app.provider.openTurn = () => ({
