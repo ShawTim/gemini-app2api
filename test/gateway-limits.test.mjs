@@ -407,3 +407,125 @@ test("SSE keepalive comments prevent idle bodyTimeout and REQUEST_DEADLINE flush
   assert.match(fastText, /"finish_reason":"tool_calls"/);
   assert.match(fastText, /data: \[DONE\]/);
 });
+
+test("post-complete and post-output upstream idle watchdogs stop hung streams without disturbing prefill silence", async (t) => {
+  const incompleteFrame = (text, mode = 3, thinking = 2) =>
+    m(
+      1003,
+      m(
+        1,
+        Buffer.concat([
+          m(1, m(2, m(1, Buffer.from(text)))),
+          v(9, 0),
+          v(11, 0),
+          m(30, Buffer.from("Used 4 Neon High model")),
+          v(31, 0),
+          v(41, mode),
+          v(42, thinking),
+        ]),
+      ),
+    );
+
+  const f = await fixture({ accountCount: 1, allowFailover: false });
+  t.after(f.close);
+  f.store.data.settings.timeoutMs = 30000;
+  f.app.provider.postCompleteGraceMs = 50;
+  f.app.provider.postToolIdleMs = 60;
+  f.app.provider.postOutputIdleMs = 70;
+
+  // 1. modelComplete === true but upstream never sends END_STREAM -> completes cleanly after postCompleteGraceMs.
+  let cancelled1 = false;
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      yield { type: "frame", bytes: textFrame("Completed reply without END_STREAM.", 3, 2) };
+      await new Promise(() => {});
+    })(),
+    cancel() { cancelled1 = true; },
+  });
+  const t1 = Date.now();
+  const res1 = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, messages: [{ role: "user", content: "finish cleanly" }] },
+  });
+  assert.equal(res1.status, 200);
+  const text1 = await res1.text();
+  assert.ok(Date.now() - t1 < 3000, "post-complete grace must finish promptly");
+  assert.equal(cancelled1, true, "hung upstream stream must be cancelled after post-complete grace");
+  assert.match(text1, /Completed reply without END_STREAM\./);
+  assert.match(text1, /"finish_reason":"stop"/);
+  assert.equal(text1.includes('"incomplete":true'), false, "completed model frame must not be marked incomplete");
+  assert.match(text1, /data: \[DONE\]/);
+
+  // 2. Valid tool_call emitted with modelComplete === false, then upstream hangs -> flushes tool_calls cleanly after postToolIdleMs.
+  let cancelled2 = false;
+  const toolSpec = [{ type: "function", function: { name: "fixture_lookup", parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } } }];
+  const toolFrameText = 'Looking up.\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"idle-tool"}}\n```\n';
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      yield { type: "frame", bytes: incompleteFrame(toolFrameText) };
+      await new Promise(() => {});
+    })(),
+    cancel() { cancelled2 = true; },
+  });
+  const t2 = Date.now();
+  const res2 = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, tools: toolSpec, messages: [{ role: "user", content: "call tool then hang" }] },
+  });
+  assert.equal(res2.status, 200);
+  const text2 = await res2.text();
+  assert.ok(Date.now() - t2 < 3000, "post-tool idle watchdog must finish promptly");
+  assert.equal(cancelled2, true);
+  assert.match(text2, /idle-tool/);
+  assert.match(text2, /"finish_reason":"tool_calls"/);
+  assert.match(text2, /"incomplete":true/);
+  assert.match(text2, /data: \[DONE\]/);
+
+  // 3. Visible text (>2048B) streamed with modelComplete === false, then upstream hangs -> flushes stop + incomplete + [DONE] after postOutputIdleMs.
+  let cancelled3 = false;
+  const bigReply = "Reply body ".repeat(260);
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      yield { type: "frame", bytes: incompleteFrame(bigReply) };
+      await new Promise(() => {});
+    })(),
+    cancel() { cancelled3 = true; },
+  });
+  const t3 = Date.now();
+  const res3 = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, messages: [{ role: "user", content: "stream text then hang" }] },
+  });
+  assert.equal(res3.status, 200);
+  const text3 = await res3.text();
+  assert.ok(Date.now() - t3 < 3000, "post-output idle watchdog must finish promptly");
+  assert.equal(cancelled3, true);
+  assert.match(text3, /Reply body/);
+  assert.match(text3, /"finish_reason":"stop"/);
+  assert.match(text3, /"incomplete":true/);
+  assert.match(text3, /data: \[DONE\]/);
+
+  // 4. Long prefill / thinking silence BEFORE any output (> all idle thresholds) must NOT trip any idle watchdog.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      await new Promise((r) => setTimeout(r, 150));
+      yield { type: "frame", bytes: textFrame("Delayed reply after long prefill.", 3, 2) };
+      yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const res4 = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, messages: [{ role: "user", content: "long prefill" }] },
+  });
+  assert.equal(res4.status, 200);
+  const text4 = await res4.text();
+  assert.match(text4, /Delayed reply after long prefill\./);
+  assert.match(text4, /"finish_reason":"stop"/);
+  assert.equal(text4.includes('"incomplete":true'), false);
+  assert.match(text4, /data: \[DONE\]/);
+});

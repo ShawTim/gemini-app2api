@@ -100,19 +100,32 @@ function safeFailure(error) {
 }
 
 
+const validateIdleMs = (value, name) => {
+  if (value === null || value === undefined) return null;
+  if (!Number.isInteger(value) || value < 1 || value > 600_000) throw new TypeError(`invalid ${name}`);
+  return value;
+};
+const IDLE_TIMEOUT_SENTINEL = Symbol('IDLE_TIMEOUT_SENTINEL');
+
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 8_000, postToolIdleMs = 15_000, postOutputIdleMs = 45_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
     if (typeof downloadImages !== 'function') throw new TypeError('downloadImages required');
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new TypeError('invalid timeout');
+    const resolvedPostCompleteGraceMs = validateIdleMs(postCompleteGraceMs, 'postCompleteGraceMs');
+    const resolvedPostToolIdleMs = validateIdleMs(postToolIdleMs, 'postToolIdleMs');
+    const resolvedPostOutputIdleMs = validateIdleMs(postOutputIdleMs, 'postOutputIdleMs');
     if (continuation !== false) throw protocolError('UNSUPPORTED_CONTINUATION', 400);
     if (typeof allowAutoModel !== 'boolean') throw new TypeError('invalid auto model policy');
     const resolvedAlias = canonicalModel(modelAlias);
     const allowedModels = allowAutoModel ? [...NATIVE_MODELS, 'gemini-auto'] : NATIVE_MODELS;
     if (!allowedModels.includes(resolvedAlias)) throw protocolError('UNSUPPORTED_MODEL', 400);
     this.authManager = authManager; this.openTurn = openTurn; this.uploadImages = uploadImages; this.timeoutMs = timeoutMs;
+    this.postCompleteGraceMs = resolvedPostCompleteGraceMs;
+    this.postToolIdleMs = resolvedPostToolIdleMs;
+    this.postOutputIdleMs = resolvedPostOutputIdleMs;
     this.downloadImages = downloadImages;
     this.blobCache = blobCache ?? null;
     if (typeof allowTextSnapshotReplacement !== 'boolean') throw new TypeError('invalid snapshot policy');
@@ -228,6 +241,15 @@ export class NativeDirectProvider {
   async runTurn(accountId, canonicalChatBody, onDelta = () => {}, context = {}) {
     const timeoutMs = context.timeoutMs ?? this.timeoutMs;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000) fail('INVALID_TIMEOUT', 400);
+    const postCompleteGraceMs = context.postCompleteGraceMs === undefined
+      ? this.postCompleteGraceMs
+      : validateIdleMs(context.postCompleteGraceMs, 'postCompleteGraceMs');
+    const postToolIdleMs = context.postToolIdleMs === undefined
+      ? this.postToolIdleMs
+      : validateIdleMs(context.postToolIdleMs, 'postToolIdleMs');
+    const postOutputIdleMs = context.postOutputIdleMs === undefined
+      ? this.postOutputIdleMs
+      : validateIdleMs(context.postOutputIdleMs, 'postOutputIdleMs');
     const body = normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
     if (body.native_search) return this.runNativeSearch(accountId, body, onDelta, { ...context, timeoutMs });
     const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode);
@@ -338,9 +360,52 @@ export class NativeDirectProvider {
           ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
         iterator = turn.events[Symbol.asyncIterator]();
         try {
+      const nextEventWithIdle = async () => {
+        const verified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
+        const idleKind = modelComplete ? 'post_complete'
+          : (verified && liveCalls.length > 0 ? 'post_tool'
+            : (rawText.length > 0 ? 'post_output' : null));
+        const idleMs = idleKind === 'post_complete' ? postCompleteGraceMs
+          : idleKind === 'post_tool' ? postToolIdleMs
+          : idleKind === 'post_output' ? postOutputIdleMs
+          : null;
+        const nextPromise = iterator.next();
+        if (idleMs === null) return bounded(nextPromise);
+        nextPromise.catch(() => {});
+        let idleTimer = null;
+        try {
+          return await Promise.race([
+            bounded(nextPromise),
+            new Promise(resolve => {
+              idleTimer = setTimeout(() => resolve({ [IDLE_TIMEOUT_SENTINEL]: idleKind, verified }), idleMs);
+              idleTimer.unref?.();
+            }),
+          ]);
+        } finally {
+          if (idleTimer !== null) clearTimeout(idleTimer);
+        }
+      };
       for (;;) {
         phase = 'read';
-        const item = await bounded(iterator.next());
+        const item = await nextEventWithIdle();
+        if (item && item[IDLE_TIMEOUT_SENTINEL]) {
+          const idleKind = item[IDLE_TIMEOUT_SENTINEL];
+          if (idleKind === 'post_complete' && item.verified && rawText.trim().length > 0) {
+            note('post_complete_idle_finish', { frames, textBytes: Buffer.byteLength(rawText) });
+            try { turn?.cancel(); } catch {}
+            ended = true;
+            httpStatus = httpStatus ?? 200;
+            grpc = grpc ?? 0;
+            break;
+          }
+          note(`${idleKind}_idle_timeout`, {
+            frames,
+            calls: liveCalls.length,
+            textBytes: Buffer.byteLength(rawText),
+          });
+          try { turn?.cancel(); } catch {}
+          throw protocolError('NATIVE_TURN_TIMEOUT', 504);
+        }
         if (item.done) break;
         const event = item.value;
         if (incremental && event.type === 'headers') { await deliver({ start: true, response: identity }); continue; }
