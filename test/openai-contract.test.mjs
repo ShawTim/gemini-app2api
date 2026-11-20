@@ -129,7 +129,11 @@ test('prompt budgets include system, tool declarations and transcript; no histor
   invalid(() => normalizeChatRequest({ messages: [{ role: 'system', content: 's'.repeat(PROMPT_MAX_BYTES - 100) }, user] }), 'PROMPT_TOO_LARGE');
   invalid(() => normalizeResponsesRequest({ instructions: '系'.repeat(Math.floor((PROMPT_MAX_BYTES - 200) / 3)), input: 'x' }), 'PROMPT_TOO_LARGE');
   invalid(() => normalizeChatRequest({ messages: [{ role: 'system', content: 'x'.repeat(PROMPT_MAX_BYTES - 200) }, user], tools: [tool] }), 'PROMPT_TOO_LARGE');
-  invalid(() => normalizeChatRequest({ messages: Array(1025).fill(user) }), 'MESSAGES_REQUIRED');
+  assert.equal(normalizeChatRequest({ messages: Array(2048).fill(user) }).messages.length, 2048);
+  invalid(() => normalizeChatRequest({ messages: Array(8193).fill(user) }), 'REQUEST_TOO_LARGE', 'messages');
+  invalid(() => normalizeResponsesRequest({ input: Array(8193).fill(user) }), 'REQUEST_TOO_LARGE', 'input');
+  invalid(() => normalizeChatRequest({ messages: [] }), 'MESSAGES_REQUIRED');
+  invalid(() => normalizeResponsesRequest({ input: [] }), 'INPUT_REQUIRED');
 });
 
 test('Chat JSON/SSE model/id/tool indices and finish semantics agree; usage stays unknown', () => {

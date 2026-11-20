@@ -45,7 +45,8 @@ function thinkingSettings(body) {
 }
 export const PROMPT_MAX_BYTES = 4 * 1024 * 1024;
 export const REQUEST_MAX_NON_IMAGE_BYTES = PROMPT_MAX_BYTES;
-const MAX_MESSAGES = 1024;
+export const MAX_MESSAGES = 8192;
+const REQUEST_MAX_NODES = 131072;
 const configured = Number(process.env.GEMINI_PROMPT_MAX_CHARS);
 const MAX_CHARS = Number.isSafeInteger(configured) && configured > 0 ? Math.min(configured, PROMPT_MAX_BYTES) : PROMPT_MAX_BYTES;
 function keys(value, allowed, prefix = '') {
@@ -81,7 +82,7 @@ function requestBudget(root) {
   }
   const ancestors = new Set();
   const visit = (value, depth, image = false) => {
-    if (++nodes > 32768 || depth > 32) fail('REQUEST_TOO_LARGE', 413);
+    if (++nodes > REQUEST_MAX_NODES || depth > 32) fail('REQUEST_TOO_LARGE', 413);
     if (typeof value === 'string') {
       if (image) {
         const len = Buffer.byteLength(value);
@@ -335,7 +336,8 @@ export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
   const tools = stripToolAnnotations(payload.tools === undefined ? [] : payload.tools);
   const choice = payload.tool_choice === undefined ? 'auto' : payload.tool_choice;
   const policy = compileToolPolicy(tools, choice);
-  if (!Array.isArray(payload.messages) || !payload.messages.length || payload.messages.length > MAX_MESSAGES) fail('MESSAGES_REQUIRED');
+  if (!Array.isArray(payload.messages) || !payload.messages.length) fail('MESSAGES_REQUIRED');
+  if (payload.messages.length > MAX_MESSAGES) fail('REQUEST_TOO_LARGE', 413, 'messages');
   const pending = new Set(), seen = new Set();
   const messages = payload.messages.map(message => {
     keys(message, ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'refusal', 'parsed', 'annotations', 'reasoning_content', 'reasoning'], 'messages');
@@ -413,7 +415,8 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
   const messages = [];
   if (payload.instructions !== undefined && payload.instructions !== null) messages.push({ role: 'system', content: text(payload.instructions) });
   const input = typeof payload.input === 'string' ? [{ role: 'user', content: payload.input }] : payload.input;
-  if (!Array.isArray(input) || !input.length || input.length > MAX_MESSAGES) fail('INPUT_REQUIRED');
+  if (!Array.isArray(input) || !input.length) fail('INPUT_REQUIRED');
+  if (input.length > MAX_MESSAGES) fail('REQUEST_TOO_LARGE', 413, 'input');
   const { tools, choice, callName, identities } = normalizeResponsesTools(payload);
   for (const item of input) {
     if (!plainObject(item)) fail('INVALID_INPUT_ITEM');
