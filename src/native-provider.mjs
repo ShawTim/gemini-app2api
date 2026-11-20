@@ -108,7 +108,7 @@ const validateIdleMs = (value, name) => {
 const IDLE_TIMEOUT_SENTINEL = Symbol('IDLE_TIMEOUT_SENTINEL');
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 8_000, postToolIdleMs = 15_000, postOutputIdleMs = 25_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 4_000, postOutputIdleMs = 8_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
