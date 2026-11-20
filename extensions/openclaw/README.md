@@ -39,7 +39,7 @@ Once authenticated, select any `gemini-app/*` model in OpenClaw:
 
 - **Native HTTP/2 gRPC transport**: Direct in-process connection with 15s HTTP/2 `PING` + TCP keepalives and bounded automatic recovery.
 - **Built-in Proxy Support**: Honors standard `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables via zero-dependency HTTP `CONNECT` tunneling.
-- **Full Tool Calling & Multimodal Images**: Up to 256 caller tool declarations (512 KiB / 16,384 nodes), strict schema validation, hallucinated tool-result suppression, and up to 4 static PNG/JPEG/WebP images per turn.
+- **Full Tool Calling & Multimodal Images**: Up to 256 caller tool declarations (512 KiB / 16,384 nodes), strict schema validation, hallucinated tool-result suppression, and parallel HTTP/2 multimodal image uploads (static PNG/JPEG/WebP up to 20 MiB per image with per-account in-memory Blob-ID caching).
 - **Live Quota Integration**: Integrates with OpenClaw's `/usage` quota snapshot (`GetUsageInfo` + subscription tier detection) and exposes `/gemini-quota`.
 - **Zero Runtime Dependencies**: Pure Node.js `>=22` ESM.
 

@@ -2,6 +2,14 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.1 — 2026-11-20
+
+### Multi-image E2E pipeline: lifted artificial 4-image / 2 MiB caps, parallel HTTP/2 uploads & per-account in-memory `blobId` cache
+- Lifted the arbitrary `4`-image and `2 MiB` total image caps across the Gateway (`src/image-input.mjs`, `src/openai-contract.mjs`, `src/gateway/image-upload.mjs`, `native-wire/robin-current.mjs`), `pi-gemini-app@0.1.6`, and `openclaw-gemini-app@0.1.2` (`extensions/pi/transcript.js`) to DoS safety bounds of **`256` images**, **`20 MiB` per image**, and **`256 MiB` combined decoded bytes**, after live Robin probes confirmed multi-image (`32+` images) and `10 MiB+` single-image processing. Non-image prompt text/JSON remains strictly bounded at `4 MiB`.
+- Raised default HTTP JSON `maxBodyBytes` from `4 MiB` to **`128 MiB`** (max `256 MiB`) in `src/gateway/state.mjs`, with automatic in-memory upgrade of untouched legacy `4 MiB` defaults on restart while preserving any explicit custom `maxBodyBytes` override.
+- Upgraded `uploadNativeImages` (`src/gateway/image-upload.mjs`) to multiplex concurrent HTTP/2 uploads (`concurrency = 8`, preserving exact input attachment order) with upload timeouts scaled to the request deadline (up to `180s` per turn / `600s` max).
+- Added a lightweight, strictly isolated ephemeral in-memory `ImageBlobCache` (`(accountId, tokenFingerprint, mimeType, sha256) -> blobId`, `15 min` TTL, max `2,048` entries, never storing image bytes or persisting to disk) in `src/native-provider.mjs` and `extensions/pi/stream.js`, eliminating redundant historical screenshot re-uploads across multi-turn E2E sessions while transparently evicting and re-uploading once if an upstream cached `blobId` expires before frames arrive.
+
 ## 1.6.0 — 2026-11-20
 
 ### Standalone zero-dependency OpenClaw provider plugin (`openclaw-gemini-app`) & retryable `503 SERVER_SHUTDOWN` restarts
