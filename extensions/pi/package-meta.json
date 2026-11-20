@@ -1,6 +1,6 @@
 {
   "name": "pi-gemini-app",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "In-process Google Gemini App provider extension for Pi (direct native HTTP/2, /login gemini-app, /gemini-quota, zero runtime dependencies).",
   "keywords": [
     "pi-package",

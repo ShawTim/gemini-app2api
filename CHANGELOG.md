@@ -2,6 +2,16 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.2 — 2026-11-20
+
+### Long-context streaming resilience, upstream idle watchdogs & OpenClaw `reasoning_content` compatibility
+- Added periodic `15s` SSE `: keepalive\n\n` comments in `src/gateway/response-delivery.mjs` (fanned out live via `SharedResponse.writeKeepalive` in `src/gateway/request-resumption.mjs` without polluting replay buffers) so long prefill/thinking turns do not trip Node.js `undici`'s 300-second `bodyTimeout` (`TypeError: terminated`).
+- Removed premature `res.destroy?.()` on `REQUEST_DEADLINE` in `src/gateway/app.mjs`, giving `delivery.interrupt()` a 2-second grace window on healthy sockets to flush `finish_reason: "tool_calls"` / `"stop"`, `incomplete: true`, and `data: [DONE]` cleanly.
+- Added immediate upstream cancellation on post-tool `[Caller tool result]` hallucination (`liveSplitter.suppressed` in `src/tool-protocol.mjs` and `src/native-provider.mjs`) so Pi, OpenClaw, and Gateway clients execute emitted tool calls immediately instead of waiting for discarded hallucinated text.
+- Added bounded post-complete and post-output upstream idle watchdogs in `src/native-provider.mjs` (shared across Gateway, `pi-gemini-app@0.1.7`, and `openclaw-gemini-app@0.1.3`): `postCompleteGraceMs` (`8s`, cleanly completes verified turns when upstream omits `END_STREAM`), `postToolIdleMs` (`15s`, flushes committed tool calls when upstream stalls), and `postOutputIdleMs` (`45s`, gated on already-committed `>= 2,048 B` output so prefill silence and short `< 2,048 B` replies never trigger false `NATIVE_TURN_TIMEOUT` retry loops).
+- Accepted and stripped optional `reasoning_content` and `reasoning` (`string | null`) fields on replayed `assistant` messages in `src/openai-contract.mjs`, fixing `400 UNSUPPORTED_PARAMETER: messages.reasoning_content` errors from OpenClaw and OpenAI-compatible reasoning clients.
+- Streamlined `README.md` and `README.zh.md` for faster 30-second onboarding and `v1.6.x` parity.
+
 ## 1.6.1 — 2026-11-20
 
 ### Multi-image E2E pipeline: lifted artificial 4-image / 2 MiB caps, parallel HTTP/2 uploads & per-account in-memory `blobId` cache
