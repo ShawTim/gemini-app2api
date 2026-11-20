@@ -362,9 +362,10 @@ export class NativeDirectProvider {
         try {
       const nextEventWithIdle = async () => {
         const verified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
+        const committed = committedOutput();
         const idleKind = modelComplete ? 'post_complete'
           : (verified && liveCalls.length > 0 ? 'post_tool'
-            : (rawText.length > 0 ? 'post_output' : null));
+            : (verified && committed.publishedBytes > 0 ? 'post_output' : null));
         const idleMs = idleKind === 'post_complete' ? postCompleteGraceMs
           : idleKind === 'post_tool' ? postToolIdleMs
           : idleKind === 'post_output' ? postOutputIdleMs

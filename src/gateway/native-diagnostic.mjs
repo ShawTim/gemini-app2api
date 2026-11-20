@@ -15,6 +15,8 @@ export const NATIVE_DIAGNOSTIC_LIMITS = Object.freeze({
 });
 const L = NATIVE_DIAGNOSTIC_LIMITS;
 const eventNames = new Set(['provider_stop', 'provider_cleanup', 'provider_success', 'provider_failure',
+  'early_stop_post_tool_hallucination', 'post_complete_idle_finish', 'post_complete_idle_timeout',
+  'post_tool_idle_timeout', 'post_output_idle_timeout',
   'transport_open', 'local_stream_close', 'local_session_destroy', 'local_signal_abort', 'local_cancel',
   'transport_failure', 'transport_deadline', 'peer_headers', 'peer_trailers', 'peer_reset',
   'peer_goaway', 'stream_error', 'stream_close', 'stream_end', 'peer_data', 'local_half_close',
