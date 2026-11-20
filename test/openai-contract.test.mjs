@@ -494,3 +494,29 @@ test('canonical prompt places gateway tool protocol after caller system prompt a
     assert.equal(disabledPrompt.includes('[Tool Protocol Reminder]'), false);
   }
 });
+
+test('assistant replay reasoning_content and reasoning metadata are accepted and stripped cleanly while non-assistant roles stay rejected', () => {
+  const replayed = normalizeChatRequest({
+    model: 'gemini-hydrogen',
+    messages: [
+      user,
+      { role: 'assistant', content: 'Checking now.', reasoning_content: 'Internal reasoning text that must be stripped', reasoning: null },
+      { role: 'user', content: 'Continue' },
+      { role: 'assistant', content: 'Done.', reasoning_content: null, reasoning: 'Secondary reasoning trace' },
+      { role: 'user', content: 'Verify' },
+    ],
+  });
+  assert.equal(replayed.messages.length, 5);
+  assert.equal(Object.hasOwn(replayed.messages[1], 'reasoning_content'), false);
+  assert.equal(Object.hasOwn(replayed.messages[1], 'reasoning'), false);
+  const rendered = buildCanonicalPrompt(replayed).messages[0].content;
+  assert.equal(rendered.includes('Internal reasoning text that must be stripped'), false);
+  assert.equal(rendered.includes('Secondary reasoning trace'), false);
+
+  for (const role of ['user', 'system', 'developer']) {
+    invalid(() => normalizeChatRequest({ messages: [{ role, content: 'x', reasoning_content: 'nope' }, user] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning_content');
+    invalid(() => normalizeChatRequest({ messages: [{ role, content: 'x', reasoning: 'nope' }, user] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning');
+  }
+  invalid(() => normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', reasoning_content: 123 }] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning_content');
+  invalid(() => normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', reasoning: { text: 'bad' } }] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning');
+});

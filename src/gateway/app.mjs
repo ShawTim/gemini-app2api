@@ -415,10 +415,23 @@ export function createGateway({
       throw fault("PROMPT_SIZE_LIMIT", 413);
     if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
     const outputStreaming = !playground && body.stream === true;
+    let hardDestroyTimer = null;
     const controller = new AbortController(),
       timer = setTimeout(() => {
         controller.abort(fault('REQUEST_DEADLINE', 504));
-        if (res.headersSent && !res.destroyed && !res.writableEnded) res.destroy?.();
+        if (res.headersSent && !res.destroyed && !res.writableEnded) {
+          // Give delivery.interrupt() a short window to flush a clean SSE termination
+          // frame (e.g. finish_reason: "tool_calls" + [DONE]); destroy immediately only
+          // if the client socket is already backpressured, or after a 2s fallback.
+          if (res.writableNeedDrain) {
+            res.destroy?.();
+          } else {
+            hardDestroyTimer = setTimeout(() => {
+              if (!res.destroyed && !res.writableEnded) res.destroy?.();
+            }, 2000);
+            hardDestroyTimer.unref?.();
+          }
+        }
       }, settings.timeoutMs + 1000);
     timer.unref();
     controllers.add(controller);
@@ -579,6 +592,7 @@ export function createGateway({
       }
       controllers.delete(controller);
       clearTimeout(timer);
+      if (hardDestroyTimer !== null) clearTimeout(hardDestroyTimer);
       req.off("aborted", disconnect);
       res.off("close", disconnect);
       requests.unshift({

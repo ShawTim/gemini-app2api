@@ -335,3 +335,75 @@ test("publish() commits publishedContent/publishedCalls only after onDelta resol
   assert.equal(oversizedInterruptRes.status, 502);
   assert.equal((await oversizedInterruptRes.json()).error.code, "RESPONSE_TOO_LARGE");
 });
+
+test("SSE keepalive comments prevent idle bodyTimeout and REQUEST_DEADLINE flushes tool_calls cleanly instead of destroying healthy sockets", async (t) => {
+  // 1. SSE keepalive emits periodic comments while idle and stops cleanly on complete().
+  const chunks = [];
+  const sink = new EventEmitter();
+  sink.destroyed = false; sink.writableEnded = false; sink.headersSent = false; sink.writableNeedDrain = false;
+  sink.writeHead = () => { sink.headersSent = true; };
+  sink.flushHeaders = () => {};
+  sink.write = (c) => { chunks.push(String(c)); return true; };
+  sink.end = () => { sink.writableEnded = true; };
+  const delivery = createResponseDelivery(sink, { route: "chat", stream: true, model: "gemini-neon", keepaliveMs: 20 });
+  await delivery.accept({ start: true, response: { id: "chatcmpl-ka", created: 1, model: "gemini-neon" } });
+  await new Promise((r) => setTimeout(r, 75));
+  await delivery.complete({ id: "chatcmpl-ka", created: 1, model: "gemini-neon", content: "Done", calls: [] });
+  const keepaliveCount = chunks.filter((c) => c === ": keepalive\n\n").length;
+  assert.ok(keepaliveCount >= 2, `expected >=2 SSE keepalives, saw ${keepaliveCount}`);
+  const afterCompleteCount = chunks.length;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(chunks.length, afterCompleteCount, "keepalive timer must stop after complete()");
+
+  // 2. REQUEST_DEADLINE after tool_call emission flushes finish_reason: tool_calls + [DONE] cleanly on healthy clients.
+  const f = await fixture({ accountCount: 1, allowFailover: false });
+  t.after(f.close);
+  f.store.data.settings.timeoutMs = 100;
+  const toolSpec = [{ type: "function", function: { name: "fixture_lookup", parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } } }];
+  const toolFrameText = 'Checking.\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"abc"}}\n```\n';
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      yield { type: "frame", bytes: textFrame(toolFrameText, 3, 2) };
+      // Simulate upstream hanging indefinitely after emitting a valid tool_call.
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  const res = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, tools: toolSpec, messages: [{ role: "user", content: "run tool" }] },
+  });
+  assert.equal(res.status, 200);
+  const sseText = await res.text();
+  assert.match(sseText, /fixture_lookup/);
+  assert.match(sseText, /"finish_reason":"tool_calls"/);
+  assert.match(sseText, /"incomplete":true/);
+  assert.match(sseText, /data: \[DONE\]/);
+
+  // 3. Post-tool-call hallucinated [Caller tool result] cancels upstream immediately instead of waiting for timeoutMs.
+  let cancelled = false;
+  f.store.data.settings.timeoutMs = 30000;
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: "headers", status: 200 };
+      yield { type: "frame", bytes: textFrame(toolFrameText + "\n[Caller tool result]\nFake output that keeps going...", 3, 2) };
+      await new Promise(() => {});
+    })(),
+    cancel() { cancelled = true; },
+  });
+  const t0 = Date.now();
+  const fastRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-neon", stream: true, tools: toolSpec, messages: [{ role: "user", content: "run tool fast" }] },
+  });
+  const elapsed = Date.now() - t0;
+  assert.equal(fastRes.status, 200);
+  const fastText = await fastRes.text();
+  assert.equal(cancelled, true, "upstream turn must be cancelled immediately on post-tool hallucination");
+  assert.ok(elapsed < 5000, `expected immediate early-stop, took ${elapsed}ms`);
+  assert.match(fastText, /fixture_lookup/);
+  assert.equal(fastText.includes("Fake output"), false);
+  assert.match(fastText, /"finish_reason":"tool_calls"/);
+  assert.match(fastText, /data: \[DONE\]/);
+});

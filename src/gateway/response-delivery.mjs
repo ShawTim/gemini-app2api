@@ -61,17 +61,45 @@ async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
     else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000 } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000 } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
     requestedThinkingLevel: thinkingLevel, ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }) };
   let started = false, settled = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
   let publishedLength = 0, publishedBytes = 0;
+  let keepaliveTimer = null;
+  const stopKeepalive = () => {
+    if (keepaliveTimer !== null) {
+      clearTimeout(keepaliveTimer);
+      keepaliveTimer = null;
+    }
+    res.off?.('close', stopKeepalive);
+    res.off?.('error', stopKeepalive);
+  };
+  const armKeepalive = () => {
+    if (!stream || settled || !started || !Number.isFinite(keepaliveMs) || keepaliveMs <= 0) return;
+    if (keepaliveTimer !== null) clearTimeout(keepaliveTimer);
+    keepaliveTimer = setTimeout(() => {
+      keepaliveTimer = null;
+      if (settled || res.destroyed || res.writableEnded) { stopKeepalive(); return; }
+      if (!res.writableNeedDrain) {
+        try {
+          if (typeof res.writeKeepalive === 'function') res.writeKeepalive(': keepalive\n\n');
+          else res.write(': keepalive\n\n');
+        } catch { stopKeepalive(); return; }
+      }
+      armKeepalive();
+    }, keepaliveMs);
+    keepaliveTimer.unref?.();
+  };
   // Ordinary upstream responses carry no token accounting. Usage is therefore a
   // labelled estimate over the caller request and the delivered output, never a
   // value read from Google.
   const estimateUsage = (outputBytes = bytes) => estimateTokenUsage({ promptChars, outputBytes });
   const output = [];
-  const sendWire = chunk => write(res, chunk, signal, writeTimeoutMs);
+  const sendWire = async chunk => {
+    await write(res, chunk, signal, writeTimeoutMs);
+    armKeepalive();
+  };
   const responseId = () => meta.id.startsWith('resp_') ? meta.id : 'resp_' + meta.id.replace(/^chatcmpl-/, '');
   const chatBase = () => ({ id: meta.id, object: 'chat.completion.chunk', created: meta.created, model: meta.model,
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning_effort: meta.requestedReasoningEffort }) });
@@ -141,6 +169,9 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
         ...(meta.ignoredTokenParameters?.length ? { 'X-Gemini-Token-Limit': 'not-enforced', 'X-Gemini-Ignored-Parameters': meta.ignoredTokenParameters.join(', ') } : {}) });
       res.flushHeaders?.();
     }
+    res.once?.('close', stopKeepalive);
+    res.once?.('error', stopKeepalive);
+    armKeepalive();
     if (route === 'chat') await sendChat({ role: 'assistant' });
     else { const initial = response('in_progress'); await sendResponse('response.created', { response: initial }); await sendResponse('response.in_progress', { response: initial }); }
   }
@@ -231,10 +262,10 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       await finishResponseItems();
       await sendResponse('response.completed', { response: response('completed') });
     }
-    settled = true; res.end();
+    settled = true; stopKeepalive(); res.end();
   }
   async function interrupt(error) {
-    if (settled || res.destroyed || res.writableEnded) return false;
+    if (settled || res.destroyed || res.writableEnded) { stopKeepalive(); return false; }
     if (error?.unverifiedOutput === true) {
       if (!started) { discard(); return false; }
       content = content.slice(0, publishedLength);
@@ -287,11 +318,12 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       await finishResponseItems();
       await sendResponse('response.completed', { incomplete: true, response: response('completed', detail) });
     } else await sendResponse('response.incomplete', { response: response('incomplete', detail) });
-    settled = true; res.end(); return true;
+    settled = true; stopKeepalive(); res.end(); return true;
   }
   // A retried attempt must not inherit a discarded fragment.
   function discard() {
     if (settled) return;
+    stopKeepalive();
     delete meta.annotations;
     content = ''; calls = []; bytes = 0; publishedLength = 0; publishedBytes = 0; message = null; output.length = 0;
   }

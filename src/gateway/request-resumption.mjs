@@ -42,6 +42,11 @@ class SharedResponse extends EventEmitter {
     for (const sink of this.subscribers) this.#send(sink, bytes);
     return true;
   }
+  writeKeepalive(chunk) {
+    if (this.writableEnded || !this.headersSent) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    for (const sink of this.subscribers) this.#send(sink, bytes);
+  }
   discard() {
     if (this.subscribers.size && this.headersSent) throw fault('OUTPUT_ALREADY_STARTED', 502);
     this.chunks = []; this.bytes = 0; this.headersSent = false; this.writableEnded = false; this.incomplete = false;

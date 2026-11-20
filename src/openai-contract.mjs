@@ -338,7 +338,7 @@ export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
   if (!Array.isArray(payload.messages) || !payload.messages.length || payload.messages.length > MAX_MESSAGES) fail('MESSAGES_REQUIRED');
   const pending = new Set(), seen = new Set();
   const messages = payload.messages.map(message => {
-    keys(message, ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'refusal', 'parsed', 'annotations'], 'messages');
+    keys(message, ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'refusal', 'parsed', 'annotations', 'reasoning_content', 'reasoning'], 'messages');
     const role = message.role;
     if (!['system', 'developer', 'user', 'assistant', 'tool'].includes(role)) fail('UNSUPPORTED_ROLE');
     if (message.name !== undefined && message.name !== null) {
@@ -349,6 +349,17 @@ export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
     // SDK stream accumulators attach null parsing/refusal metadata on replay.
     // Only inert null is accepted; structured/refusal content is unsupported.
     for (const key of ['refusal', 'parsed']) if (message[key] !== undefined && (role !== 'assistant' || message[key] !== null)) fail('UNSUPPORTED_PARAMETER', 400, `messages.${key}`);
+    // OpenAI-compatible reasoning clients (OpenClaw, DeepSeek/LiteLLM, Pi) replay
+    // assistant reasoning_content/reasoning strings or null on historical turns.
+    // Validate UTF-8/bounds and strip before canonical prompt construction.
+    for (const key of ['reasoning_content', 'reasoning']) {
+      if (message[key] !== undefined) {
+        if (role !== 'assistant' || (message[key] !== null && typeof message[key] !== 'string')) {
+          fail('UNSUPPORTED_PARAMETER', 400, `messages.${key}`);
+        }
+        if (typeof message[key] === 'string') text(message[key]);
+      }
+    }
     if (message.annotations !== undefined) {
       if (role !== 'assistant') fail('UNSUPPORTED_ANNOTATIONS');
       validateReplayAnnotations(message.annotations, { chat: true });

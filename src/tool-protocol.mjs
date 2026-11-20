@@ -343,5 +343,6 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
       return safe;
     },
     get toolCallCount() { return seen; },
+    get suppressed() { return suppressed; },
   };
 }

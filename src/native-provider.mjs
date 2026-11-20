@@ -423,6 +423,18 @@ export class NativeDirectProvider {
             const delta = rawText.slice(liveSyncedLength);
             liveSyncedLength = rawText.length;
             await publish(liveSplitter.push(delta));
+            // Once valid tool_call(s) have been parsed and the model begins hallucinating
+            // a fake [Caller tool result], stop upstream immediately instead of waiting
+            // minutes for the model to finish generating discarded text.
+            if (liveSplitter.suppressed && liveCalls.length > 0 && !downgrade && !outputShape.nativeRefusalPresent) {
+              note('early_stop_post_tool_hallucination', { calls: liveCalls.length });
+              try { turn?.cancel(); } catch {}
+              ended = true;
+              modelComplete = true;
+              httpStatus = httpStatus ?? 200;
+              grpc = grpc ?? 0;
+              break;
+            }
           }
           if (info.quotaObservation) {
             quotaFrames++;
