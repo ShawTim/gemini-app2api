@@ -18,6 +18,18 @@ import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
 import { measurePromptImagePayload } from '../openai-usage.mjs';
 const uiRoot = new URL("../admin-v2/", import.meta.url);
+function readPackageVersion() {
+  try {
+    const raw = JSON.parse(
+      fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+    );
+    const v = typeof raw?.version === "string" ? raw.version.trim() : "";
+    return v || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+const PACKAGE_VERSION = readPackageVersion();
 const assets = new Map([
   ["/admin", "index.html"],
   ["/admin/", "index.html"],
@@ -358,7 +370,7 @@ export function createGateway({
           ? times[Math.min(times.length - 1, Math.floor(times.length * p))]
           : 0;
     return {
-      version: "1.5.3",
+      version: PACKAGE_VERSION,
       uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
       mode: "native-direct",
       toolProtocol: "prompt",
@@ -697,7 +709,7 @@ export function createGateway({
       if (req.method === "GET" && p === "/health")
         return json(res, {
           status: "ok",
-          version: "1.5.3",
+          version: PACKAGE_VERSION,
           mode: "native-direct",
           toolProtocol: "prompt",
           liveValidation: !allowFailover && !pool.allowQuotaFailover && !pool.allowEmptyResponseFailover && !pool.allowAutomaticRecovery,

@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 // Explicit live opt-in only. Never part of npm test / PR CI. No retries or account switching.
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { sourceFiles, sourceDigest } from "./release-files.mjs";
+const PACKAGE_VERSION = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 export function runtimeHash() {
   const files = sourceFiles().filter(
     (n) =>
@@ -52,7 +56,7 @@ export async function liveCase({
   )
     throw Error("UNKNOWN_LIVE_CASE");
   const report = {
-    version: "1.5.3",
+    version: PACKAGE_VERSION,
     sourceHash,
     at: new Date().toISOString(),
     platform: process.platform + "-" + process.arch,

@@ -39,7 +39,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -861,4 +861,15 @@ test('overviewModelTelemetry and accountModelTelemetryView render bilingual meta
   assert.match(zhJoined, /僅統計中繼資料 · 零提示詞日誌/);
   assert.match(zhJoined, /各模型流量與錯誤分佈/);
   assert.match(zhJoined, /軟錯誤/);
+});
+
+test('versionTag reads overview.version dynamically without stale hardcoded fallback', () => {
+  const f = fixture(false);
+  f.S.overview = null;
+  assert.equal(f.versionTag(), '');
+  f.S.overview = { version: '1.6.4' };
+  assert.equal(f.versionTag(), 'v1.6.4');
+  f.S.overview = { version: 'v2.0.0' };
+  assert.equal(f.versionTag(), 'v2.0.0');
+  assert.doesNotMatch(source, /1\.5\.3/);
 });

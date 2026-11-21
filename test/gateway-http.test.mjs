@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import {
   fixture,
@@ -8,6 +9,9 @@ import {
   responseTools,
   toolBlock,
 } from "./gateway-fixture.mjs";
+const PACKAGE_VERSION = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 const chat = {
   model: "gemini-argon",
   messages: [{ role: "user", content: "Synthetic request" }],
@@ -36,8 +40,17 @@ function holdTurns(f, t) {
 }
 test("HTTP health and readiness separate, models require API key and admin cookie cannot substitute", async (t) => {
   const f = await setup(t);
-  assert.equal((await f.request("/health")).status, 200);
+  const healthRes = await f.request("/health");
+  assert.equal(healthRes.status, 200);
+  const health = await healthRes.json();
+  assert.equal(health.version, PACKAGE_VERSION);
   assert.equal((await f.request("/ready")).status, 200);
+  const overviewRes = await f.request("/admin/api/overview", {
+    headers: { Cookie: f.cookie },
+  });
+  assert.equal(overviewRes.status, 200);
+  const overview = await overviewRes.json();
+  assert.equal(overview.version, PACKAGE_VERSION);
   assert.equal((await f.request("/v1/models")).status, 401);
   assert.equal(
     (await f.request("/v1/models", { headers: { Cookie: f.cookie } })).status,

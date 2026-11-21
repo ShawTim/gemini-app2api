@@ -243,10 +243,11 @@ function brandMark() {
       svg('path', { d: 'M12 8.2L15.6 10.3V14.5L12 16.6L8.4 14.5V10.3L12 8.2Z', fill: 'currentColor', stroke: 'none' })));
 }
 function versionTag() {
-  const raw = String(S.overview?.version || '1.5.3').trim();
+  const raw = String(S.overview?.version || '').trim();
+  if (!raw) return '';
   return raw.startsWith('v') ? raw : `v${raw}`;
 }
-function brand(showVersion = false) { return el('div', { class: 'brand' }, brandMark(), el('div', {}, el('strong', {}, 'Gemini App2API'), el('small', {}, L('Operations console', '營運管理台'))), showVersion && el('span', { class: 'version-pill' }, versionTag())); }
+function brand(showVersion = false) { const v = showVersion ? versionTag() : ''; return el('div', { class: 'brand' }, brandMark(), el('div', {}, el('strong', {}, 'Gemini App2API'), el('small', {}, L('Operations console', '營運管理台'))), v && el('span', { class: 'version-pill' }, v)); }
 function renderLogin() {
   if (S.checkingSession) { $('app').replaceChildren(el('main', { id: 'main', class: 'login-area', 'aria-busy': 'true' }, el('p', { role: 'status' }, L('Opening workspace…', '正在開啟工作區…')))); return; }
   const password = el('input', { id: 'admin-password', type: 'password', name: 'password', required: true, autocomplete: 'current-password', maxlength: '1024', disabled: S.checkingSession });
@@ -1042,7 +1043,7 @@ function poolPulseGrid() {
       el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value number' }, num(m.requests), el('small', {}, L(' reqs', ' 請求'))), el('span', { class: 'pulse-sub number' }, sample.length ? `P50 ${duration(m.p50Ms)} · P95 ${duration(m.p95Ms)}` : L('Measured durations', '已量度延遲'))),
       el('div', { class: 'spark-bars', 'aria-hidden': true }, sample.length ? sample.map(r => el('i', { class: Number(r.status) >= 400 ? 'err' : null, style: `height:${Math.max(14, Math.round((r.durationMs / maxMs) * 100))}%` })) : el('i', { style: 'height:18%;opacity:0.25' }))),
     el('article', { class: 'pulse-card' },
-      el('div', { class: 'pulse-head' }, el('span', {}, L('QUOTA EFFICIENCY', '配額效率策略')), badge(versionTag())),
+      el('div', { class: 'pulse-head' }, el('span', {}, L('QUOTA EFFICIENCY', '配額效率策略')), versionTag() && badge(versionTag())),
       el('div', { class: 'pulse-main' }, el('span', { class: 'pulse-value mono', style: 'font-size:15px' }, 'gemini-neon / hydrogen'), el('span', { class: 'pulse-sub pulse-accent' }, L('Neon ~1.6–2× quota vs Hydrogen', 'Neon 僅約 Hydrogen 1.6–2× 配額'))),
       el('div', { class: 'pulse-sub' }, L('Both 512k · Hydrogen ~2× faster', '兩者均為 512k · Hydrogen 快約 2×'))));
 }
@@ -1903,7 +1904,7 @@ function makeDemo() {
   const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `sess_demo_${String(i + 1).padStart(3, '0')}`, accountId: i % 2 ? 'acct_secondary' : 'acct_primary', turns: [12, 6, 3, 8, 2, 17, 4, 1][i], lastUsedAt: ago(i * 58 + 12), inFlight: i < 3 ? 1 : 0 }));
   const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, sessionTtlMs: 1800000, maxSessions: 256 };
   return syncDemoState({
-    version: '1.5.3-demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true,
+    version: 'demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true,
     metrics: { requests: 3132, errors: 20, active: 3, successRate: 99.36, p50Ms: 1248, p95Ms: 2840 },
     accounts, sessions,
     failovers: [{ at: ago(285), sessionId: 'sess_demo_003', from: 'acct_reserve', to: 'acct_primary', reason: 'rate_limit' }, { at: ago(2140), sessionId: 'sess_demo_006', from: 'acct_primary', to: 'acct_secondary', reason: 'network_error' }],
