@@ -2,6 +2,13 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.5 — 2026-11-22
+
+### Dynamic gateway & Admin UI version reporting (Fixes #2)
+- **Dynamic Package Version** (`src/gateway/app.mjs`, `scripts/live-acceptance.mjs`): Replaced hardcoded `"1.5.3"` version strings in `overview()`, `GET /health` (and `/admin/api/diagnostics`), and `scripts/live-acceptance.mjs` with dynamic reads from `package.json` so the Admin UI, health probe, and diagnostics always report the installed release version.
+- **Admin UI Version Pill Cleanup** (`src/admin-v2/app.js`): Removed the stale `'1.5.3'` fallback in `versionTag()` (hiding the pill until `/admin/api/overview` loads) and switched demo mode's synthetic version label to `'demo'`.
+- **Regression Coverage** (`test/gateway-http.test.mjs`, `test/admin-v2-static.test.mjs`): Added assertions verifying `GET /health`, `GET /admin/api/overview`, and `versionTag()` match `package.json` with zero stale version literals.
+
 ## 1.6.4 — 2026-11-21
 
 ### Hotfix: OpenClaw OAuth login URL & scoped refresh (`openclaw-gemini-app@0.1.5`), `MAX_MESSAGES` 8,192 & accurate image token usage (`pi-gemini-app@0.1.9`)
