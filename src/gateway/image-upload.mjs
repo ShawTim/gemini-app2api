@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { protocolError } from '../tool-protocol.mjs';
 import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../image-input.mjs';
 import { connectHttp2 } from './outbound-proxy.mjs';
+import { GATEWAY_USER_AGENT } from '../../native-wire/robin-current.mjs';
 
 const ORIGIN = 'https://push.clients6.google.com';
 export const DEFAULT_UPLOAD_CONCURRENCY = 8;
@@ -168,11 +169,11 @@ export async function uploadNativeImages(
   const onSessionError = () => { sessionFailed = true; stopAll(protocolError('NATIVE_IMAGE_UPLOAD_RESET', 502)); };
   const uploadOne = async (image) => {
     ensureAlive();
-    const initial = await request({ ':method': 'POST', ':path': '/upload/', authorization: `Bearer ${token}`, 'content-length': '0', 'push-id': 'feeds/mcudyrk2a4khkz', 'x-tenant-id': 'bard-storage', 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'start', 'x-goog-upload-content-type': image.mimeType, 'x-goog-upload-content-length': String(image.data.length), 'user-agent': 'gemini-app2api/1.0' }, null, 8192);
+    const initial = await request({ ':method': 'POST', ':path': '/upload/', authorization: `Bearer ${token}`, 'content-length': '0', 'push-id': 'feeds/mcudyrk2a4khkz', 'x-tenant-id': 'bard-storage', 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'start', 'x-goog-upload-content-type': image.mimeType, 'x-goog-upload-content-length': String(image.data.length), 'user-agent': GATEWAY_USER_AGENT }, null, 8192);
     if (String(initial.headers['x-goog-upload-status'] ?? '').toLowerCase() !== 'active') fail('INVALID_RESPONSE');
     const location = boundedLocation(initial.headers['x-goog-upload-url']);
     ensureAlive();
-    const final = await request({ ':method': 'PUT', ':path': location.pathname + location.search, 'content-length': String(image.data.length), 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'upload, finalize', 'x-goog-upload-offset': '0', 'user-agent': 'gemini-app2api/1.0' }, image.data, 4096);
+    const final = await request({ ':method': 'PUT', ':path': location.pathname + location.search, 'content-length': String(image.data.length), 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'upload, finalize', 'x-goog-upload-offset': '0', 'user-agent': GATEWAY_USER_AGENT }, image.data, 4096);
     if (String(final.headers['x-goog-upload-status'] ?? '').toLowerCase() !== 'final') fail('INVALID_RESPONSE');
     let blobId;
     try { blobId = new TextDecoder('utf-8', { fatal: true }).decode(final.body); } catch { fail('INVALID_RESPONSE'); }

@@ -19,6 +19,13 @@ export const NATIVE_MODELS = Object.freeze(['gemini-neon', 'gemini-hydrogen', 'g
 export const MODEL_ALIASES = Object.freeze({ 'gemini-argon': 'gemini-neon' });
 // Native ModeCategory wire values: PRO=3 (Gemini 4 Neon), FAST=1 (Gemini 4 Hydrogen), FLASH_LITE=6. Never auto/Plus.
 export const MODEL_MODES = Object.freeze({ 'gemini-neon': 3, 'gemini-hydrogen': 1, 'gemini-flash-lite': 6 });
+// Shared model metadata source of truth across Gateway (/v1/models), Pi, and OpenClaw.
+export const MODEL_SPECS = Object.freeze({
+  'gemini-neon': Object.freeze({ name: 'Gemini Neon', contextWindow: 512000, maxTokens: 16384, reasoning: true, advertiseContextWindow: true }),
+  'gemini-hydrogen': Object.freeze({ name: 'Gemini Hydrogen', contextWindow: 512000, maxTokens: 16384, reasoning: true, advertiseContextWindow: true }),
+  'gemini-flash-lite': Object.freeze({ name: 'Gemini Flash Lite', contextWindow: 128000, maxTokens: 8192, reasoning: true, advertiseContextWindow: false }),
+  'gemini-auto': Object.freeze({ name: 'Gemini Auto', contextWindow: 128000, maxTokens: 8192, reasoning: false, advertiseContextWindow: false }),
+});
 export function canonicalModel(model) {
   if (typeof model !== 'string') return model;
   const stripped = model.startsWith('models/') ? model.slice(7) : model;

@@ -1,7 +1,7 @@
 // Native Gemini main-service terms only. Triggered by a user-initiated OAuth login.
 import crypto from "node:crypto";
 import { parse, lengthDelimited as message, varintField as integer } from "../../native-wire/protobuf.mjs";
-import { GrpcMessageReader, frameGrpcMessage, buildRequestMetadata } from "../../native-wire/robin-current.mjs";
+import { GrpcMessageReader, frameGrpcMessage, buildRequestMetadata, GATEWAY_USER_AGENT } from "../../native-wire/robin-current.mjs";
 import { decodeGrpcMessage, sanitizeUpstreamMessage } from "./native-evidence.mjs";
 import { connectHttp2 } from "./outbound-proxy.mjs";
 export const TERMS_VERSION_RPC = "/assistant.mobile.robin.RobinService/GetTermsOfServiceVersion";
@@ -45,7 +45,7 @@ export async function termsRpc(accessToken, rpc, payload, { signal, timeoutMs = 
     signal?.addEventListener("abort", abort, { once: true }); timer = setTimeout(() => finish(fail("TOS_TIMEOUT", 504)), timeoutMs);
     try {
       client = connect(origin); client.on("error", () => finish(fail("TOS_CONNECTION_FAILED")));
-      request = client.request({ ":method": "POST", ":path": rpc, authorization: "Bearer " + accessToken, "content-type": "application/grpc", te: "trailers", "grpc-timeout": timeoutMs + "m", "user-agent": "gemini-app2api/1.0" });
+      request = client.request({ ":method": "POST", ":path": rpc, authorization: "Bearer " + accessToken, "content-type": "application/grpc", te: "trailers", "grpc-timeout": timeoutMs + "m", "user-agent": GATEWAY_USER_AGENT });
       request.on("response", status); request.on("trailers", status);
       request.on("data", chunk => {
         if (settled) return; received += chunk.length;
@@ -104,7 +104,7 @@ export async function acceptGoogleMainTerms(accessToken, { signal, rpc = termsRp
   // The native main-terms builder uses the numeric oneof setter (wire 6),
   // not the old standalone enum (wire 1). Locale is already in metadata.
   const body = Buffer.concat([
-    message(4, Buffer.from("gemini-app2api/1.0")), integer(5, 21),
+    message(4, Buffer.from(GATEWAY_USER_AGENT)), integer(5, 21),
     integer(6, versionNo), message(7, termsMetadata(language)),
     message(10, Buffer.concat([integer(1, seconds), ...(nanos ? [integer(2, nanos)] : [])])),
   ]);

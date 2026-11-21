@@ -20,6 +20,7 @@ import {
   matchesOpenClawContextOverflow,
 } from '../extensions/openclaw/stream.js';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
+import { MODEL_SPECS } from '../src/openai-contract.mjs';
 
 function makeNeonFrame(text, { complete = true, mode = 3, thinking = 2, attribution = 'Used 4 Neon High model' } = {}) {
   return m(
@@ -46,8 +47,22 @@ test('openclaw.plugin.json manifest declares valid provider, schema, aliases, an
   assert.equal(manifest.configSchema.type, 'object');
   assert.equal(manifest.modelIdNormalization.providers['gemini-app'].aliases['gemini-argon'], 'gemini-neon');
   const models = manifest.modelCatalog.providers['gemini-app'].models;
-  assert.equal(models.find((x) => x.id === 'gemini-neon').contextWindow, 512000);
-  assert.equal(models.find((x) => x.id === 'gemini-hydrogen').contextWindow, 512000);
+  assert.deepEqual(
+    models.map((x) => ({
+      id: x.id,
+      name: x.name,
+      contextWindow: x.contextWindow,
+      maxTokens: x.maxTokens,
+      reasoning: x.reasoning,
+    })),
+    Object.entries(MODEL_SPECS).map(([id, spec]) => ({
+      id,
+      name: spec.name,
+      contextWindow: spec.contextWindow,
+      maxTokens: spec.maxTokens,
+      reasoning: spec.reasoning,
+    })),
+  );
 });
 
 test('model normalization, alias resolution, and Free-tier filtering work deterministically', () => {

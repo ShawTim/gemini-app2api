@@ -1,5 +1,5 @@
 // Read-only Google quota RPC; no generation, quota reset, retry, redirects or model switching.
-import {GrpcMessageReader,frameGrpcMessage} from "../../native-wire/robin-current.mjs";
+import {GrpcMessageReader,frameGrpcMessage,GATEWAY_USER_AGENT} from "../../native-wire/robin-current.mjs";
 import {connectHttp2} from "./outbound-proxy.mjs";
 export const QUOTA_ORIGIN = "https://robinfrontend-pa.googleapis.com";
 export const QUOTA_RPC = "/assistant.mobile.robin.RobinService/GetUsageInfo";
@@ -25,7 +25,7 @@ export async function fetchGoogleUsageInfo(accessToken,{signal,timeoutMs=10000,c
     signal?.addEventListener("abort",abort,{once:true});timer=setTimeout(()=>finish(failure("QUOTA_TIMEOUT",504)),timeoutMs);
     try{
       client=connect(QUOTA_ORIGIN);client.on("error",()=>finish(failure("QUOTA_CONNECTION_FAILED")));
-      request=client.request({":method":"POST",":path":QUOTA_RPC,authorization:"Bearer "+accessToken,"content-type":"application/grpc",te:"trailers","grpc-timeout":timeoutMs+"m","user-agent":"gemini-app2api/1.0"});
+      request=client.request({":method":"POST",":path":QUOTA_RPC,authorization:"Bearer "+accessToken,"content-type":"application/grpc",te:"trailers","grpc-timeout":timeoutMs+"m","user-agent":GATEWAY_USER_AGENT});
       request.on("response",status);request.on("trailers",status);
       request.on("data",chunk=>{if(settled)return;received+=chunk.length;if(received>1024*1024)return finish(failure("QUOTA_RESPONSE_TOO_LARGE"));try{payloads.push(...reader.push(chunk));if(payloads.length>1)finish(failure("QUOTA_INVALID_RESPONSE"));}catch{finish(failure("QUOTA_INVALID_RESPONSE"));}});
       request.on("error",()=>{if(!settled&&!reset())finish(failure("QUOTA_STREAM_FAILED"));});

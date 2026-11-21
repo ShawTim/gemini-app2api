@@ -13,6 +13,8 @@ import {
 import {
   GrpcMessageReader,
   frameGrpcMessage,
+  NATIVE_VERSION,
+  GATEWAY_USER_AGENT,
 } from "../../native-wire/robin-current.mjs";
 import { fault } from "./oauth-client-defaults.mjs";
 import { PROMPT_MAX_BYTES } from "../openai-contract.mjs";
@@ -36,9 +38,9 @@ ensureConnectAttemptTimeout();
 export const NATIVE_ORIGIN = "https://robinfrontend-pa.googleapis.com";
 export const NATIVE_RPC =
   "/assistant.mobile.robin.RobinService/ProcessQuery";
-// ProcessQuery compatibility snapshot checked against native 1.135.1.1291.
+// ProcessQuery compatibility snapshot shared with native-wire/robin-current.mjs.
 // A protocol constant, not a runtime App dependency or copied device identity.
-export const NATIVE_COMPATIBILITY_VERSION = "1.135.1.1291";
+export const NATIVE_COMPATIBILITY_VERSION = NATIVE_VERSION;
 export function openDirectTurn(
   token,
   {
@@ -304,7 +306,7 @@ export function openDirectTurn(
       "content-type": "application/grpc",
       "grpc-timeout": `${timeoutMs}m`,
       te: "trailers",
-      "user-agent": "gemini-app2api/1.0",
+      "user-agent": GATEWAY_USER_AGENT,
     });
     request.on("response", headers => {
       note('peer_headers', { httpStatus: Number(headers[':status']), grpcStatus: Number(headers['grpc-status']) });

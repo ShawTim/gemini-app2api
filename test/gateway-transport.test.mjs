@@ -19,6 +19,8 @@ import { automaticRecoveryKind } from "../src/gateway/automatic-recovery.mjs";
 import {
   GrpcMessageReader,
   frameGrpcMessage,
+  NATIVE_VERSION,
+  GATEWAY_USER_AGENT,
 } from "../native-wire/robin-current.mjs";
 import {
   parse,
@@ -88,6 +90,8 @@ test("product transport sends exactly three native frames and half-closes prompt
   const metadata = field(initial, 1);
   assert.deepEqual(field(template, 13), metadata, "outer and generate metadata must match");
   assert.equal(NATIVE_COMPATIBILITY_VERSION, "1.135.1.1291");
+  assert.equal(NATIVE_COMPATIBILITY_VERSION, NATIVE_VERSION);
+  assert.equal(GATEWAY_USER_AGENT, "gemini-app2api/1.0");
   assert.equal(field(field(metadata, 3), 1).toString(), NATIVE_COMPATIBILITY_VERSION);
   assert.equal(number(field(metadata, 4)), 21);
   assert.match(field(metadata, 23).toString(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);

@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 import { parseRemoteImageUrl, isPublicImageAddress } from '../image-url.mjs';
 import { decodeImageBytes, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../image-input.mjs';
 import { protocolError, ProtocolError } from '../tool-protocol.mjs';
+import { GATEWAY_USER_AGENT } from '../../native-wire/robin-current.mjs';
 
 const fail = (code, status = 400) => { throw protocolError(code, status); };
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
@@ -54,7 +55,7 @@ export async function downloadRemoteImages(images, { signal, timeoutMs = 30000 }
             if (limit <= 0) fail('IMAGES_TOO_LARGE', 413);
             req = request(url, {
               method: 'GET', agent: false, maxHeaderSize: 16384,
-              headers: { accept: 'image/png, image/jpeg, image/webp', 'accept-encoding': 'identity', 'user-agent': 'gemini-app2api/1.0' },
+              headers: { accept: 'image/png, image/jpeg, image/webp', 'accept-encoding': 'identity', 'user-agent': GATEWAY_USER_AGENT },
               // Pin after validation; preserve original Host, SNI and certificate verification.
               lookup: (_host, options, callback) => callback(null, ...(options?.all ? [[pinned]] : [pinned.address, pinned.family])),
             }, incoming => {

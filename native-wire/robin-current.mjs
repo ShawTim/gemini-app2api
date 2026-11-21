@@ -4,7 +4,8 @@
 import { lengthDelimited as message, varintField, varint, parse, MAX_MESSAGE_BYTES } from './protobuf.mjs';
 import { TextDecoder } from 'node:util';
 
-export const NATIVE_VERSION = '1.131.4.1198';
+export const NATIVE_VERSION = '1.135.1.1291';
+export const GATEWAY_USER_AGENT = 'gemini-app2api/1.0';
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 function text(value) {
   if (typeof value !== 'string') throw new TypeError('Expected string');

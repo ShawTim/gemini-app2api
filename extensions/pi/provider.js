@@ -1,5 +1,6 @@
 import { createGeminiOAuthAuth } from './auth.js';
 import { createGeminiStreamHandler } from './stream.js';
+import { MODEL_SPECS } from '../../src/openai-contract.mjs';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
 import { decodeUsageInfo as defaultDecodeUsageInfo } from '../../src/gateway/quota.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
@@ -25,81 +26,30 @@ export function filterGeminiModels(models, credential) {
   return models;
 }
 
-export const MODELS = Object.freeze([
-  {
-    id: 'gemini-neon',
-    name: 'Gemini Neon',
+const PI_THINKING_LEVEL_MAP = Object.freeze({
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+});
+
+export const MODELS = Object.freeze(
+  Object.entries(MODEL_SPECS).map(([id, spec]) => ({
+    id,
+    name: spec.name,
     api: API_ID,
     provider: PROVIDER_ID,
     baseUrl: BASE_URL,
     type: 'chat',
-    contextWindow: 512000,
-    maxTokens: 16384,
+    contextWindow: spec.contextWindow,
+    maxTokens: spec.maxTokens,
     input: ['text', 'image'],
-    reasoning: true,
-    thinkingLevelMap: {
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-    },
+    reasoning: spec.reasoning,
+    ...(spec.reasoning ? { thinkingLevelMap: { ...PI_THINKING_LEVEL_MAP } } : {}),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  },
-  {
-    id: 'gemini-hydrogen',
-    name: 'Gemini Hydrogen',
-    api: API_ID,
-    provider: PROVIDER_ID,
-    baseUrl: BASE_URL,
-    type: 'chat',
-    contextWindow: 512000,
-    maxTokens: 16384,
-    input: ['text', 'image'],
-    reasoning: true,
-    thinkingLevelMap: {
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-    },
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  },
-  {
-    id: 'gemini-flash-lite',
-    name: 'Gemini Flash Lite',
-    api: API_ID,
-    provider: PROVIDER_ID,
-    baseUrl: BASE_URL,
-    type: 'chat',
-    contextWindow: 128000,
-    maxTokens: 8192,
-    input: ['text', 'image'],
-    reasoning: true,
-    thinkingLevelMap: {
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-    },
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  },
-  {
-    id: 'gemini-auto',
-    name: 'Gemini Auto',
-    api: API_ID,
-    provider: PROVIDER_ID,
-    baseUrl: BASE_URL,
-    type: 'chat',
-    contextWindow: 128000,
-    maxTokens: 8192,
-    input: ['text', 'image'],
-    reasoning: false,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  },
-]);
+  })),
+);
 
 export function formatQuotaDisplay(usageInfo, subscriptionInfo) {
   const tier = subscriptionInfo?.tier;

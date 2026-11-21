@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { parse } from '../native-wire/protobuf.mjs';
 import { decodeClientGenerateResponse } from '../native-wire/robin-current.mjs';
 import { ProtocolError, protocolError, compileToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
-import { MODEL_ALIASES, MODEL_MODES, NATIVE_MODELS, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
+import { MODEL_ALIASES, MODEL_MODES, MODEL_SPECS, NATIVE_MODELS, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
 import { RESPONSE_TOOL_IDENTITIES } from './responses-tool-namespaces.mjs';
 import { safeNativeEvidence } from './gateway/native-evidence.mjs';
 import { decodePassiveQuota, mergeQuotaObservation } from './gateway/quota.mjs';
@@ -20,7 +20,7 @@ import { validateStructuredOutputText } from './gateway/structured-output.mjs';
 import { mapNativeSearchAnnotations, extractNativeSearchSources } from './gateway/native-search-citations.mjs';
 import { softErrorReason } from './gateway/soft-error.mjs';
 import { observeNative } from './gateway/native-diagnostic.mjs';
-export { MODEL_ALIASES, NATIVE_MODELS, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse };
+export { MODEL_ALIASES, MODEL_SPECS, NATIVE_MODELS, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse };
 
 import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './gateway/native-response-limits.mjs';
 const fail = (code, status = 502) => { throw protocolError(code, status); };

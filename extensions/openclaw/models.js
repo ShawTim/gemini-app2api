@@ -1,3 +1,5 @@
+import { MODEL_SPECS } from '../../src/openai-contract.mjs';
+
 export const PROVIDER_ID = 'gemini-app';
 export const BASE_URL = 'https://robinfrontend-pa.googleapis.com';
 export const PROVIDER_API = 'openai-completions';
@@ -10,71 +12,30 @@ export const MODEL_ALIASES = Object.freeze({
   auto: 'gemini-auto',
 });
 
-export const OPENCLAW_MODELS = Object.freeze([
-  Object.freeze({
-    id: 'gemini-neon',
-    name: 'Gemini Neon',
-    reasoning: true,
-    input: Object.freeze(['text', 'image']),
-    cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-    contextWindow: 512000,
-    maxTokens: 16384,
-    thinkingLevelMap: Object.freeze({
-      off: 'minimal',
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-      max: 'xhigh',
+const OPENCLAW_THINKING_LEVEL_MAP = Object.freeze({
+  off: 'minimal',
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+  max: 'xhigh',
+});
+
+export const OPENCLAW_MODELS = Object.freeze(
+  Object.entries(MODEL_SPECS).map(([id, spec]) =>
+    Object.freeze({
+      id,
+      name: spec.name,
+      reasoning: spec.reasoning,
+      input: Object.freeze(['text', 'image']),
+      cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+      contextWindow: spec.contextWindow,
+      maxTokens: spec.maxTokens,
+      ...(spec.reasoning ? { thinkingLevelMap: OPENCLAW_THINKING_LEVEL_MAP } : {}),
     }),
-  }),
-  Object.freeze({
-    id: 'gemini-hydrogen',
-    name: 'Gemini Hydrogen',
-    reasoning: true,
-    input: Object.freeze(['text', 'image']),
-    cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-    contextWindow: 512000,
-    maxTokens: 16384,
-    thinkingLevelMap: Object.freeze({
-      off: 'minimal',
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-      max: 'xhigh',
-    }),
-  }),
-  Object.freeze({
-    id: 'gemini-flash-lite',
-    name: 'Gemini Flash Lite',
-    reasoning: true,
-    input: Object.freeze(['text', 'image']),
-    cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-    contextWindow: 128000,
-    maxTokens: 8192,
-    thinkingLevelMap: Object.freeze({
-      off: 'minimal',
-      minimal: 'minimal',
-      low: 'low',
-      medium: 'medium',
-      high: 'high',
-      xhigh: 'xhigh',
-      max: 'xhigh',
-    }),
-  }),
-  Object.freeze({
-    id: 'gemini-auto',
-    name: 'Gemini Auto',
-    reasoning: false,
-    input: Object.freeze(['text', 'image']),
-    cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
-    contextWindow: 128000,
-    maxTokens: 8192,
-  }),
-]);
+  ),
+);
 
 export function normalizeGeminiAppModelId(modelId) {
   if (typeof modelId !== 'string') return null;
