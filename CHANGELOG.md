@@ -2,6 +2,16 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.4 — 2026-11-21
+
+### Hotfix: OpenClaw OAuth login URL & scoped refresh (`openclaw-gemini-app@0.1.5`), `MAX_MESSAGES` 8,192 & accurate image token usage (`pi-gemini-app@0.1.9`)
+- **Critical OpenClaw OAuth Hotfix** (`extensions/openclaw/auth.js`, `openclaw-gemini-app@0.1.5`):
+  - Fixed OAuth sign-in displaying `visit: undefined` by reading `session.authorizationUrl` returned by `startLoopbackLogin()` (with explicit non-empty URL guard).
+  - Added the required post-login scoped token exchange (`refreshNativeCredential(config, tokens.refreshToken)`) to acquire `assistant`/`gemini` scopes before terms check, quota/subscription detection, and generation.
+  - Fixed swapped `(cred.refresh, config)` argument order in `refreshOpenClawOAuth` (`refreshNativeCredential(config, cred.refresh)`), verified by a real-loopback + real-refresh integration test in `test/openclaw-extension.test.mjs`.
+- **Long-Session Message Limit** (`src/openai-contract.mjs`): Raised `MAX_MESSAGES` from `1,024` to **`8,192`** (and `requestBudget()` node ceiling from `32,768` to **`131,072`**) and changed overflow responses from misleading `400 MESSAGES_REQUIRED` to standard **`413 REQUEST_TOO_LARGE`** (`param: "messages"` / `"input"`), matching OpenClaw/Pi context-overflow auto-compaction hooks.
+- **Accurate Image Token Estimation** (`src/openai-usage.mjs`, `src/gateway/app.mjs`, `src/gateway/response-delivery.mjs`, `extensions/pi/stream.js`): Excluded base64 `image_url` / `input_image` data strings from `promptChars` and billed a fixed **`258` tokens per image** so multi-screenshot sessions no longer inflate `usage.prompt_tokens` by hundreds of thousands of bogus text tokens.
+
 ## 1.6.3 — 2026-11-20
 
 ### Clean short-reply stall recovery, tighter idle watchdogs & safe deliverable-output gating (`pi-gemini-app@0.1.8`, `openclaw-gemini-app@0.1.4`)
