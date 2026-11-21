@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { startLoopbackLogin as realStartLoopbackLogin, refreshNativeCredential as realRefreshNativeCredential } from '../native-wire/oauth-loopback.mjs';
 import {
   createGeminiAppOpenClawPlugin,
   buildGeminiAppOpenClawProvider,
@@ -86,13 +87,15 @@ test('plugin register(api) registers gemini-app provider and /gemini-quota comma
   assert.equal(commands[0].name, 'gemini-quota');
 });
 
-test('OAuth login supports local browser flow, remote VPS callback flow, and refreshOAuth', async () => {
+test('OAuth login supports local browser flow, remote VPS callback flow, scoped exchange, and real refreshOAuth', async () => {
   let completedUrl = null;
   const openUrls = [];
+  const notes = [];
+  let refreshCount = 0;
   const provider = buildGeminiAppOpenClawProvider({
     startLoopbackLogin: async () => ({
-      url: 'https://accounts.google.com/o/oauth2/auth?state=synthetic',
-      done: Promise.resolve({ accessToken: 'tok_access_1', refreshToken: 'tok_refresh_1', expiresInSeconds: 3600 }),
+      authorizationUrl: 'https://accounts.google.com/o/oauth2/auth?state=synthetic',
+      done: Promise.resolve({ accessToken: 'tok_initial_flexible', refreshToken: 'tok_refresh_1', expiresInSeconds: 3600 }),
       completeCallbackUrl: async (u) => { completedUrl = u; },
       close() {},
     }),
@@ -100,24 +103,32 @@ test('OAuth login supports local browser flow, remote VPS callback flow, and ref
     fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('synthetic') }),
     decodeSubscription: () => ({ tier: 'pro' }),
     identifyGoogleAccount: async () => ({ email: 'Dev@Example.com', subject: 'sub_1' }),
-    refreshNativeCredential: async (refreshToken) => ({
-      accessToken: 'tok_access_2',
-      refreshToken: refreshToken + '_rotated',
-      expiresInSeconds: 3600,
-    }),
+    refreshNativeCredential: async (config, refreshToken) => {
+      assert.equal(typeof config?.clientId, 'string', 'refreshNativeCredential must receive config as arg 1');
+      assert.equal(typeof refreshToken, 'string', 'refreshNativeCredential must receive refreshToken as arg 2');
+      refreshCount++;
+      return {
+        accessToken: `tok_scoped_${refreshCount}`,
+        refreshToken: refreshToken + '_rotated',
+        expiresInSeconds: 3600,
+      };
+    },
   });
 
   // Local browser login
   const localRes = await provider.auth[0].run({
     isRemote: false,
     openUrl: async (u) => { openUrls.push(u); },
-    prompter: { note: async () => {}, progress: () => ({ update() {}, stop() {} }) },
+    prompter: { note: async (msg) => { notes.push(msg); }, progress: () => ({ update() {}, stop() {} }) },
     assertCurrent() {},
   });
   assert.equal(openUrls.length, 1);
+  assert.equal(openUrls[0], 'https://accounts.google.com/o/oauth2/auth?state=synthetic');
+  assert.match(notes[0], /https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?state=synthetic/);
+  assert.equal(notes[0].includes('undefined'), false);
   assert.equal(localRes.profiles[0].profileId, 'gemini-app:dev@example.com');
   assert.equal(localRes.profiles[0].credential.type, 'oauth');
-  assert.equal(localRes.profiles[0].credential.access, 'tok_access_1');
+  assert.equal(localRes.profiles[0].credential.access, 'tok_scoped_1');
   assert.equal(localRes.defaultModel, 'gemini-app/gemini-neon');
   assert.equal(localRes.configPatch.models.providers['gemini-app'].models.length, 4);
 
@@ -126,19 +137,71 @@ test('OAuth login supports local browser flow, remote VPS callback flow, and ref
     isRemote: true,
     openUrl: async () => { throw new Error('Should not open browser in remote mode'); },
     prompter: {
-      note: async () => {},
+      note: async (msg) => { notes.push(msg); },
       progress: () => ({ update() {}, stop() {} }),
       text: async () => 'http://localhost:54321/?code=abc&state=synthetic',
     },
   });
   assert.equal(completedUrl, 'http://localhost:54321/?code=abc&state=synthetic');
-  assert.equal(remoteRes.profiles[0].credential.access, 'tok_access_1');
+  assert.match(notes[1], /https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?state=synthetic/);
+  assert.equal(remoteRes.profiles[0].credential.access, 'tok_scoped_2');
 
   // refreshOAuth rotates credentials cleanly
   const refreshed = await provider.refreshOAuth(localRes.profiles[0].credential);
-  assert.equal(refreshed.access, 'tok_access_2');
-  assert.equal(refreshed.refresh, 'tok_refresh_1_rotated');
+  assert.equal(refreshed.access, 'tok_scoped_3');
+  assert.equal(refreshed.refresh, 'tok_refresh_1_rotated_rotated');
   assert.equal(refreshed.subscriptionTier, 'pro');
+
+  // Real startLoopbackLogin + real refreshNativeCredential integration (no mocked session shape)
+  const realFetchCalls = [];
+  const syntheticFetch = async (_url, init) => {
+    const body = String(init?.body ?? '');
+    realFetchCalls.push(body);
+    const isRefresh = body.includes('grant_type=refresh_token');
+    return new Response(
+      JSON.stringify({
+        access_token: isRefresh ? 'tok_real_scoped' : 'tok_real_flex',
+        refresh_token: isRefresh ? 'tok_real_refresh_2' : 'tok_real_refresh_1',
+        expires_in: 3600,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+  const realNotes = [];
+  const realProvider = buildGeminiAppOpenClawProvider({
+    defaultProfile: {
+      clientId: '123456789-synthetic.apps.googleusercontent.com',
+      clientSecret: 'synthetic-secret',
+      scopes: ['https://www.googleapis.com/auth/assistant', 'https://www.googleapis.com/auth/gemini'],
+    },
+    startLoopbackLogin: (cfg, deps) => realStartLoopbackLogin(cfg, { ...deps, fetchImpl: syntheticFetch }),
+    refreshNativeCredential: (cfg, rt, deps) => realRefreshNativeCredential(cfg, rt, { ...deps, fetchImpl: syntheticFetch }),
+    acceptGoogleMainTerms: async () => ({ accepted: true }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('synthetic') }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    identifyGoogleAccount: async () => ({ email: 'Real@Example.com', subject: 'sub_real' }),
+  });
+  const realRes = await realProvider.auth[0].run({
+    isRemote: false,
+    openUrl: async (authUrl) => {
+      assert.match(authUrl, /^https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?/);
+      const parsed = new URL(authUrl);
+      const redirectUri = parsed.searchParams.get('redirect_uri');
+      const state = parsed.searchParams.get('state');
+      const cb = await fetch(`${redirectUri}/?code=synthetic_code&state=${encodeURIComponent(state)}`);
+      assert.equal(cb.status, 200);
+    },
+    prompter: { note: async (msg) => { realNotes.push(msg); }, progress: () => ({ update() {}, stop() {} }) },
+    assertCurrent() {},
+  });
+  assert.match(realNotes[0], /https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?/);
+  assert.equal(realNotes[0].includes('undefined'), false);
+  assert.equal(realRes.profiles[0].credential.access, 'tok_real_scoped');
+  assert.equal(realRes.profiles[0].credential.refresh, 'tok_real_refresh_2');
+  assert.equal(realFetchCalls.length, 2, 'must perform auth_code exchange followed by scoped refresh exchange');
+  const realRefreshed = await realProvider.refreshOAuth(realRes.profiles[0].credential);
+  assert.equal(realRefreshed.access, 'tok_real_scoped');
+  assert.equal(realFetchCalls.length, 3);
 });
 
 test('createStreamFn honors OpenClaw requestAuth v1 with assertCurrent() and streams text & tool calls', async () => {

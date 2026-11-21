@@ -76,11 +76,17 @@ export function createOpenClawAuthHandlers({
     signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
+      const authUrl = typeof session?.authorizationUrl === 'string' && session.authorizationUrl.trim()
+        ? session.authorizationUrl.trim()
+        : '';
+      if (!authUrl) {
+        throw new Error('OAuth loopback login did not return an authorization URL');
+      }
       const progress = ctx?.prompter?.progress?.('Waiting for Google sign-in…');
       try {
         if (ctx?.isRemote) {
           await ctx?.prompter?.note?.(
-            `Open this URL in your browser to sign in with Google:\n\n${session.url}\n\nAfter sign-in, copy the full localhost redirect URL from your browser address bar and paste it below.`,
+            `Open this URL in your browser to sign in with Google:\n\n${authUrl}\n\nAfter sign-in, copy the full localhost redirect URL from your browser address bar and paste it below.`,
             'Google Gemini OAuth (Remote)',
           );
           if (typeof ctx?.prompter?.text === 'function') {
@@ -95,40 +101,47 @@ export function createOpenClawAuthHandlers({
           }
         } else {
           await ctx?.prompter?.note?.(
-            `Opening Google sign-in in your browser…\nIf it does not open automatically, visit:\n${session.url}`,
+            `Opening Google sign-in in your browser…\nIf it does not open automatically, visit:\n${authUrl}`,
             'Google Gemini OAuth',
           );
           try {
-            await ctx?.openUrl?.(session.url);
+            await ctx?.openUrl?.(authUrl);
           } catch {
             // Browser launch can fail in headless/restricted shells; URL was already shown above.
           }
         }
 
         const tokens = await session.done;
-        if (!tokens?.accessToken) {
-          throw new Error('OAuth login did not return an access token');
+        if (!tokens || typeof tokens.refreshToken !== 'string' || !tokens.refreshToken) {
+          throw new Error('Google OAuth login did not return a refresh token');
+        }
+        ctx?.assertCurrent?.();
+
+        progress?.update?.('Exchanging scoped Gemini access token…');
+        const scoped = await refreshNativeCredential(config, tokens.refreshToken, { signal });
+        if (!scoped?.accessToken) {
+          throw new Error('OAuth scoped token exchange did not return an access token');
         }
         ctx?.assertCurrent?.();
 
         progress?.update?.('Verifying Gemini account & subscription…');
         try {
-          await acceptGoogleMainTerms(tokens.accessToken, { signal, timeoutMs: 15000 });
+          await acceptGoogleMainTerms(scoped.accessToken, { signal, timeoutMs: 15000 });
         } catch {
           // Non-fatal: accounts with already-accepted terms continue normally.
         }
 
         const [subscriptionTier, email] = await Promise.all([
-          detectSubscriptionTier(tokens.accessToken, { signal }),
-          detectAccountEmail(tokens.accessToken),
+          detectSubscriptionTier(scoped.accessToken, { signal }),
+          detectAccountEmail(scoped.accessToken),
         ]);
-        const expires = computeExpiresAtMs(tokens.expiresInSeconds);
+        const expires = computeExpiresAtMs(scoped.expiresInSeconds ?? tokens.expiresInSeconds);
         const profileId = buildProfileId(email);
         const credential = {
           type: 'oauth',
           provider: PROVIDER_ID,
-          access: tokens.accessToken,
-          refresh: tokens.refreshToken || '',
+          access: scoped.accessToken,
+          refresh: scoped.refreshToken || tokens.refreshToken,
           expires,
           ...(email ? { email } : {}),
           subscriptionTier,
@@ -173,7 +186,7 @@ export function createOpenClawAuthHandlers({
       throw new Error('Missing Google Gemini OAuth refresh token; run `openclaw models auth login --provider gemini-app`.');
     }
     const config = resolveOAuthConfig({ defaultProfile, env });
-    const refreshed = await refreshNativeCredential(cred.refresh, config);
+    const refreshed = await refreshNativeCredential(config, cred.refresh);
     if (!refreshed?.accessToken) {
       throw new Error('OAuth refresh did not return an access token');
     }
