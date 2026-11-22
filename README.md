@@ -30,7 +30,7 @@ Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **OpenCode**, 
 
 ### Path A — Standalone Native Plugins (No Server Required)
 
-![gemini-app2api — Zero-Dependency Native Extensions for Pi & OpenClaw](docs/assets/extensions-overview.jpg)
+![gemini-app2api — Zero-Dependency Native Extensions for Pi, OpenClaw, OpenCode & MCP](docs/assets/extensions-overview.jpg)
 
 <a id="pi-extension"></a><a id="openclaw-plugin"></a>
 

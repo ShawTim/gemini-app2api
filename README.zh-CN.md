@@ -30,7 +30,7 @@
 
 ### 路线 A — 独立原生插件（无需启动网关服务器）
 
-![gemini-app2api —— 零依赖原生扩展（Pi 与 OpenClaw）](docs/assets/extensions-overview.jpg)
+![gemini-app2api —— 零依赖原生扩展（Pi、OpenClaw、OpenCode 与 MCP）](docs/assets/extensions-overview.jpg)
 
 <a id="pi-extension"></a><a id="openclaw-plugin"></a>
 

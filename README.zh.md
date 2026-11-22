@@ -30,7 +30,7 @@
 
 ### 路線 A — 獨立原生插件（免啟動閘道伺服器）
 
-![gemini-app2api —— 零依賴原生擴充套件（Pi 與 OpenClaw）](docs/assets/extensions-overview.jpg)
+![gemini-app2api —— 零依賴原生擴充套件（Pi、OpenClaw、OpenCode 與 MCP）](docs/assets/extensions-overview.jpg)
 
 <a id="pi-extension"></a><a id="openclaw-plugin"></a>
 
