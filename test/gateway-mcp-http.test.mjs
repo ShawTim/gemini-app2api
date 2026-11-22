@@ -305,15 +305,26 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
 
   // 13. bin/gemini-gateway mcp bridge translates notifications/cancelled into HTTP abort cancelling upstream work
   let cancelObserved = false;
+  let turnEnteredResolve;
+  const turnEntered = new Promise((r) => { turnEnteredResolve = r; });
+  let cancelObservedResolve;
+  const cancelObservedPromise = new Promise((r) => { cancelObservedResolve = r; });
   const origTurn = f.app.provider.runTurn.bind(f.app.provider);
   f.app.provider.runTurn = async (sessionId, body, onDelta, opts) => {
     const text = body?.messages?.[0]?.content || '';
     if (typeof text === 'string' && text.includes('WAIT_FOR_BRIDGE_CANCEL')) {
       return await new Promise((_resolve, reject) => {
-        opts?.signal?.addEventListener('abort', () => {
+        const onAbort = () => {
           cancelObserved = true;
+          cancelObservedResolve();
           reject(Object.assign(new Error('Client aborted'), { code: 'CLIENT_DISCONNECTED', status: 499 }));
-        }, { once: true });
+        };
+        if (opts?.signal?.aborted) {
+          onAbort();
+          return;
+        }
+        opts?.signal?.addEventListener('abort', onAbort, { once: true });
+        turnEnteredResolve();
       });
     }
     return origTurn(sessionId, body, onDelta, opts);
@@ -335,7 +346,7 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
     method: 'tools/call',
     params: { name: 'ask_gemini', arguments: { prompt: 'WAIT_FOR_BRIDGE_CANCEL' } },
   }) + '\n');
-  await new Promise((r) => setTimeout(r, 80));
+  await turnEntered;
   cancelChild.stdin.write(JSON.stringify({
     jsonrpc: '2.0',
     method: 'notifications/cancelled',
@@ -343,7 +354,10 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
   }) + '\n');
   cancelChild.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 202, method: 'ping' }) + '\n');
   cancelChild.stdin.end();
-  const cancelExit = await new Promise((resolve) => cancelChild.on('close', resolve));
+  const [cancelExit] = await Promise.all([
+    new Promise((resolve) => cancelChild.on('close', resolve)),
+    Promise.race([cancelObservedPromise, new Promise((r) => setTimeout(r, 5000))]),
+  ]);
   assert.equal(cancelExit, 0);
   assert.equal(cancelObserved, true);
   const cancelOutLines = cancelStdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
