@@ -2,6 +2,7 @@
 /** Release CLI. Foreground lifecycle; never launches or hooks a desktop App. */
 import { StateStore, fault } from "../src/gateway/state.mjs";
 import { loadLocalEnvironment } from "../src/gateway/environment.mjs";
+import { jsonRpcError } from "../src/gateway/mcp-core.mjs";
 const [command = "help", ...args] = process.argv.slice(2);
 async function input() {
   let bytes = 0,
@@ -57,6 +58,67 @@ try {
     });
     console.log(JSON.stringify(await res.json()));
     if (!res.ok) process.exitCode = 1;
+  } else if (command === "mcp") {
+    if (args.length) throw fault("UNSUPPORTED_ARGUMENT");
+    const origin =
+      process.env.GEMINI_GATEWAY_URL ||
+      process.env.GATEWAY_PUBLIC_ORIGIN ||
+      `http://127.0.0.1:${process.env.PORT || 18989}`;
+    const apiKey = (process.env.GEMINI_GATEWAY_API_KEY || "").trim();
+    const mcpUrl = new URL("/mcp", origin);
+    if (!["http:", "https:"].includes(mcpUrl.protocol) || mcpUrl.username || mcpUrl.password) {
+      throw fault("INVALID_GATEWAY_URL");
+    }
+    let buffer = Buffer.alloc(0);
+    const maxLineBytes = 32 * 1024 * 1024;
+    const forward = async (rawLine) => {
+      const trimmed = rawLine.trim();
+      if (!trimmed) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        process.stdout.write(JSON.stringify(jsonRpcError(null, -32700, "Parse error")) + "\n");
+        return;
+      }
+      const headers = { "Content-Type": "application/json" };
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      try {
+        const res = await fetch(mcpUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(parsed),
+          redirect: "error",
+        });
+        if (res.status === 202) return;
+        const text = await res.text();
+        if (text.trim()) process.stdout.write(text.trim() + "\n");
+      } catch (err) {
+        if (Object.hasOwn(parsed, "id")) {
+          process.stdout.write(
+            JSON.stringify(jsonRpcError(parsed.id, -32603, err?.message || "Gateway /mcp request failed")) + "\n",
+          );
+        }
+      }
+    };
+    const pending = [];
+    for await (const chunk of process.stdin) {
+      const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (buffer.length + piece.length > maxLineBytes) {
+        buffer = Buffer.alloc(0);
+        process.stdout.write(JSON.stringify(jsonRpcError(null, -32600, "Request line exceeds maximum size")) + "\n");
+        continue;
+      }
+      buffer = buffer.length ? Buffer.concat([buffer, piece]) : piece;
+      let nl;
+      while ((nl = buffer.indexOf(0x0a)) !== -1) {
+        const line = buffer.subarray(0, nl).toString("utf8");
+        buffer = buffer.subarray(nl + 1);
+        pending.push(forward(line));
+      }
+    }
+    if (buffer.length) pending.push(forward(buffer.toString("utf8")));
+    await Promise.allSettled(pending);
   } else if (command === "help")
     console.log(`Gemini App2API · Native Direct Gateway
 
@@ -64,6 +126,7 @@ try {
   gemini-gateway import-profile Optional: override OAuth client profile JSON on stdin (server stopped)
   gemini-gateway start          Foreground server; Ctrl-C / SIGTERM for graceful shutdown
   gemini-gateway status         Readiness only; never invokes a model
+  gemini-gateway mcp            Stdio MCP bridge to the local gateway's POST /mcp endpoint
   gemini-gateway create-key LABEL  Print a new API key ONCE (server stopped)
   Admin password: edit untracked .env GATEWAY_ADMIN_PASSWORD and restart (no state-password reset)
 

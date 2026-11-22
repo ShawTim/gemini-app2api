@@ -23,6 +23,7 @@ export const productTests = Object.freeze([
   'test/gateway-internal-service.test.mjs',
   'test/gateway-limits.test.mjs',
   'test/gateway-live-runner.test.mjs',
+  'test/gateway-mcp-http.test.mjs',
   'test/gateway-native-diagnostic.test.mjs',
   'test/gateway-native-search-api.test.mjs',
   'test/gateway-native-search-diagnostic.test.mjs',

@@ -1,11 +1,13 @@
 import fs from 'node:fs';
+import {
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  DEFAULT_MCP_PROTOCOL_VERSION,
+  createMcpDispatcher,
+  jsonRpcError,
+} from '../../src/gateway/mcp-core.mjs';
 
-export const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([
-  '2025-06-18',
-  '2025-03-26',
-  '2024-11-05',
-]);
-export const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+export const SUPPORTED_PROTOCOL_VERSIONS = SUPPORTED_MCP_PROTOCOL_VERSIONS;
+export const DEFAULT_PROTOCOL_VERSION = DEFAULT_MCP_PROTOCOL_VERSION;
 export const MAX_RPC_LINE_BYTES = 32 * 1024 * 1024;
 
 function readMcpVersion() {
@@ -24,120 +26,12 @@ function readMcpVersion() {
 
 export const MCP_SERVER_VERSION = readMcpVersion();
 
-function jsonRpcResult(id, result) {
-  return { jsonrpc: '2.0', id, result };
-}
-
-function jsonRpcError(id, code, message) {
-  return { jsonrpc: '2.0', id, error: { code, message } };
-}
-
 export function createMcpServer({
   toolHandlers,
   name = 'mcp-gemini-app',
   version = MCP_SERVER_VERSION,
 } = {}) {
-  if (!toolHandlers || typeof toolHandlers.callTool !== 'function' || !Array.isArray(toolHandlers.tools)) {
-    throw new TypeError('toolHandlers with tools[] and callTool() is required');
-  }
-
-  const inflight = new Map();
-
-  async function handleMessage(message) {
-    if (!message || typeof message !== 'object' || Array.isArray(message)) {
-      return jsonRpcError(null, -32600, 'Invalid Request');
-    }
-    const hasId = Object.hasOwn(message, 'id') && message.id !== undefined;
-    const id = hasId ? message.id : null;
-    if (message.jsonrpc !== '2.0' || typeof message.method !== 'string' || !message.method) {
-      return hasId ? jsonRpcError(id, -32600, 'Invalid Request') : null;
-    }
-
-    const { method, params } = message;
-
-    // Notifications (no id -> never send a JSON-RPC response)
-    if (method === 'notifications/initialized') {
-      return null;
-    }
-    if (method === 'notifications/cancelled') {
-      const targetId = params?.requestId;
-      if (targetId !== undefined && inflight.has(targetId)) {
-        try {
-          inflight.get(targetId).abort(new Error(params?.reason || 'Cancelled by client'));
-        } catch {
-          // Ignore abort listener errors.
-        }
-      }
-      return null;
-    }
-    if (!hasId) {
-      return null;
-    }
-
-    if (method === 'initialize') {
-      const requested = typeof params?.protocolVersion === 'string' ? params.protocolVersion.trim() : '';
-      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-        ? requested
-        : DEFAULT_PROTOCOL_VERSION;
-      return jsonRpcResult(id, {
-        protocolVersion,
-        capabilities: {
-          tools: {},
-        },
-        serverInfo: {
-          name,
-          version,
-        },
-      });
-    }
-
-    if (method === 'ping') {
-      return jsonRpcResult(id, {});
-    }
-
-    if (method === 'tools/list') {
-      return jsonRpcResult(id, {
-        tools: toolHandlers.tools,
-      });
-    }
-
-    if (method === 'tools/call') {
-      const toolName = typeof params?.name === 'string' ? params.name : '';
-      if (!toolName) {
-        return jsonRpcError(id, -32602, 'Invalid params: tool `name` is required');
-      }
-      const toolArgs = params?.arguments === undefined ? {} : params.arguments;
-      if (!toolArgs || typeof toolArgs !== 'object' || Array.isArray(toolArgs)) {
-        return jsonRpcError(id, -32602, 'Invalid params: `arguments` must be an object');
-      }
-      const controller = new AbortController();
-      inflight.set(id, controller);
-      try {
-        const result = await toolHandlers.callTool(toolName, toolArgs, { signal: controller.signal });
-        if (controller.signal.aborted) return null;
-        return jsonRpcResult(id, result);
-      } catch (err) {
-        if (controller.signal.aborted) return null;
-        return jsonRpcResult(id, {
-          isError: true,
-          content: [{ type: 'text', text: err?.message || 'Tool execution failed' }],
-        });
-      } finally {
-        inflight.delete(id);
-      }
-    }
-
-    return jsonRpcError(id, -32601, `Method not found: ${method}`);
-  }
-
-  function cancelAll() {
-    for (const controller of inflight.values()) {
-      try {
-        controller.abort(new Error('Server shutting down'));
-      } catch {}
-    }
-    inflight.clear();
-  }
+  const { handleMessage, cancelAll } = createMcpDispatcher({ toolHandlers, name, version });
 
   function startStdio({
     input = process.stdin,

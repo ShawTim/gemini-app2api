@@ -39,6 +39,7 @@ export const ALLOWED_MCP_RUNTIME_FILES = Object.freeze([
   'src/gateway/automatic-recovery.mjs',
   'src/gateway/image-download.mjs',
   'src/gateway/image-upload.mjs',
+  'src/gateway/mcp-core.mjs',
   'src/gateway/native-diagnostic.mjs',
   'src/gateway/native-evidence.mjs',
   'src/gateway/native-response-limits.mjs',

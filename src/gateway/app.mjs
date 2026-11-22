@@ -17,6 +17,16 @@ import { QuotaRefreshJobs } from './quota-refresh-jobs.mjs';
 import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
 import { measurePromptImagePayload } from '../openai-usage.mjs';
+import {
+  buildMcpToolDefinitions,
+  createMcpDispatcher,
+  createCaptureResponse,
+  normalizeAskGeminiArgs,
+  normalizeGeminiSearchArgs,
+  formatMcpCitationsMarkdown,
+  formatGatewayPoolQuotaSummary,
+  jsonRpcError,
+} from './mcp-core.mjs';
 const uiRoot = new URL("../admin-v2/", import.meta.url);
 function readPackageVersion() {
   try {
@@ -694,7 +704,7 @@ export function createGateway({
           : [expected.origin],
       );
       const p = url.pathname;
-      const isApiRoute = p.startsWith("/v1/");
+      const isApiRoute = p.startsWith("/v1/") || p === "/mcp";
       const isProbeRoute =
         req.method === "GET" && (p === "/health" || p === "/ready");
       if (isProbeRoute) {
@@ -1037,6 +1047,127 @@ export function createGateway({
           return await execute(req, res, body, { owner, route });
         }
         throw fault("UNSUPPORTED_ENDPOINT", 404);
+      }
+      if (p === "/mcp") {
+        const owner = security.apiOwner(req);
+        if (url.search) throw fault("UNSUPPORTED_QUERY_PARAMETER");
+        if (req.method !== "POST") {
+          res.setHeader("Allow", "POST");
+          return json(res, errorPayload(fault("METHOD_NOT_ALLOWED", 405)), 405);
+        }
+        let rpcMessage;
+        try {
+          rpcMessage = await readJson(req, store.settings().maxBodyBytes);
+        } catch (err) {
+          if (err?.code === "INVALID_JSON") {
+            return json(res, jsonRpcError(null, -32700, "Parse error"), 200);
+          }
+          throw err;
+        }
+        if (req.aborted || res.destroyed) return;
+        const runGatewayChatTool = async (chatPayload, signal) => {
+          const capture = createCaptureResponse();
+          const onAbort = () => capture.destroy();
+          signal?.addEventListener("abort", onAbort, { once: true });
+          const payloadWithChars = { ...chatPayload, stream: false };
+          Object.defineProperty(payloadWithChars, "__promptChars", {
+            value: Buffer.byteLength(JSON.stringify(chatPayload), "utf8"),
+            enumerable: false,
+            configurable: true,
+          });
+          try {
+            await execute(req, capture, payloadWithChars, { owner, route: "chat" });
+          } finally {
+            signal?.removeEventListener("abort", onAbort);
+          }
+          const rawText = capture.bodyText();
+          const parsed = rawText ? JSON.parse(rawText) : null;
+          if (capture.statusCode >= 400) {
+            const code = parsed?.error?.code || `GATEWAY_HTTP_${capture.statusCode}`;
+            const msg = parsed?.error?.message || `Gateway returned HTTP ${capture.statusCode}`;
+            throw Object.assign(new Error(msg), { code, status: capture.statusCode });
+          }
+          const msg = parsed?.choices?.[0]?.message;
+          return {
+            content: typeof msg?.content === "string" ? msg.content : "",
+            model: parsed?.model || chatPayload.model,
+            annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
+            usage: parsed?.usage ?? null,
+          };
+        };
+        const gatewayMcpTools = {
+          tools: buildMcpToolDefinitions({
+            allowLocalImagePaths: false,
+            models: protocol.NATIVE_MODELS,
+          }),
+          async callTool(name, args, { signal }) {
+            try {
+              if (name === "ask_gemini") {
+                const chatPayload = normalizeAskGeminiArgs(args, {
+                  allowedModels: protocol.NATIVE_MODELS,
+                });
+                const result = await runGatewayChatTool(chatPayload, signal);
+                return {
+                  content: [{ type: "text", text: result.content || "(empty response)" }],
+                  _meta: {
+                    model: result.model,
+                    ...(result.usage ? { usage: result.usage } : {}),
+                  },
+                };
+              }
+              if (name === "gemini_search") {
+                const chatPayload = normalizeGeminiSearchArgs(args);
+                const result = await runGatewayChatTool(chatPayload, signal);
+                const sourcesMd = formatMcpCitationsMarkdown(result.annotations);
+                return {
+                  content: [{ type: "text", text: (result.content || "(empty response)") + sourcesMd }],
+                  _meta: {
+                    model: result.model,
+                    citations: result.annotations.length,
+                    ...(result.usage ? { usage: result.usage } : {}),
+                  },
+                };
+              }
+              if (name === "gemini_quota") {
+                const text = formatGatewayPoolQuotaSummary({
+                  overviewData: overview(),
+                  accountsList: accounts.list(),
+                });
+                return { content: [{ type: "text", text }] };
+              }
+              return { isError: true, content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+            } catch (err) {
+              const code = err?.code ? `[${err.code}] ` : "";
+              return {
+                isError: true,
+                content: [{ type: "text", text: `${code}${err?.message || "Tool execution failed"}` }],
+              };
+            }
+          },
+        };
+        const mcpAbort = new AbortController();
+        const onHttpClose = () => {
+          if (!res.writableEnded) mcpAbort.abort(fault("CLIENT_DISCONNECTED", 499));
+        };
+        req.once("aborted", onHttpClose);
+        res.once("close", onHttpClose);
+        try {
+          const dispatcher = createMcpDispatcher({
+            toolHandlers: gatewayMcpTools,
+            name: "gemini-app2api",
+            version: PACKAGE_VERSION,
+          });
+          const rpcResponse = await dispatcher.handleMessage(rpcMessage, { signal: mcpAbort.signal });
+          if (req.aborted || res.destroyed || res.writableEnded) return;
+          if (rpcResponse === null) {
+            res.writeHead(202);
+            return res.end();
+          }
+          return json(res, rpcResponse, 200);
+        } finally {
+          req.off("aborted", onHttpClose);
+          res.off("close", onHttpClose);
+        }
       }
       throw fault("ENDPOINT_NOT_FOUND", 404);
     } catch (error) {
