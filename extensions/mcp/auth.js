@@ -14,6 +14,7 @@ import { resolveOAuthConfig } from '../pi/auth.js';
 
 export const DEFAULT_MCP_HOME_DIRNAME = '.gemini-app2api-mcp';
 export const DEFAULT_AUTH_FILENAME = 'auth.json';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 function computeExpiresAtMs(expiresInSeconds) {
   const ttlSeconds = Number.isFinite(expiresInSeconds) && expiresInSeconds > 0 ? expiresInSeconds : 3600;
@@ -35,7 +36,7 @@ export function resolveGatewayConfig(env = process.env) {
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw Object.assign(new Error('Invalid GEMINI_GATEWAY_URL: expected an http:// or https:// URL'), {
+    throw Object.assign(new Error('Invalid GEMINI_GATEWAY_URL: expected an http:// (loopback) or https:// URL'), {
       code: 'INVALID_GATEWAY_URL',
     });
   }
@@ -43,6 +44,12 @@ export function resolveGatewayConfig(env = process.env) {
     throw Object.assign(new Error('Invalid GEMINI_GATEWAY_URL: only credential-free http:// or https:// URLs are allowed'), {
       code: 'INVALID_GATEWAY_URL',
     });
+  }
+  if (parsed.protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw Object.assign(
+      new Error('Invalid GEMINI_GATEWAY_URL: cleartext http:// is allowed only for loopback hosts; use https:// for remote gateways'),
+      { code: 'INVALID_GATEWAY_URL' },
+    );
   }
   const apiKey = typeof env?.GEMINI_GATEWAY_API_KEY === 'string' ? env.GEMINI_GATEWAY_API_KEY.trim() : '';
   return {
@@ -61,6 +68,14 @@ function assertNotSymlink(targetPath) {
   return stat;
 }
 
+function isExternalMultiProviderStore(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  if (raw.type === 'oauth' && raw.version === 1 && typeof raw.refresh === 'string' && !Object.hasOwn(raw, 'gemini-app')) {
+    return false;
+  }
+  return Boolean(raw['gemini-app'] && typeof raw['gemini-app'] === 'object');
+}
+
 export function readStoredCredential(authPath) {
   const stat = assertNotSymlink(authPath);
   if (!stat) return null;
@@ -70,10 +85,8 @@ export function readStoredCredential(authPath) {
     });
   }
   const raw = JSON.parse(fs.readFileSync(authPath, 'utf8'));
-  // Support both native MCP format and Pi's { "gemini-app": { ... } } format when pointed via GEMINI_MCP_AUTH_PATH.
-  const entry = raw && typeof raw === 'object' && raw['gemini-app'] && typeof raw['gemini-app'] === 'object'
-    ? raw['gemini-app']
-    : raw;
+  const readOnlyExternal = isExternalMultiProviderStore(raw);
+  const entry = readOnlyExternal ? raw['gemini-app'] : raw;
   if (!entry || typeof entry !== 'object') return null;
   if (typeof entry.refresh !== 'string' || !entry.refresh.trim()) return null;
   return {
@@ -83,19 +96,36 @@ export function readStoredCredential(authPath) {
     expires: Number.isFinite(entry.expires) ? entry.expires : 0,
     subscriptionTier: typeof entry.subscriptionTier === 'string' && entry.subscriptionTier ? entry.subscriptionTier : 'unknown',
     updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : null,
+    readOnlyExternal,
   };
 }
 
 export function writeStoredCredential(authPath, credential) {
-  const dir = path.dirname(authPath);
-  assertNotSymlink(dir);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    fs.chmodSync(dir, 0o700);
-  } catch {
-    // Ignore chmod failures on filesystems that do not support POSIX modes.
+  const existingStat = assertNotSymlink(authPath);
+  if (existingStat && existingStat.isFile()) {
+    let existingRaw = null;
+    try {
+      existingRaw = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+    } catch {
+      existingRaw = null;
+    }
+    if (isExternalMultiProviderStore(existingRaw)) {
+      throw Object.assign(
+        new Error(`Refusing to overwrite external multi-provider credential file: ${authPath}`),
+        { code: 'UNSAFE_AUTH_OVERWRITE' },
+      );
+    }
   }
-  assertNotSymlink(authPath);
+  const dir = path.dirname(authPath);
+  const existingDir = assertNotSymlink(dir);
+  if (!existingDir) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(dir, 0o700);
+    } catch {
+      // Ignore chmod failures on filesystems that do not support POSIX modes.
+    }
+  }
   const tempPath = `${authPath}.tmp-${process.pid}-${Date.now()}`;
   const payload = JSON.stringify(
     {
@@ -122,6 +152,22 @@ export function writeStoredCredential(authPath, credential) {
 export function clearStoredCredential(authPath) {
   const stat = assertNotSymlink(authPath);
   if (!stat) return false;
+  if (stat.isFile()) {
+    let existingRaw = null;
+    try {
+      existingRaw = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+    } catch {
+      existingRaw = null;
+    }
+    if (isExternalMultiProviderStore(existingRaw)) {
+      throw Object.assign(
+        new Error(
+          `Refusing to delete external multi-provider credential file: ${authPath}. Unset GEMINI_MCP_AUTH_PATH or manage it in Pi.`,
+        ),
+        { code: 'REFUSE_DELETE_EXTERNAL_AUTH' },
+      );
+    }
+  }
   fs.unlinkSync(authPath);
   return true;
 }
@@ -139,6 +185,7 @@ export function createMcpAuthManager({
 } = {}) {
   const resolvedAuthPath = authPath ? path.resolve(authPath) : resolveAuthFilePath(env);
   let inflightRefresh = null;
+  let memoryExternalCred = null;
 
   async function detectSubscriptionTier(accessToken, { signal } = {}) {
     try {
@@ -151,7 +198,17 @@ export function createMcpAuthManager({
   }
 
   function loadCredential() {
-    return readStoredCredential(resolvedAuthPath);
+    const stored = readStoredCredential(resolvedAuthPath);
+    if (!stored) {
+      memoryExternalCred = null;
+      return null;
+    }
+    if (stored.readOnlyExternal && memoryExternalCred && memoryExternalCred.refresh === stored.refresh) {
+      if (memoryExternalCred.expires > stored.expires) {
+        return memoryExternalCred;
+      }
+    }
+    return stored;
   }
 
   async function refreshCredential(credential, { signal } = {}) {
@@ -177,11 +234,13 @@ export function createMcpAuthManager({
         access: refreshed.accessToken,
         expires: computeExpiresAtMs(refreshed.expiresInSeconds),
         subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (credential.subscriptionTier || 'unknown'),
+        readOnlyExternal: Boolean(credential.readOnlyExternal),
       };
-      try {
+      if (credential.readOnlyExternal) {
+        // Never mutate or overwrite an external multi-provider Pi auth.json; retain refreshed token in memory only.
+        memoryExternalCred = next;
+      } else {
         writeStoredCredential(resolvedAuthPath, next);
-      } catch {
-        // If authPath points to a read-only external file, keep using the refreshed token in memory.
       }
       return next;
     })();
@@ -207,6 +266,19 @@ export function createMcpAuthManager({
   }
 
   async function login({ remote = false, signal, output = process.stderr, input = process.stdin } = {}) {
+    // Fail fast before browser login if authPath points to an external multi-provider store.
+    const existing = assertNotSymlink(resolvedAuthPath);
+    if (existing && existing.isFile()) {
+      let existingRaw = null;
+      try { existingRaw = JSON.parse(fs.readFileSync(resolvedAuthPath, 'utf8')); } catch {}
+      if (isExternalMultiProviderStore(existingRaw)) {
+        throw Object.assign(
+          new Error(`Refusing to overwrite external multi-provider credential file: ${resolvedAuthPath}`),
+          { code: 'UNSAFE_AUTH_OVERWRITE' },
+        );
+      }
+    }
+
     const config = resolveOAuthConfig({ defaultProfile, env });
     const session = await startLoopbackLogin(config, { signal });
     let closed = false;
@@ -284,6 +356,7 @@ export function createMcpAuthManager({
   }
 
   function logout() {
+    memoryExternalCred = null;
     return clearStoredCredential(resolvedAuthPath);
   }
 
@@ -296,6 +369,7 @@ export function createMcpAuthManager({
       gatewayApiKeyConfigured: Boolean(gateway?.apiKey),
       authPath: resolvedAuthPath,
       signedIn: Boolean(stored),
+      readOnlyExternal: Boolean(stored?.readOnlyExternal),
       subscriptionTier: stored?.subscriptionTier ?? 'unknown',
       accessTokenValid: Boolean(stored?.access && stored.expires > now() + 60_000),
       expiresAt: stored?.expires ? new Date(stored.expires).toISOString() : null,

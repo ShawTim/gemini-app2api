@@ -94,8 +94,9 @@ function isSameOrDescendant(candidate, ancestor) {
 
 function isInsideManagedBuildRoot(resolvedOut, baseRoot) {
   const realBase = fs.realpathSync(baseRoot);
+  const { canonical } = resolveCanonicalTarget(resolvedOut);
   const managedRoot = path.resolve(realBase, '.opencode-package-build');
-  const rel = path.relative(managedRoot, resolvedOut);
+  const rel = path.relative(managedRoot, canonical);
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 

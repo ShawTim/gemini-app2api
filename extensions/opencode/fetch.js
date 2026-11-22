@@ -13,7 +13,10 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 function jsonErrorResponse(error) {
   const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 600
     ? error.status
-    : error?.code === 'NATIVE_PERMISSION_OR_AUTH' || error?.code === 'OAUTH_REFRESH_FAILED'
+    : error?.code === 'NATIVE_PERMISSION_OR_AUTH' ||
+        error?.code === 'OAUTH_REFRESH_FAILED' ||
+        error?.code === 'OAUTH_LOGGED_OUT' ||
+        error?.code === 'OAUTH_ACCOUNT_CHANGED'
       ? 401
       : error?.code === 'NATIVE_QUOTA_EXHAUSTED'
         ? 429
@@ -143,8 +146,8 @@ export function createOpenCodeFetch({
             authRefreshed = true;
             continue;
           }
-          const kind = automaticRecoveryKind(err);
-          if (kind && attempts < 1) {
+          const kind = automaticRecoveryKind(err, payload.model, { allowAutoModel: isAuto });
+          if (kind && kind !== 'quota' && attempts < 1) {
             attempts++;
             recoveryCode = err.code;
             continue;
@@ -168,7 +171,7 @@ export function createOpenCodeFetch({
       return fallbackFetch(input, init);
     }
 
-    const signal = getRequestSignal(input, init);
+    const callerSignal = getRequestSignal(input, init);
     let rawBody;
     try {
       rawBody = await readRequestJson(input, init);
@@ -181,7 +184,6 @@ export function createOpenCodeFetch({
     const effectiveModel = tier === 'free' ? 'gemini-auto' : requestedModel;
     const isAuto = effectiveModel === 'gemini-auto';
 
-    // Strip known unsupported OpenCode / AI SDK extras cleanly before canonical normalization.
     const payload = { ...rawBody, model: effectiveModel };
     if (isAuto) {
       delete payload.thinking_level;
@@ -201,7 +203,7 @@ export function createOpenCodeFetch({
         const result = await runWithRetry({
           payload,
           isAuto,
-          signal,
+          signal: callerSignal,
           onDelta: () => {},
           getOutputCommitState: () => ({ publishedBytes: 0, toolCallCount: 0 }),
         });
@@ -210,7 +212,7 @@ export function createOpenCodeFetch({
           'utf8',
         );
         const usage = estimateUsage({ promptChars, imageCount, outputBytes });
-        const finishReason = result.calls?.length ? 'tool_calls' : 'stop';
+        const finishReason = result.incomplete ? null : result.calls?.length ? 'tool_calls' : 'stop';
         const message = {
           role: 'assistant',
           content: result.calls?.length && !result.content ? null : (result.content || ''),
@@ -223,6 +225,7 @@ export function createOpenCodeFetch({
             object: 'chat.completion',
             created,
             model: result.model || effectiveModel,
+            ...(result.incomplete ? { status: 'incomplete', incomplete_details: result.incompleteDetails ?? { reason: 'interrupted' } } : {}),
             choices: [{ index: 0, message, finish_reason: finishReason }],
             usage,
           }),
@@ -233,131 +236,219 @@ export function createOpenCodeFetch({
       }
     }
 
-    // Streaming SSE response via Web ReadableStream
+    // Streaming SSE response: defer HTTP 200 headers until first verified output (or completion)
+    // so pre-output validation / auth / upstream errors return genuine 4xx/5xx JSON responses,
+    // and link ReadableStream.cancel() to abort the underlying Google HTTP/2 turn.
     const encoder = new TextEncoder();
-    const sseStream = new ReadableStream({
-      async start(controller) {
-        let closed = false;
-        let publishedBytes = 0;
-        let toolCallCount = 0;
-        let sentRole = false;
-        let emittedAny = false;
-        let keepaliveTimer = null;
+    const streamAbort = new AbortController();
+    const onCallerAbort = () => streamAbort.abort(callerSignal?.reason || new Error('Aborted'));
+    if (callerSignal) {
+      if (callerSignal.aborted) streamAbort.abort(callerSignal.reason);
+      else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+    }
 
-        const safeEnqueue = (text) => {
-          if (closed) return;
-          try {
-            controller.enqueue(encoder.encode(text));
-          } catch {
-            closed = true;
-          }
-        };
+    let resolveStart;
+    let rejectStart;
+    let startSettled = false;
+    const startGate = new Promise((resolve, reject) => {
+      resolveStart = () => {
+        if (!startSettled) {
+          startSettled = true;
+          resolve();
+        }
+      };
+      rejectStart = (err) => {
+        if (!startSettled) {
+          startSettled = true;
+          reject(err);
+        }
+      };
+    });
 
-        const safeClose = () => {
-          if (keepaliveTimer) {
-            clearInterval(keepaliveTimer);
-            keepaliveTimer = null;
-          }
-          if (!closed) {
-            closed = true;
-            try {
-              controller.close();
-            } catch {}
-          }
-        };
+    const pendingChunks = [];
+    let streamController = null;
+    let streamEnded = false;
+    let streamClosed = false;
+    let publishedBytes = 0;
+    let toolCallCount = 0;
+    let sentRole = false;
+    let emittedAny = false;
+    let keepaliveTimer = null;
 
-        const sendChunk = (delta, finishReason = null, usage = undefined) => {
-          const chunk = {
-            id: completionId,
-            object: 'chat.completion.chunk',
-            created,
-            model: effectiveModel,
-            choices: finishReason === undefined
-              ? []
-              : [{ index: 0, delta, finish_reason: finishReason }],
-            ...(usage !== undefined ? { usage } : {}),
-          };
-          safeEnqueue(`data: ${JSON.stringify(chunk)}\n\n`);
-        };
+    const cleanup = () => {
+      if (keepaliveTimer) {
+        clearInterval(keepaliveTimer);
+        keepaliveTimer = null;
+      }
+      if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort);
+    };
 
-        const ensureRoleSent = () => {
-          if (!sentRole) {
-            sentRole = true;
-            sendChunk({ role: 'assistant' }, null);
-          }
-        };
+    const pushSse = (text) => {
+      if (streamClosed) return;
+      const bytes = encoder.encode(text);
+      if (streamController) {
+        try {
+          streamController.enqueue(bytes);
+        } catch {
+          streamClosed = true;
+          streamAbort.abort(new Error('Stream consumer closed'));
+        }
+      } else {
+        pendingChunks.push(bytes);
+      }
+    };
 
-        if (keepaliveMs > 0) {
+    const finishSse = () => {
+      cleanup();
+      streamEnded = true;
+      if (streamController && !streamClosed) {
+        streamClosed = true;
+        try {
+          streamController.close();
+        } catch {}
+      }
+    };
+
+    const sendDeltaChunk = (delta, finishReason = null, extra = {}) => {
+      const chunk = {
+        id: completionId,
+        object: 'chat.completion.chunk',
+        created,
+        model: effectiveModel,
+        choices: [{ index: 0, delta, finish_reason: finishReason }],
+        ...extra,
+      };
+      pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
+    };
+
+    const sendUsageChunk = (usage) => {
+      const chunk = {
+        id: completionId,
+        object: 'chat.completion.chunk',
+        created,
+        model: effectiveModel,
+        choices: [],
+        usage,
+      };
+      pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
+    };
+
+    const ensureRoleSent = () => {
+      if (!sentRole) {
+        sentRole = true;
+        sendDeltaChunk({ role: 'assistant' }, null);
+        resolveStart();
+        if (keepaliveMs > 0 && !keepaliveTimer) {
           keepaliveTimer = setInterval(() => {
-            safeEnqueue(': keepalive\n\n');
+            pushSse(': keepalive\n\n');
           }, keepaliveMs);
           keepaliveTimer.unref?.();
         }
+      }
+    };
 
-        try {
-          const result = await runWithRetry({
-            payload,
-            isAuto,
-            signal,
-            getOutputCommitState: () => ({ publishedBytes, toolCallCount }),
-            onDelta: async (ev) => {
-              if (!ev || typeof ev !== 'object') return;
-              if (ev.reset && !emittedAny) return;
-              if (typeof ev.content === 'string' && ev.content.length > 0) {
-                ensureRoleSent();
-                emittedAny = true;
-                publishedBytes += Buffer.byteLength(ev.content, 'utf8');
-                sendChunk({ content: ev.content }, null);
-              }
-              if (ev.call) {
-                ensureRoleSent();
-                emittedAny = true;
-                const index = toolCallCount++;
-                publishedBytes += Buffer.byteLength(JSON.stringify(ev.call), 'utf8');
-                sendChunk({ tool_calls: [{ index, ...ev.call }] }, null);
-              }
-            },
-          });
+    (async () => {
+      try {
+        const result = await runWithRetry({
+          payload,
+          isAuto,
+          signal: streamAbort.signal,
+          getOutputCommitState: () => ({ publishedBytes, toolCallCount }),
+          onDelta: async (ev) => {
+            if (!ev || typeof ev !== 'object') return;
+            if (ev.reset && !emittedAny) return;
+            if (typeof ev.content === 'string' && ev.content.length > 0) {
+              ensureRoleSent();
+              emittedAny = true;
+              publishedBytes += Buffer.byteLength(ev.content, 'utf8');
+              sendDeltaChunk({ content: ev.content }, null);
+            }
+            if (ev.call) {
+              ensureRoleSent();
+              emittedAny = true;
+              const index = toolCallCount++;
+              publishedBytes += Buffer.byteLength(JSON.stringify(ev.call), 'utf8');
+              sendDeltaChunk({ tool_calls: [{ index, ...ev.call }] }, null);
+            }
+          },
+        });
 
-          ensureRoleSent();
-          const finishReason = toolCallCount > 0 || result.calls?.length ? 'tool_calls' : 'stop';
-          const annotations = result.annotations?.length ? toChatAnnotations(result.annotations) : null;
-          sendChunk(annotations ? { annotations } : {}, finishReason);
+        ensureRoleSent();
+        const finishReason = toolCallCount > 0 || result.calls?.length ? 'tool_calls' : 'stop';
+        const annotations = result.annotations?.length ? toChatAnnotations(result.annotations) : null;
+        sendDeltaChunk(annotations ? { annotations } : {}, finishReason);
+        if (includeUsage) {
+          const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
+          sendUsageChunk(usage);
+        }
+        pushSse('data: [DONE]\n\n');
+      } catch (err) {
+        if (!sentRole) {
+          rejectStart(err);
+          cleanup();
+          streamEnded = true;
+          streamClosed = true;
+          return;
+        }
+        if (
+          !streamAbort.signal.aborted &&
+          err?.code === 'NATIVE_TURN_TIMEOUT' &&
+          err?.unverifiedOutput !== true &&
+          err?.postOutputIdleStall === true &&
+          (publishedBytes > 0 || toolCallCount > 0)
+        ) {
+          sendDeltaChunk({}, toolCallCount > 0 ? 'tool_calls' : 'stop', { incomplete: true });
           if (includeUsage) {
             const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
-            sendChunk({}, undefined, usage);
+            sendUsageChunk(usage);
           }
-          safeEnqueue('data: [DONE]\n\n');
-        } catch (err) {
-          if (
-            !signal?.aborted &&
-            err?.code === 'NATIVE_TURN_TIMEOUT' &&
-            err?.unverifiedOutput !== true &&
-            err?.postOutputIdleStall === true &&
-            (publishedBytes > 0 || toolCallCount > 0)
-          ) {
-            ensureRoleSent();
-            sendChunk({}, toolCallCount > 0 ? 'tool_calls' : 'stop');
-            if (includeUsage) {
-              const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
-              sendChunk({}, undefined, usage);
-            }
-            safeEnqueue('data: [DONE]\n\n');
-          } else {
-            safeEnqueue(
-              `data: ${JSON.stringify({
-                error: {
-                  code: err?.code || 'UPSTREAM_ERROR',
-                  message: err?.upstreamMessage || err?.message || 'Generation failed',
-                },
-                incomplete: true,
-              })}\n\n`,
-            );
-            safeEnqueue('data: [DONE]\n\n');
-          }
-        } finally {
-          safeClose();
+          pushSse('data: [DONE]\n\n');
+        } else {
+          pushSse(
+            `data: ${JSON.stringify({
+              error: {
+                code: err?.code || 'UPSTREAM_ERROR',
+                message: err?.upstreamMessage || err?.message || 'Generation failed',
+              },
+              incomplete: true,
+            })}\n\n`,
+          );
+          pushSse('data: [DONE]\n\n');
         }
+      } finally {
+        finishSse();
+      }
+    })();
+
+    try {
+      await startGate;
+    } catch (err) {
+      return jsonErrorResponse(err);
+    }
+
+    const sseStream = new ReadableStream({
+      start(controller) {
+        streamController = controller;
+        while (pendingChunks.length > 0 && !streamClosed) {
+          try {
+            controller.enqueue(pendingChunks.shift());
+          } catch {
+            streamClosed = true;
+            streamAbort.abort(new Error('Stream consumer closed'));
+            break;
+          }
+        }
+        if (streamEnded && !streamClosed) {
+          streamClosed = true;
+          try {
+            controller.close();
+          } catch {}
+        }
+      },
+      cancel(reason) {
+        streamClosed = true;
+        cleanup();
+        streamAbort.abort(reason instanceof Error ? reason : new Error('Stream cancelled by consumer'));
       },
     });
 

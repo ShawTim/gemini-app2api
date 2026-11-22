@@ -2,113 +2,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { NativeDirectProvider } from '../../src/native-provider.mjs';
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
-import { MODEL_SPECS, canonicalModel } from '../../src/openai-contract.mjs';
+import { MODEL_SPECS, NATIVE_MODELS } from '../../src/openai-contract.mjs';
 import { decodeImageBytes, decodeImageDataUrl, MAX_IMAGE_BYTES } from '../../src/image-input.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
 import { decodeUsageInfo as defaultDecodeUsageInfo } from '../../src/gateway/quota.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
+import {
+  buildMcpToolDefinitions,
+  normalizeAskGeminiArgs,
+  normalizeGeminiSearchArgs,
+  formatMcpCitationsMarkdown,
+  MAX_MCP_TOOL_IMAGES,
+} from '../../src/gateway/mcp-core.mjs';
 import { formatQuotaDisplay, SUBSCRIPTION_LABELS } from '../pi/provider.js';
 import { resolveGatewayConfig } from './auth.js';
 
-const MAX_TOOL_IMAGES = 16;
 const DEFAULT_TIMEOUT_MS = 180_000;
-const ALLOWED_MODELS = Object.freeze(Object.keys(MODEL_SPECS));
+const ALLOWED_DIRECT_MODELS = Object.freeze(Object.keys(MODEL_SPECS));
 
-const THINKING_LEVEL_MAP = Object.freeze({
-  off: 0,
-  none: 0,
-  minimal: 0,
-  low: 1,
-  medium: 2,
-  high: 2,
-  xhigh: 2,
+export const MCP_TOOL_DEFINITIONS = buildMcpToolDefinitions({
+  allowLocalImagePaths: true,
+  models: ALLOWED_DIRECT_MODELS,
 });
-
-export const MCP_TOOL_DEFINITIONS = Object.freeze([
-  {
-    name: 'ask_gemini',
-    description:
-      'Ask Google Gemini (512k context Gemini Neon / Hydrogen, Flash Lite, or Auto) for a second opinion, code/architecture review, long-document analysis, or multimodal image inspection.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['prompt'],
-      properties: {
-        prompt: {
-          type: 'string',
-          description: 'The prompt, question, or content to send to Gemini.',
-        },
-        system: {
-          type: 'string',
-          description: 'Optional system instructions to guide Gemini.',
-        },
-        model: {
-          type: 'string',
-          enum: [...ALLOWED_MODELS],
-          description:
-            'Model ID: gemini-neon (default, highest capability, 512k), gemini-hydrogen (fast, 512k), gemini-flash-lite (lightweight, 128k), or gemini-auto (dynamic routing / Free tier).',
-        },
-        thinking_level: {
-          oneOf: [
-            { type: 'integer', minimum: 0, maximum: 2 },
-            { type: 'string', enum: ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
-          ],
-          description: 'Thinking depth: 0/off/minimal, 1/low, or 2/medium/high (default: 2).',
-        },
-        images: {
-          type: 'array',
-          maxItems: MAX_TOOL_IMAGES,
-          description: 'Optional images (up to 16 static PNG/JPEG/WebP files or data:image/... URLs).',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              path: {
-                type: 'string',
-                description: 'Local file path to a static PNG, JPEG, or WebP image (up to 20 MiB).',
-              },
-              url: {
-                type: 'string',
-                description: 'Inline data:image/(png|jpeg|webp);base64,... URL.',
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-  {
-    name: 'gemini_search',
-    description:
-      'Run a Google Search-grounded query through Gemini Neon (native_search) and return an answer with verified source citations.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['query'],
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Public web search question or topic (max ~16 KiB).',
-        },
-        system: {
-          type: 'string',
-          description: 'Optional formatting or conciseness instructions.',
-        },
-      },
-    },
-  },
-  {
-    name: 'gemini_quota',
-    description:
-      'Check your Google Gemini subscription tier (Free / AI Plus / AI Pro / AI Ultra) and current remaining quota windows.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {},
-    },
-  },
-]);
 
 function detectImageMime(bytes, filePath) {
   if (bytes.length >= 8 && bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71) {
@@ -133,13 +49,63 @@ function detectImageMime(bytes, filePath) {
   });
 }
 
-function loadImageParts(images) {
+function readLocalImageBounded(filePath) {
+  const resolved = path.resolve(filePath);
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+  let fd;
+  try {
+    fd = fs.openSync(resolved, flags);
+  } catch (err) {
+    throw Object.assign(new Error(`Image file not found or symlink refused: ${filePath}`), {
+      code: 'INVALID_IMAGE_PATH',
+      cause: err,
+    });
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw Object.assign(new Error(`Image path is not a regular file: ${filePath}`), {
+        code: 'INVALID_IMAGE_PATH',
+      });
+    }
+    if (stat.size <= 0 || stat.size > MAX_IMAGE_BYTES) {
+      throw Object.assign(new Error(`Image file size must be between 1 byte and ${MAX_IMAGE_BYTES} bytes`), {
+        code: 'IMAGE_TOO_LARGE',
+      });
+    }
+    // Bounded read directly from the validated fd to prevent TOCTOU swaps/growth.
+    const chunks = [];
+    let total = 0;
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    while (true) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      total += n;
+      if (total > MAX_IMAGE_BYTES) {
+        throw Object.assign(new Error(`Image file exceeds maximum size (${MAX_IMAGE_BYTES} bytes)`), {
+          code: 'IMAGE_TOO_LARGE',
+        });
+      }
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    if (total === 0) {
+      throw Object.assign(new Error('Image file is empty'), { code: 'INVALID_IMAGE_BYTES' });
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+  }
+}
+
+function loadLocalOrInlineImageParts(images) {
   if (images === undefined) return [];
   if (!Array.isArray(images)) {
     throw Object.assign(new Error('`images` must be an array'), { code: 'INVALID_ARGUMENTS' });
   }
-  if (images.length > MAX_TOOL_IMAGES) {
-    throw Object.assign(new Error(`Too many images (max ${MAX_TOOL_IMAGES})`), { code: 'IMAGE_COUNT_EXCEEDED' });
+  if (images.length > MAX_MCP_TOOL_IMAGES) {
+    throw Object.assign(new Error(`Too many images (max ${MAX_MCP_TOOL_IMAGES})`), { code: 'IMAGE_COUNT_EXCEEDED' });
   }
   const parts = [];
   for (const item of images) {
@@ -160,20 +126,8 @@ function loadImageParts(images) {
       parts.push({ type: 'image_url', image_url: { url: decoded.url, detail: 'auto' } });
       continue;
     }
-    const resolved = path.resolve(item.path.trim());
-    const stat = fs.lstatSync(resolved, { throwIfNoEntry: false });
-    if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
-      throw Object.assign(new Error(`Image file not found or not a regular file: ${item.path}`), {
-        code: 'INVALID_IMAGE_PATH',
-      });
-    }
-    if (stat.size <= 0 || stat.size > MAX_IMAGE_BYTES) {
-      throw Object.assign(new Error(`Image file size must be between 1 byte and ${MAX_IMAGE_BYTES} bytes`), {
-        code: 'IMAGE_TOO_LARGE',
-      });
-    }
-    const bytes = fs.readFileSync(resolved);
-    const mimeType = detectImageMime(bytes, resolved);
+    const bytes = readLocalImageBounded(item.path.trim());
+    const mimeType = detectImageMime(bytes, item.path.trim());
     decodeImageBytes(bytes, mimeType);
     parts.push({
       type: 'image_url',
@@ -181,34 +135,6 @@ function loadImageParts(images) {
     });
   }
   return parts;
-}
-
-function normalizeThinkingLevel(raw) {
-  if (raw === undefined || raw === null) return 2;
-  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 2) return raw;
-  if (typeof raw === 'string') {
-    const key = raw.trim().toLowerCase();
-    if (Object.hasOwn(THINKING_LEVEL_MAP, key)) return THINKING_LEVEL_MAP[key];
-  }
-  throw Object.assign(
-    new Error('Invalid `thinking_level`: expected 0..2 or one of off, none, minimal, low, medium, high, xhigh'),
-    { code: 'INVALID_THINKING_LEVEL' },
-  );
-}
-
-function formatCitationsMarkdown(annotations) {
-  if (!Array.isArray(annotations) || !annotations.length) return '';
-  const seen = new Set();
-  const lines = [];
-  for (const item of annotations) {
-    const citation = item?.url_citation ?? item;
-    const url = typeof citation?.url === 'string' ? citation.url.trim() : '';
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
-    const title = typeof citation?.title === 'string' && citation.title.trim() ? citation.title.trim() : url;
-    lines.push(`- [${title}](${url})`);
-  }
-  return lines.length ? `\n\n### Sources\n${lines.join('\n')}` : '';
 }
 
 function formatFriendlyMcpError(err) {
@@ -241,6 +167,11 @@ export function createMcpToolHandlers({
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
   const imageBlobCache = createImageBlobCache();
+  const initialGateway = resolveGatewayConfig(env);
+  const tools = buildMcpToolDefinitions({
+    allowLocalImagePaths: true,
+    models: initialGateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
+  });
 
   async function callViaGateway(gateway, payload, { signal } = {}) {
     const headers = { 'Content-Type': 'application/json' };
@@ -258,11 +189,14 @@ export function createMcpToolHandlers({
       throw Object.assign(new Error(message), { code, status: res.status });
     }
     const msg = data?.choices?.[0]?.message;
+    const incomplete = data?.status === 'incomplete' || Boolean(data?.error);
     return {
       content: typeof msg?.content === 'string' ? msg.content : '',
       model: data?.model || payload.model,
       annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
       usage: data?.usage ?? null,
+      incomplete,
+      incompleteReason: data?.error?.code || data?.incomplete_details?.reason || null,
     };
   }
 
@@ -299,6 +233,7 @@ export function createMcpToolHandlers({
         annotations: Array.isArray(turnResult?.annotations) ? turnResult.annotations : [],
         usage: turnResult?.usage ?? null,
         incomplete: Boolean(turnResult?.incomplete),
+        incompleteReason: turnResult?.outputError?.code || turnResult?.incompleteDetails?.reason || null,
       };
     };
 
@@ -320,82 +255,41 @@ export function createMcpToolHandlers({
   }
 
   async function handleAskGemini(args, { signal } = {}) {
-    if (!args || typeof args !== 'object' || Array.isArray(args)) {
-      throw Object.assign(new Error('Invalid arguments object'), { code: 'INVALID_ARGUMENTS' });
-    }
-    const prompt = typeof args.prompt === 'string' ? args.prompt : '';
-    if (!prompt.trim()) {
-      throw Object.assign(new Error('`prompt` must be a non-empty string'), { code: 'INVALID_ARGUMENTS' });
-    }
-    const system = args.system === undefined ? '' : typeof args.system === 'string' ? args.system : null;
-    if (system === null) {
-      throw Object.assign(new Error('`system` must be a string'), { code: 'INVALID_ARGUMENTS' });
-    }
-    const rawModel = args.model === undefined ? 'gemini-neon' : args.model;
-    if (typeof rawModel !== 'string') {
-      throw Object.assign(new Error('`model` must be a string'), { code: 'UNSUPPORTED_MODEL' });
-    }
-    const model = canonicalModel(rawModel.trim());
-    if (!ALLOWED_MODELS.includes(model)) {
-      throw Object.assign(new Error(`Unsupported model "${rawModel}". Supported: ${ALLOWED_MODELS.join(', ')}`), {
-        code: 'UNSUPPORTED_MODEL',
-      });
-    }
-    const thinkingLevel = normalizeThinkingLevel(args.thinking_level);
-    const imageParts = loadImageParts(args.images);
-    const messages = [];
-    if (system.trim()) messages.push({ role: 'system', content: system });
-    messages.push({
-      role: 'user',
-      content: imageParts.length ? [{ type: 'text', text: prompt }, ...imageParts] : prompt,
+    const gateway = resolveGatewayConfig(env);
+    const payload = normalizeAskGeminiArgs(args, {
+      allowedModels: gateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
+      loadImages: loadLocalOrInlineImageParts,
     });
-
-    const result = await executeChat(
-      {
-        model,
-        messages,
-        ...(model === 'gemini-auto' ? {} : { thinking_level: thinkingLevel }),
-      },
-      { signal },
-    );
+    const result = await executeChat(payload, { signal });
     const text = result.content || '(empty response)';
+    if (result.incomplete) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `[INCOMPLETE${result.incompleteReason ? `: ${result.incompleteReason}` : ''}] ${text}` }],
+        _meta: { model: result.model, incomplete: true, ...(result.usage ? { usage: result.usage } : {}) },
+      };
+    }
     return {
       content: [{ type: 'text', text }],
       _meta: {
         model: result.model,
         ...(result.usage ? { usage: result.usage } : {}),
-        ...(result.incomplete ? { incomplete: true } : {}),
       },
     };
   }
 
   async function handleGeminiSearch(args, { signal } = {}) {
-    if (!args || typeof args !== 'object' || Array.isArray(args)) {
-      throw Object.assign(new Error('Invalid arguments object'), { code: 'INVALID_ARGUMENTS' });
-    }
-    const query = typeof args.query === 'string' ? args.query : '';
-    if (!query.trim()) {
-      throw Object.assign(new Error('`query` must be a non-empty string'), { code: 'INVALID_ARGUMENTS' });
-    }
-    const system = args.system === undefined ? '' : typeof args.system === 'string' ? args.system : null;
-    if (system === null) {
-      throw Object.assign(new Error('`system` must be a string'), { code: 'INVALID_ARGUMENTS' });
-    }
-    const messages = [];
-    if (system.trim()) messages.push({ role: 'system', content: system });
-    messages.push({ role: 'user', content: query });
-
-    const result = await executeChat(
-      {
-        model: 'gemini-neon',
-        thinking_level: 2,
-        native_search: true,
-        messages,
-      },
-      { signal },
-    );
-    const sourcesMd = formatCitationsMarkdown(result.annotations);
+    const payload = normalizeGeminiSearchArgs(args);
+    const result = await executeChat(payload, { signal });
+    const sourcesMd = formatMcpCitationsMarkdown(result.annotations);
     const text = (result.content || '(empty response)') + sourcesMd;
+    if (result.incomplete) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `[INCOMPLETE${result.incompleteReason ? `: ${result.incompleteReason}` : ''}] ${text}` }],
+        _meta: { model: result.model, incomplete: true, citations: result.annotations.length },
+      };
+    }
     return {
       content: [{ type: 'text', text }],
       _meta: {
@@ -407,6 +301,33 @@ export function createMcpToolHandlers({
   }
 
   async function handleGeminiQuota(_args, { signal } = {}) {
+    const gateway = resolveGatewayConfig(env);
+    if (gateway) {
+      const headers = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      };
+      if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
+      const res = await fetchImpl(`${gateway.baseUrl}/mcp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'gemini_quota', arguments: {} },
+        }),
+        signal,
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.error) {
+        const msg = data?.error?.message || `Gateway /mcp returned HTTP ${res.status}`;
+        throw Object.assign(new Error(msg), { code: `GATEWAY_HTTP_${res.status}` });
+      }
+      if (data?.result?.content) return data.result;
+      throw Object.assign(new Error('Invalid gateway /mcp quota response'), { code: 'INVALID_GATEWAY_RESPONSE' });
+    }
+
     const cred = await authManager.getValidCredential({ signal });
     const fetchOnce = async (accessToken) => {
       const { payload } = await fetchGoogleUsageInfo(accessToken, { signal, timeoutMs: 10_000 });
@@ -454,7 +375,7 @@ export function createMcpToolHandlers({
   }
 
   return {
-    tools: MCP_TOOL_DEFINITIONS,
+    tools,
     callTool,
     handleAskGemini,
     handleGeminiSearch,

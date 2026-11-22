@@ -19,7 +19,8 @@ async function input() {
   }
 }
 try {
-  loadLocalEnvironment();
+  // Never auto-load untrusted project cwd `.env` when running as an MCP stdio bridge.
+  if (command !== "mcp") loadLocalEnvironment();
   if (command === "start") {
     if (args.length) throw fault("UNSUPPORTED_ARGUMENT");
     await import("../src/gateway-server.mjs");
@@ -61,16 +62,39 @@ try {
   } else if (command === "mcp") {
     if (args.length) throw fault("UNSUPPORTED_ARGUMENT");
     const origin =
-      process.env.GEMINI_GATEWAY_URL ||
-      process.env.GATEWAY_PUBLIC_ORIGIN ||
+      (process.env.GEMINI_GATEWAY_URL || "").trim() ||
+      (process.env.GATEWAY_PUBLIC_ORIGIN || "").trim() ||
       `http://127.0.0.1:${process.env.PORT || 18989}`;
     const apiKey = (process.env.GEMINI_GATEWAY_API_KEY || "").trim();
     const mcpUrl = new URL("/mcp", origin);
+    const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
     if (!["http:", "https:"].includes(mcpUrl.protocol) || mcpUrl.username || mcpUrl.password) {
       throw fault("INVALID_GATEWAY_URL");
     }
-    let buffer = Buffer.alloc(0);
+    if (mcpUrl.protocol === "http:" && !loopbackHosts.has(mcpUrl.hostname.toLowerCase())) {
+      throw fault("INVALID_GATEWAY_URL");
+    }
     const maxLineBytes = 32 * 1024 * 1024;
+    const maxResponseBytes = 8 * 1024 * 1024;
+    const requestTimeoutMs = 300_000;
+    const writeLine = (obj) => {
+      try {
+        process.stdout.write(JSON.stringify(obj) + "\n");
+      } catch {}
+    };
+    const readBoundedText = async (res) => {
+      if (!res.body) return "";
+      const chunks = [];
+      let total = 0;
+      for await (const chunk of res.body) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > maxResponseBytes) throw fault("GATEWAY_RESPONSE_TOO_LARGE", 502);
+        chunks.push(buf);
+      }
+      return Buffer.concat(chunks, total).toString("utf8");
+    };
+    const inFlight = new Set();
     const forward = async (rawLine) => {
       const trimmed = rawLine.trim();
       if (!trimmed) return;
@@ -78,10 +102,16 @@ try {
       try {
         parsed = JSON.parse(trimmed);
       } catch {
-        process.stdout.write(JSON.stringify(jsonRpcError(null, -32700, "Parse error")) + "\n");
+        writeLine(jsonRpcError(null, -32700, "Parse error"));
         return;
       }
-      const headers = { "Content-Type": "application/json" };
+      const hasId = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.hasOwn(parsed, "id");
+      const reqId = hasId ? parsed.id : null;
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2025-06-18",
+      };
       if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
       try {
         const res = await fetch(mcpUrl, {
@@ -89,36 +119,79 @@ try {
           headers,
           body: JSON.stringify(parsed),
           redirect: "error",
+          signal: AbortSignal.timeout(requestTimeoutMs),
         });
-        if (res.status === 202) return;
-        const text = await res.text();
-        if (text.trim()) process.stdout.write(text.trim() + "\n");
+        if (!hasId || res.status === 202) {
+          try { await res.body?.cancel?.(); } catch {}
+          return;
+        }
+        const text = await readBoundedText(res);
+        let body = null;
+        try { body = text.trim() ? JSON.parse(text) : null; } catch { body = null; }
+        if (!res.ok) {
+          const code = typeof body?.error?.code === "string" ? body.error.code : `HTTP_${res.status}`;
+          const msg = typeof body?.error?.message === "string" ? body.error.message : `Gateway /mcp returned HTTP ${res.status}`;
+          writeLine(jsonRpcError(reqId, -32000, `${code}: ${msg}`.slice(0, 512)));
+          return;
+        }
+        if (!body || typeof body !== "object" || body.jsonrpc !== "2.0") {
+          writeLine(jsonRpcError(reqId, -32603, "Invalid JSON-RPC response from gateway /mcp"));
+          return;
+        }
+        writeLine(body);
       } catch (err) {
-        if (Object.hasOwn(parsed, "id")) {
-          process.stdout.write(
-            JSON.stringify(jsonRpcError(parsed.id, -32603, err?.message || "Gateway /mcp request failed")) + "\n",
-          );
+        if (hasId) {
+          writeLine(jsonRpcError(reqId, -32603, String(err?.message || "Gateway /mcp request failed").slice(0, 512)));
         }
       }
     };
-    const pending = [];
+    const track = (line) => {
+      const p = forward(line).finally(() => inFlight.delete(p));
+      inFlight.add(p);
+    };
+    let chunks = [];
+    let bufferedBytes = 0;
+    let droppingOversizedLine = false;
     for await (const chunk of process.stdin) {
       const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      if (buffer.length + piece.length > maxLineBytes) {
-        buffer = Buffer.alloc(0);
-        process.stdout.write(JSON.stringify(jsonRpcError(null, -32600, "Request line exceeds maximum size")) + "\n");
-        continue;
-      }
-      buffer = buffer.length ? Buffer.concat([buffer, piece]) : piece;
-      let nl;
-      while ((nl = buffer.indexOf(0x0a)) !== -1) {
-        const line = buffer.subarray(0, nl).toString("utf8");
-        buffer = buffer.subarray(nl + 1);
-        pending.push(forward(line));
+      let offset = 0;
+      while (offset < piece.length) {
+        const nl = piece.indexOf(0x0a, offset);
+        if (droppingOversizedLine) {
+          if (nl === -1) break;
+          droppingOversizedLine = false;
+          offset = nl + 1;
+          continue;
+        }
+        const sliceEnd = nl === -1 ? piece.length : nl;
+        const segment = piece.subarray(offset, sliceEnd);
+        if (bufferedBytes + segment.length > maxLineBytes) {
+          chunks = [];
+          bufferedBytes = 0;
+          writeLine(jsonRpcError(null, -32600, "Request line exceeds maximum size"));
+          if (nl === -1) {
+            droppingOversizedLine = true;
+            break;
+          }
+          offset = nl + 1;
+          continue;
+        }
+        if (nl === -1) {
+          chunks.push(segment);
+          bufferedBytes += segment.length;
+          break;
+        }
+        const lineBuf = chunks.length ? Buffer.concat([...chunks, segment], bufferedBytes + segment.length) : segment;
+        chunks = [];
+        bufferedBytes = 0;
+        track(lineBuf.toString("utf8"));
+        offset = nl + 1;
       }
     }
-    if (buffer.length) pending.push(forward(buffer.toString("utf8")));
-    await Promise.allSettled(pending);
+    if (!droppingOversizedLine && bufferedBytes > 0) {
+      track(Buffer.concat(chunks, bufferedBytes).toString("utf8"));
+    }
+    await Promise.allSettled([...inFlight]);
   } else if (command === "help")
     console.log(`Gemini App2API · Native Direct Gateway
 

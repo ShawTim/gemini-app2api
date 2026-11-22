@@ -323,8 +323,87 @@ test('ask_gemini, gemini_search, and gemini_quota work in direct mode, free-tier
   assert.equal(gwRequests[0].headers.Authorization, 'Bearer gw-test-key');
   assert.equal(gwRequests[0].body.native_search, true);
 
-  // 7. Reject credential-bearing GEMINI_GATEWAY_URL
+  // 7. Reject credential-bearing and non-loopback cleartext GEMINI_GATEWAY_URL
   assert.throws(() => resolveGatewayConfig({ GEMINI_GATEWAY_URL: 'http://user:pass@127.0.0.1:18989' }), { code: 'INVALID_GATEWAY_URL' });
+  assert.throws(() => resolveGatewayConfig({ GEMINI_GATEWAY_URL: 'http://remote.example.com:18989' }), { code: 'INVALID_GATEWAY_URL' });
+
+  // 8. Gateway mode routes gemini_quota to /mcp and omits gemini-auto from tool schema
+  const gwQuotaHandlers = createMcpToolHandlers({
+    authManager,
+    env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:49688', GEMINI_GATEWAY_API_KEY: 'gw-key' },
+    fetchImpl: async (url) => {
+      assert.equal(url, 'http://127.0.0.1:49688/mcp');
+      return new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Pool: 9/9 ready' }] } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    },
+  });
+  const askToolEnum = gwQuotaHandlers.tools.find((x) => x.name === 'ask_gemini').inputSchema.properties.model.enum;
+  assert.equal(askToolEnum.includes('gemini-auto'), false);
+  const gwQuotaRes = await gwQuotaHandlers.callTool('gemini_quota', {});
+  assert.equal(gwQuotaRes.isError, undefined);
+  assert.equal(gwQuotaRes.content[0].text, 'Pool: 9/9 ready');
+});
+
+test('MCP authManager treats external multi-provider Pi auth.json as strictly read-only on refresh, login, and logout', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-pi-auth-ro-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const piAuthPath = path.join(tmpDir, 'auth.json');
+  const originalPiAuth = {
+    anthropic: { type: 'api', key: 'sk-ant-keep-me' },
+    'gemini-app': { type: 'oauth', refresh: 'pi-refresh-1', access: 'stale-access', expires: 1, subscriptionTier: 'pro' },
+  };
+  fs.writeFileSync(piAuthPath, JSON.stringify(originalPiAuth, null, 2), { mode: 0o600 });
+
+  let refreshCount = 0;
+  const auth = createMcpAuthManager({
+    authPath: piAuthPath,
+    env: {},
+    refreshNativeCredential: async () => {
+      refreshCount++;
+      return { accessToken: `mem-access-${refreshCount}`, expiresInSeconds: 3600 };
+    },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'ultra' }),
+  });
+
+  const cred1 = await auth.getValidCredential();
+  assert.equal(cred1.access, 'mem-access-1');
+  assert.equal(cred1.readOnlyExternal, true);
+  // Subsequent call reuses in-memory refreshed token without re-refreshing or touching disk.
+  const cred2 = await auth.getValidCredential();
+  assert.equal(cred2.access, 'mem-access-1');
+  assert.equal(refreshCount, 1);
+
+  // External Pi auth.json on disk is completely untouched (anthropic key preserved!).
+  const onDisk = JSON.parse(fs.readFileSync(piAuthPath, 'utf8'));
+  assert.deepEqual(onDisk, originalPiAuth);
+
+  // logout() and login() refuse to delete or overwrite the external multi-provider Pi file.
+  assert.throws(() => auth.logout(), { code: 'REFUSE_DELETE_EXTERNAL_AUTH' });
+  await assert.rejects(() => auth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(piAuthPath, 'utf8')), originalPiAuth);
+});
+
+test('MCP stdio server drops only an oversized line and continues serving subsequent lines in the same chunk', async () => {
+  const server = createMcpServer({
+    toolHandlers: { tools: MCP_TOOL_DEFINITIONS, callTool: async () => ({ content: [{ type: 'text', text: 'ok' }] }) },
+  });
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines = [];
+  output.on('data', (c) => {
+    for (const l of c.toString('utf8').split('\n').filter(Boolean)) lines.push(JSON.parse(l));
+  });
+  const runner = server.startStdio({ input, output, maxLineBytes: 128 });
+  const oversized = 'x'.repeat(200) + '\n' + JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'ping' }) + '\n';
+  input.end(oversized);
+  await runner.done;
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].error.code, -32600);
+  assert.equal(lines[1].id, 9);
+  assert.deepEqual(lines[1].result, {});
 });
 
 test('MCP CLI --version, --help, and unknown command return expected exit codes', async () => {

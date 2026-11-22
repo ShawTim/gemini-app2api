@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { fixture } from './gateway-fixture.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
@@ -76,9 +76,11 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
     return imgs.map((img, i) => ({ blobId: `gw_mcp_blob_${i}`, mimeType: img.mimeType }));
   };
 
-  // 1. Auth & HTTP method enforcement
+  // 1. Auth, Origin DNS-rebinding defense, MCP-Protocol-Version, & HTTP method enforcement
   assert.equal((await f.request('/mcp', { method: 'POST', body: { jsonrpc: '2.0', id: 1, method: 'ping' } })).status, 401);
   assert.equal((await f.request('/mcp', { method: 'POST', headers: { Cookie: f.cookie }, body: { jsonrpc: '2.0', id: 1, method: 'ping' } })).status, 401);
+  assert.equal((await f.api('/mcp', { method: 'POST', headers: { Origin: 'https://evil.invalid' }, body: { jsonrpc: '2.0', id: 1, method: 'ping' } })).status, 403);
+  assert.equal((await f.api('/mcp', { method: 'POST', headers: { 'MCP-Protocol-Version': '1999-01-01' }, body: { jsonrpc: '2.0', id: 1, method: 'ping' } })).status, 400);
   const getRes = await f.api('/mcp', { method: 'GET' });
   assert.equal(getRes.status, 405);
   assert.equal(getRes.headers.get('allow'), 'POST');
@@ -195,31 +197,71 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
   const quotaText = quotaBody.result.content[0].text;
   assert.match(quotaText, /Eligible accounts: 2 \/ 2 total/);
   assert.equal(quotaText.includes('@'), false);
-  assert.equal(quotaText.includes('refresh'), false);
+  assert.equal(quotaText.includes('refreshToken'), false);
+  assert.equal(quotaText.includes('acc_'), false);
 
   // 7. bin/gemini-gateway mcp stdio bridge forwards cleanly to POST /mcp
   const cliPath = path.resolve(import.meta.dirname, '..', 'bin/gemini-gateway');
+  const runBridge = (input, extraEnv = {}) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, 'mcp'], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        GEMINI_GATEWAY_URL: f.base,
+        GEMINI_GATEWAY_API_KEY: f.key.key,
+        ...extraEnv,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`bridge timed out; stderr=${stderr}`));
+    }, 10_000);
+    child.stdout.on('data', (c) => { stdout += c.toString('utf8'); });
+    child.stderr.on('data', (c) => { stderr += c.toString('utf8'); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+    child.stdin.end(input);
+  });
   const stdioInput = [
     JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'initialize', params: { protocolVersion: '2025-03-26' } }),
     JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
     JSON.stringify({ jsonrpc: '2.0', id: 11, method: 'ping' }),
     JSON.stringify({ jsonrpc: '2.0', id: 12, method: 'tools/list' }),
   ].join('\n') + '\n';
-  const bridge = spawnSync(process.execPath, [cliPath, 'mcp'], {
-    input: stdioInput,
-    encoding: 'utf8',
-    timeout: 10_000,
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      GEMINI_GATEWAY_URL: f.base,
-      GEMINI_GATEWAY_API_KEY: f.key.key,
-    },
-  });
+  const bridge = await runBridge(stdioInput);
   assert.equal(bridge.status, 0, bridge.stderr);
   const bridgeLines = bridge.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.equal(bridgeLines.length, 3);
   assert.equal(bridgeLines.find((x) => x.id === 10).result.serverInfo.name, 'gemini-app2api');
   assert.deepEqual(bridgeLines.find((x) => x.id === 11).result, {});
   assert.deepEqual(bridgeLines.find((x) => x.id === 12).result.tools.map((x) => x.name), ['ask_gemini', 'gemini_search', 'gemini_quota']);
+
+  // 8. maxPromptBytes is enforced on POST /mcp ask_gemini
+  f.store.updateSettings({ maxPromptBytes: 64 });
+  const overPromptBody = await (await f.api('/mcp', {
+    method: 'POST',
+    body: {
+      jsonrpc: '2.0',
+      id: 8,
+      method: 'tools/call',
+      params: { name: 'ask_gemini', arguments: { prompt: 'x'.repeat(200) } },
+    },
+  })).json();
+  assert.equal(overPromptBody.result.isError, true);
+  assert.match(overPromptBody.result.content[0].text, /PROMPT_SIZE_LIMIT/);
+  f.store.updateSettings({ maxPromptBytes: 0 });
+
+  // 9. bin/gemini-gateway mcp stdio bridge wraps HTTP 401 cleanly into valid JSON-RPC error
+  const unauthBridge = await runBridge(
+    JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'ping' }) + '\n',
+    { GEMINI_GATEWAY_API_KEY: 'wrong-key' },
+  );
+  assert.equal(unauthBridge.status, 0, unauthBridge.stderr);
+  const errLine = JSON.parse(unauthBridge.stdout.trim());
+  assert.equal(errLine.jsonrpc, '2.0');
+  assert.equal(errLine.id, 99);
+  assert.equal(errLine.error.code, -32000);
 });

@@ -18,6 +18,7 @@ import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
 import { measurePromptImagePayload } from '../openai-usage.mjs';
 import {
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
   buildMcpToolDefinitions,
   createMcpDispatcher,
   createCaptureResponse,
@@ -1049,11 +1050,23 @@ export function createGateway({
         throw fault("UNSUPPORTED_ENDPOINT", 404);
       }
       if (p === "/mcp") {
+        // DNS-rebinding defense per MCP Streamable HTTP spec: allow absent Origin
+        // (native CLI/HTTP clients), reject untrusted browser Origins.
+        const originHeader = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
+        if (originHeader && !adminAllowedOrigins.has(originHeader)) {
+          throw fault("ORIGIN_REJECTED", 403);
+        }
         const owner = security.apiOwner(req);
         if (url.search) throw fault("UNSUPPORTED_QUERY_PARAMETER");
         if (req.method !== "POST") {
           res.setHeader("Allow", "POST");
           return json(res, errorPayload(fault("METHOD_NOT_ALLOWED", 405)), 405);
+        }
+        const mcpProtoHeader = typeof req.headers["mcp-protocol-version"] === "string"
+          ? req.headers["mcp-protocol-version"].trim()
+          : "";
+        if (mcpProtoHeader && !SUPPORTED_MCP_PROTOCOL_VERSIONS.includes(mcpProtoHeader)) {
+          return json(res, errorPayload(fault("UNSUPPORTED_MCP_PROTOCOL_VERSION", 400)), 400);
         }
         let rpcMessage;
         try {
@@ -1062,6 +1075,9 @@ export function createGateway({
           if (err?.code === "INVALID_JSON") {
             return json(res, jsonRpcError(null, -32700, "Parse error"), 200);
           }
+          if (err?.code === "INVALID_REQUEST") {
+            return json(res, jsonRpcError(null, -32600, "Invalid Request"), 200);
+          }
           throw err;
         }
         if (req.aborted || res.destroyed) return;
@@ -1069,9 +1085,15 @@ export function createGateway({
           const capture = createCaptureResponse();
           const onAbort = () => capture.destroy();
           signal?.addEventListener("abort", onAbort, { once: true });
+          const serialized = JSON.stringify(chatPayload);
           const payloadWithChars = { ...chatPayload, stream: false };
+          Object.defineProperty(payloadWithChars, "__promptBytes", {
+            value: Buffer.byteLength(serialized, "utf8"),
+            enumerable: false,
+            configurable: true,
+          });
           Object.defineProperty(payloadWithChars, "__promptChars", {
-            value: Buffer.byteLength(JSON.stringify(chatPayload), "utf8"),
+            value: serialized.length,
             enumerable: false,
             configurable: true,
           });
@@ -1088,11 +1110,14 @@ export function createGateway({
             throw Object.assign(new Error(msg), { code, status: capture.statusCode });
           }
           const msg = parsed?.choices?.[0]?.message;
+          const incomplete = parsed?.status === "incomplete" || Boolean(parsed?.error);
           return {
             content: typeof msg?.content === "string" ? msg.content : "",
             model: parsed?.model || chatPayload.model,
             annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
             usage: parsed?.usage ?? null,
+            incomplete,
+            incompleteReason: parsed?.error?.code || parsed?.incomplete_details?.reason || null,
           };
         };
         const gatewayMcpTools = {
@@ -1107,8 +1132,16 @@ export function createGateway({
                   allowedModels: protocol.NATIVE_MODELS,
                 });
                 const result = await runGatewayChatTool(chatPayload, signal);
+                const text = result.content || "(empty response)";
+                if (result.incomplete) {
+                  return {
+                    isError: true,
+                    content: [{ type: "text", text: `[INCOMPLETE${result.incompleteReason ? `: ${result.incompleteReason}` : ""}] ${text}` }],
+                    _meta: { model: result.model, incomplete: true, ...(result.usage ? { usage: result.usage } : {}) },
+                  };
+                }
                 return {
-                  content: [{ type: "text", text: result.content || "(empty response)" }],
+                  content: [{ type: "text", text }],
                   _meta: {
                     model: result.model,
                     ...(result.usage ? { usage: result.usage } : {}),
@@ -1119,8 +1152,16 @@ export function createGateway({
                 const chatPayload = normalizeGeminiSearchArgs(args);
                 const result = await runGatewayChatTool(chatPayload, signal);
                 const sourcesMd = formatMcpCitationsMarkdown(result.annotations);
+                const text = (result.content || "(empty response)") + sourcesMd;
+                if (result.incomplete) {
+                  return {
+                    isError: true,
+                    content: [{ type: "text", text: `[INCOMPLETE${result.incompleteReason ? `: ${result.incompleteReason}` : ""}] ${text}` }],
+                    _meta: { model: result.model, incomplete: true, citations: result.annotations.length },
+                  };
+                }
                 return {
-                  content: [{ type: "text", text: (result.content || "(empty response)") + sourcesMd }],
+                  content: [{ type: "text", text }],
                   _meta: {
                     model: result.model,
                     citations: result.annotations.length,

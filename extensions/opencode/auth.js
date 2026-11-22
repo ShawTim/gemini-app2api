@@ -31,7 +31,6 @@ export function createOpenCodeAuthHook({
   now = Date.now,
 } = {}) {
   let cachedTier = 'unknown';
-  let inflightRefresh = null;
 
   async function detectSubscriptionTier(accessToken, { signal } = {}) {
     try {
@@ -139,38 +138,75 @@ export function createOpenCodeAuthHook({
       return {};
     }
 
+    // Track in-memory refreshed credential strictly keyed by refresh-token identity
+    // so logout or account switching never reuses or writes back a previous account.
     let liveCred = {
       refresh: initial.refresh,
       access: initial.access || '',
       expires: Number.isFinite(initial.expires) ? initial.expires : 0,
     };
+    let inflightRefresh = null;
+    let inflightRefreshIdentity = null;
 
     const resolveAccessToken = async ({ signal, forceRefresh = false } = {}) => {
-      const latest = await getAuth().catch(() => null);
-      if (latest?.type === 'oauth' && latest.refresh) {
-        if (!liveCred.access || (Number.isFinite(latest.expires) && latest.expires > liveCred.expires)) {
-          liveCred = {
-            refresh: latest.refresh,
-            access: latest.access || '',
-            expires: Number.isFinite(latest.expires) ? latest.expires : 0,
-          };
-        }
+      const latest = await getAuth();
+      if (!latest || latest.type !== 'oauth' || typeof latest.refresh !== 'string' || !latest.refresh) {
+        liveCred = null;
+        cachedTier = 'unknown';
+        throw Object.assign(new Error('Google Gemini OAuth session is signed out. Run /connect to sign in again.'), {
+          code: 'OAUTH_LOGGED_OUT',
+          status: 401,
+        });
       }
+
+      // Account switch detected: replace in-memory state immediately regardless of expiry timestamp.
+      if (!liveCred || latest.refresh !== liveCred.refresh) {
+        liveCred = {
+          refresh: latest.refresh,
+          access: latest.access || '',
+          expires: Number.isFinite(latest.expires) ? latest.expires : 0,
+        };
+        cachedTier = 'unknown';
+      } else if (latest.access && Number.isFinite(latest.expires) && latest.expires > liveCred.expires) {
+        liveCred = {
+          refresh: latest.refresh,
+          access: latest.access,
+          expires: latest.expires,
+        };
+      }
+
       if (!forceRefresh && liveCred.access && liveCred.expires > now() + 60_000) {
         return liveCred.access;
       }
-      if (inflightRefresh) return inflightRefresh;
-      inflightRefresh = (async () => {
+
+      const startRefreshIdentity = liveCred.refresh;
+      if (inflightRefresh && inflightRefreshIdentity === startRefreshIdentity) {
+        return inflightRefresh;
+      }
+
+      const refreshPromise = (async () => {
         const config = resolveOAuthConfig({ defaultProfile, env });
-        const refreshed = await refreshNativeCredential(config, liveCred.refresh, { signal });
+        const refreshed = await refreshNativeCredential(config, startRefreshIdentity, { signal });
         if (!refreshed?.accessToken) {
           throw Object.assign(new Error('OAuth refresh did not return an access token'), {
             code: 'OAUTH_REFRESH_FAILED',
             status: 401,
           });
         }
+        // Re-verify current auth identity before mutating memory or calling client.auth.set.
+        const currentAfter = await getAuth();
+        if (
+          !currentAfter ||
+          currentAfter.type !== 'oauth' ||
+          currentAfter.refresh !== startRefreshIdentity
+        ) {
+          throw Object.assign(new Error('Google Gemini OAuth account changed during token refresh; retry request.'), {
+            code: 'OAUTH_ACCOUNT_CHANGED',
+            status: 401,
+          });
+        }
         const nextCred = {
-          refresh: refreshed.refreshToken || liveCred.refresh,
+          refresh: refreshed.refreshToken || startRefreshIdentity,
           access: refreshed.accessToken,
           expires: computeExpiresAtMs(refreshed.expiresInSeconds),
         };
@@ -191,17 +227,18 @@ export function createOpenCodeAuthHook({
         }
         return nextCred.access;
       })();
+
+      inflightRefresh = refreshPromise;
+      inflightRefreshIdentity = startRefreshIdentity;
       try {
-        return await inflightRefresh;
+        return await refreshPromise;
       } finally {
-        inflightRefresh = null;
+        if (inflightRefresh === refreshPromise) {
+          inflightRefresh = null;
+          inflightRefreshIdentity = null;
+        }
       }
     };
-
-    // Best-effort initial subscription tier detection when access token is already valid.
-    if (liveCred.access && liveCred.expires > now() + 60_000) {
-      void detectSubscriptionTier(liveCred.access);
-    }
 
     return {
       apiKey: 'gemini-app-oauth',

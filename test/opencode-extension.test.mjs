@@ -190,7 +190,7 @@ test('OpenCode auth.loader returns in-process fetch supporting SSE streaming, to
   const sseText = await sseRes.text();
   assert.match(sseText, /Hello from OpenCode in-process HTTP\/2!/);
   assert.match(sseText, /"finish_reason":"stop"/);
-  assert.match(sseText, /"prompt_tokens":/);
+  assert.match(sseText, /"choices":\[\],"usage":\{"prompt_tokens":/);
   assert.match(sseText, /data: \[DONE\]/);
   assert.equal(refreshCount, 1);
   assert.equal(persistedAuths.length, 1);
@@ -245,4 +245,116 @@ test('OpenCode auth.loader returns in-process fetch supporting SSE streaming, to
   assert.equal(badRes.status, 400);
   const badJson = await badRes.json();
   assert.equal(badJson.error.code, 'INVALID_JSON');
+});
+
+test('OpenCode auth handles account switch and logout cleanly without stale token reuse or cross-account writeback, and cancels upstream on stream cancel', async () => {
+  let currentAuth = {
+    type: 'oauth',
+    refresh: 'acct-A-refresh',
+    access: 'acct-A-access',
+    expires: Date.now() + 600_000,
+  };
+  const persisted = [];
+  const seenTokens = [];
+  let upstreamCancelled = false;
+
+  const plugin = createGeminiAppOpenCodePlugin({
+    refreshNativeCredential: async (_cfg, refreshTok) => {
+      // Simulate account switch happening mid-refresh for acct-A
+      if (refreshTok === 'acct-A-refresh') {
+        currentAuth = {
+          type: 'oauth',
+          refresh: 'acct-B-refresh',
+          access: 'acct-B-access',
+          expires: Date.now() + 120_000, // Earlier expiry than A's old token!
+        };
+      }
+      return { accessToken: `refreshed-${refreshTok}`, expiresInSeconds: 3600 };
+    },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    openTurn: (accessToken, opts) => {
+      seenTokens.push(accessToken);
+      const isHang = (opts.messages?.[0]?.content || '').includes('HANG_STREAM');
+      if (isHang) {
+        return {
+          cancel() { upstreamCancelled = true; },
+          getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false }),
+          events: (async function* () {
+            yield { type: 'frame', bytes: makeFrame('part 1', { mode: 3, thinking: 2 }) };
+            await new Promise((resolve) => {
+              opts.signal?.addEventListener('abort', () => {
+                upstreamCancelled = true;
+                resolve();
+              }, { once: true });
+            });
+          })(),
+        };
+      }
+      return {
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 0, ended: true }),
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeFrame(`ok:${accessToken}`, { mode: 3, thinking: 2 }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+  });
+
+  const hooks = await plugin({
+    client: { auth: { set: async (p) => persisted.push(p) } },
+  });
+  const loaded = await hooks.auth.loader(async () => currentAuth);
+
+  // 1. Account switch to acct-B with earlier expiry immediately uses acct-B (never reuses acct-A)
+  currentAuth = {
+    type: 'oauth',
+    refresh: 'acct-B-refresh',
+    access: 'acct-B-access',
+    expires: Date.now() + 120_000,
+  };
+  const bRes = await loaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'hi B' }] }),
+  });
+  assert.equal(bRes.status, 200);
+  assert.equal((await bRes.json()).choices[0].message.content, 'ok:acct-B-access');
+  assert.equal(seenTokens.at(-1), 'acct-B-access');
+
+  // 2. Mid-refresh account switch refuses stale writeback via client.auth.set and returns 401
+  currentAuth = { type: 'oauth', refresh: 'acct-A-refresh', access: 'stale', expires: 1 };
+  const switchRes = await loaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(switchRes.status, 401);
+  assert.equal((await switchRes.json()).error.code, 'OAUTH_ACCOUNT_CHANGED');
+  assert.equal(persisted.length, 0);
+
+  // 3. Logout immediately returns HTTP 401 JSON even on stream: true (not HTTP 200 SSE!)
+  currentAuth = null;
+  const logoutRes = await loaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(logoutRes.status, 401);
+  assert.equal((await logoutRes.json()).error.code, 'OAUTH_LOGGED_OUT');
+
+  // 4. ReadableStream.cancel() aborts the underlying upstream turn
+  currentAuth = { type: 'oauth', refresh: 'acct-B-refresh', access: 'acct-B-access', expires: Date.now() + 600_000 };
+  const streamRes = await loaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'HANG_STREAM' }] }),
+  });
+  assert.equal(streamRes.status, 200);
+  const reader = streamRes.body.getReader();
+  await reader.read();
+  await reader.cancel('consumer done');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(upstreamCancelled, true);
 });
