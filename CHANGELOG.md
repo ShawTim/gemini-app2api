@@ -2,6 +2,24 @@
 
 Release notes for Gemini App2API.
 
+## 1.7.0 — 2026-11-23
+
+### Native Gateway `POST /mcp` (Streamable HTTP), Trilingual Admin UI (`EN` / `繁` / `简`), Standalone MCP & OpenCode Plugins, and Pi 1.5.2 Session Affinity (Fixes #4)
+- **Native Gateway Streamable HTTP MCP Endpoint (`POST /mcp`) & stdio Bridge (`bin/gemini-gateway mcp`)** (`src/gateway/app.mjs`, `src/gateway/mcp-core.mjs`, `src/gateway/state.mjs`, `bin/gemini-gateway`, `docs/API_SUPPORT.md`):
+  - Added an in-process, API-key-authenticated Streamable HTTP JSON-RPC 2.0 MCP endpoint at `POST /mcp` exposing `ask_gemini` (with inline `data:` image support and server-side LFI blocking of `images[].path`), `gemini_search` (grounded `native_search` + formatted Markdown citations), and `gemini_quota` (sanitized pool-level summary with zero emails, labels, tokens, or account IDs, properly distinguishing `usageRows` snapshots from empty snapshots).
+  - Enforced DNS-rebinding `Origin` allowlist (`403 ORIGIN_REJECTED`), `MCP-Protocol-Version` validation (`2025-06-18` / `2025-03-26` / `2024-11-05`), JSON-RPC `-32700`/`-32600` compliance, raw-byte `maxPromptBytes` enforcement before image decoding (`PROMPT_SIZE_LIMIT`), `incomplete` turn error surfacing, and a persisted `mcpEnabled` setting (`403 MCP_DISABLED` when disabled without affecting `/v1/*`).
+  - Added `bin/gemini-gateway mcp` stdio bridge with HTTPS enforcement for non-loopback URLs, cwd `.env` isolation, bounded concurrency (`8`), typed JSON-RPC request-ID tracking, and client `notifications/cancelled` translation into HTTP aborts.
+- **Trilingual Admin UI (`English` / `繁體中文` / `简体中文`) & MCP Controls** (`src/admin-v2/app.js`, `src/admin-v2/styles.css`, `README.md`, `README.zh.md`, `README.zh-CN.md`):
+  - Replaced the two-way language toggle with a compact 3-language switcher (`EN | 繁 | 简`) with full `zh-CN` localization and added a complete Simplified Chinese [`README.zh-CN.md`](README.zh-CN.md).
+  - Added MCP Quick Connect (`MCP` preset), Client Setup (`MCP Endpoint` URL + status badge + strict JSON `MCP (HTTP)` with `"type": "http"` and local-path `MCP (stdio)` tabs), API Keys dual `/v1` + `/mcp` endpoint strip, Settings `Enable MCP Streamable HTTP endpoint` toggle, and `/mcp` request telemetry & onboarding recognition.
+- **Standalone Zero-Dependency Extensions (`extensions/mcp`, `extensions/opencode`)**:
+  - Added `mcp-gemini-app@0.1.0` (zero-dependency Node.js `>=22` stdio MCP server with fail-closed `owner`-tagged credential isolation, serialized `.reclaim` cross-process locking + pre-refresh inode-pinned `O_RDWR` updates, read-only external Pi auth support with rotated refresh-token memory tracking, retry account-epoch pinning, `O_NONBLOCK | O_NOFOLLOW` local image loading, and explicit `--accept-terms` ToS opt-in).
+  - Added `opencode-gemini-app@0.1.0` (zero-dependency Bun/Node OpenCode native provider plugin with loopback & remote OAuth flows, explicit `GEMINI_OPENCODE_ACCEPT_TERMS=1` opt-in, per-loader isolated subscription tier resolution before `gemini-auto` selection, post-tier-probe account identity verification, retry account-epoch pinning, deferred `startGate` SSE error handling, and `ReadableStream.cancel()` upstream abort).
+- **Pi 1.5.2 Session Affinity (Fixes #4)** (`src/gateway/request-identity.mjs`, `docs/API_SUPPORT.md`):
+  - Recognized hyphenated `session-id` in explicit session header resolution (`x-session-id` → `x-session-affinity` → `session-id` → `session_id`) with strict `INVALID_SESSION_ID` validation.
+  - Updated Pi `User-Agent` detection to match versioned `pi/<version> (...)` and `pi/<version>` headers (e.g. `pi/1.5.2 (win32; node/v24.13.0; x64)`) for `prompt_cache_key` fallback affinity.
+  - Live-verified against a 9-account local gateway pool across `session-id`, `pi/1.5.2` + `prompt_cache_key`, and non-session round-robin controls.
+
 ## 1.6.6 — 2026-11-22
 
 ### Responses `function_call_output` multimodal arrays with tool-image attribution (Fixes #3)
