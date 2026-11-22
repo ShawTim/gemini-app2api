@@ -73,4 +73,6 @@ export const productTests = Object.freeze([
   'test/openclaw-package-build.test.mjs',
   'test/mcp-extension.test.mjs',
   'test/mcp-package-build.test.mjs',
+  'test/opencode-extension.test.mjs',
+  'test/opencode-package-build.test.mjs',
 ]);

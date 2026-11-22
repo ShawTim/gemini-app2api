@@ -27,6 +27,7 @@ release-source/
 .pi-package-build/
 .openclaw-package-build/
 .mcp-package-build/
+.opencode-package-build/
 .venv/
 
 # Generated deliverables and local credential stores are never source commits.
