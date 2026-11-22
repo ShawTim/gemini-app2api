@@ -431,33 +431,50 @@ test('MCP authManager treats external multi-provider Pi auth.json as strictly re
   await assert.rejects(() => foreignAuth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
   assert.deepEqual(JSON.parse(fs.readFileSync(foreignOauthPath, 'utf8')), foreignPayload);
 
-  // External read-only Pi file retains rotated refresh tokens in memory without touching disk.
-  const rotPiPath = path.join(tmpDir, 'pi-rot.json');
+  // Foreign file with version:1 + type:'oauth' + refresh + foreign owner is refused fail-closed.
+  const foreignOwnerPath = path.join(tmpDir, 'foreign-owner.json');
+  const foreignOwnerPayload = { owner: 'other-app', version: 1, type: 'oauth', refresh: 'foreign-r' };
+  fs.writeFileSync(foreignOwnerPath, JSON.stringify(foreignOwnerPayload), { mode: 0o600 });
+  const foreignOwnerAuth = createMcpAuthManager({ authPath: foreignOwnerPath, env: {} });
+  assert.throws(() => foreignOwnerAuth.logout(), { code: 'REFUSE_DELETE_EXTERNAL_AUTH' });
+  await assert.rejects(() => foreignOwnerAuth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(foreignOwnerPath, 'utf8')), foreignOwnerPayload);
+
+  // External read-only Pi file on a read-only directory (0o500) still refreshes & keeps rotated refresh token even when disk expires is later.
+  const roDir = path.join(tmpDir, 'ro-mount');
+  fs.mkdirSync(roDir, { mode: 0o700 });
+  const rotPiPath = path.join(roDir, 'pi-rot.json');
   fs.writeFileSync(rotPiPath, JSON.stringify({
     anthropic: { key: 'keep' },
-    'gemini-app': { type: 'oauth', refresh: 'pi-orig-refresh', access: 'stale', expires: 1 },
-  }), { mode: 0o600 });
-  const seenRefreshes = [];
-  const rotAuth = createMcpAuthManager({
-    authPath: rotPiPath,
-    env: {},
-    refreshNativeCredential: async (_cfg, r) => {
-      seenRefreshes.push(r);
-      return { refreshToken: 'pi-rotated-refresh', accessToken: `tok-${seenRefreshes.length}`, expiresInSeconds: 3600 };
-    },
-    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
-    decodeSubscription: () => ({ tier: 'pro' }),
-  });
-  const r1 = await rotAuth.getValidCredential();
-  assert.equal(r1.access, 'tok-1');
-  // Next call hits in-memory rotated credential even though disk still has pi-orig-refresh.
-  const r2 = await rotAuth.getValidCredential();
-  assert.equal(r2.access, 'tok-1');
-  assert.equal(seenRefreshes.length, 1);
-  // Forced refresh uses rotated refresh token rather than stale disk token.
-  const r3 = await rotAuth.getValidCredential({ forceRefresh: true });
-  assert.equal(r3.access, 'tok-2');
-  assert.deepEqual(seenRefreshes, ['pi-orig-refresh', 'pi-rotated-refresh']);
+    'gemini-app': { type: 'oauth', refresh: 'pi-orig-refresh', access: 'stale', expires: Date.now() + 9_999_999 },
+  }), { mode: 0o400 });
+  fs.chmodSync(roDir, 0o500);
+  try {
+    const seenRefreshes = [];
+    const rotAuth = createMcpAuthManager({
+      authPath: rotPiPath,
+      env: {},
+      refreshNativeCredential: async (_cfg, r) => {
+        seenRefreshes.push(r);
+        return { refreshToken: 'pi-rotated-refresh', accessToken: `tok-${seenRefreshes.length}`, expiresInSeconds: 3600 };
+      },
+      fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+      decodeSubscription: () => ({ tier: 'pro' }),
+    });
+    const r1 = await rotAuth.getValidCredential({ forceRefresh: true });
+    assert.equal(r1.access, 'tok-1');
+    // Next call hits in-memory rotated credential even though disk expires is larger than r1.expires!
+    const r2 = await rotAuth.getValidCredential();
+    assert.equal(r2.access, 'tok-1');
+    assert.equal(seenRefreshes.length, 1);
+    // Forced refresh uses rotated refresh token rather than stale disk token, with zero lockfile created in roDir.
+    const r3 = await rotAuth.getValidCredential({ forceRefresh: true });
+    assert.equal(r3.access, 'tok-2');
+    assert.deepEqual(seenRefreshes, ['pi-orig-refresh', 'pi-rotated-refresh']);
+    assert.equal(fs.existsSync(`${rotPiPath}.lock`), false);
+  } finally {
+    fs.chmodSync(roDir, 0o700);
+  }
 
   // Direct tool retry pins original account epoch: switching account after attempt 1 fails closed.
   const pinPath = path.join(tmpDir, 'pin-auth.json');

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import readline from 'node:readline';
 import {
   startLoopbackLogin as defaultStartLoopbackLogin,
@@ -69,8 +70,7 @@ function assertNotSymlink(targetPath) {
 }
 
 const MCP_AUTH_OWNER = 'mcp-gemini-app';
-const MCP_MANAGED_KEYS = new Set([
-  'owner',
+const MCP_LEGACY_MANAGED_KEYS = new Set([
   'version',
   'type',
   'refresh',
@@ -92,14 +92,26 @@ function sleepSyncMs(ms) {
   }
 }
 
+function isPidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
 function isManagedMcpAuthPayload(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
   if (raw.type !== 'oauth' || raw.version !== 1) return false;
   if (typeof raw.refresh !== 'string' || !raw.refresh.trim()) return false;
   if (Object.hasOwn(raw, 'gemini-app')) return false;
-  if (raw.owner === MCP_AUTH_OWNER) return true;
-  // Backwards-compatible check for pre-owner MCP files: reject if ANY foreign key is present.
-  return Object.keys(raw).every((k) => MCP_MANAGED_KEYS.has(k));
+  if (Object.hasOwn(raw, 'owner')) {
+    return raw.owner === MCP_AUTH_OWNER;
+  }
+  // Backwards-compatible check ONLY for legacy pre-owner MCP files: reject if ANY foreign key is present.
+  return Object.keys(raw).every((k) => MCP_LEGACY_MANAGED_KEYS.has(k));
 }
 
 function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
@@ -111,18 +123,34 @@ function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
     try { fs.chmodSync(dir, 0o700); } catch {}
   }
   const lockPath = `${authPath}.lock`;
+  const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let lockFd = null;
+  let lockStat = null;
   while (lockFd === null) {
     try {
       lockFd = fs.openSync(lockPath, 'wx', 0o600);
+      fs.writeSync(lockFd, `${token}\n`);
+      lockStat = fs.fstatSync(lockFd);
     } catch (err) {
+      if (lockFd !== null) {
+        try { fs.closeSync(lockFd); } catch {}
+        lockFd = null;
+      }
       if (err?.code !== 'EEXIST') throw err;
       try {
         const st = fs.lstatSync(lockPath);
         if (st.isFile() && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-          fs.unlinkSync(lockPath);
-          continue;
+          // Only reclaim an old lock if its owning PID is verifiably dead (never evict a live paused holder).
+          const content = fs.readFileSync(lockPath, 'utf8').trim();
+          const holderPid = Number.parseInt(content.split(':')[0], 10);
+          if (Number.isSafeInteger(holderPid) && holderPid > 0 && !isPidAlive(holderPid)) {
+            const recheck = fs.lstatSync(lockPath);
+            if (recheck.dev === st.dev && recheck.ino === st.ino) {
+              fs.unlinkSync(lockPath);
+              continue;
+            }
+          }
         }
       } catch {
         continue;
@@ -138,8 +166,14 @@ function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
   try {
     return fn();
   } finally {
+    try {
+      // Unlink only if lockPath still refers to our exact inode (never remove another holder's lock).
+      const current = fs.lstatSync(lockPath);
+      if (lockStat && current.dev === lockStat.dev && current.ino === lockStat.ino) {
+        fs.unlinkSync(lockPath);
+      }
+    } catch {}
     try { fs.closeSync(lockFd); } catch {}
-    try { fs.unlinkSync(lockPath); } catch {}
   }
 }
 
@@ -296,9 +330,9 @@ export function createMcpAuthManager({
     }
     lastSeenDiskRefresh = stored.refresh;
     if (stored.readOnlyExternal && memoryExternalState && memoryExternalState.diskRefresh === stored.refresh) {
-      if (memoryExternalState.cred.expires > stored.expires) {
-        return { ...memoryExternalState.cred, diskRefresh: stored.refresh, accountEpoch };
-      }
+      // Always prefer our in-memory refreshed/rotated credential for this external disk identity,
+      // even if its access expiry is equal or shorter than the stale file entry.
+      return { ...memoryExternalState.cred, diskRefresh: stored.refresh, accountEpoch };
     }
     return { ...stored, diskRefresh: stored.refresh, accountEpoch };
   }
@@ -326,9 +360,7 @@ export function createMcpAuthManager({
         });
       }
       const subscriptionTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
-      // Cross-process serialized compare-and-write so concurrent CLI logout or account switch
-      // cannot be resurrected or overwritten by an in-flight refresh.
-      return withAuthFileLock(resolvedAuthPath, () => {
+      const commitRefresh = () => {
         const currentStored = readStoredCredential(resolvedAuthPath);
         if (authGeneration !== startGen || !currentStored) {
           throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
@@ -352,14 +384,20 @@ export function createMcpAuthManager({
           readOnlyExternal: Boolean(currentStored.readOnlyExternal),
         };
         if (currentStored.readOnlyExternal) {
-          // Never mutate an external/unmanaged file; track rotated refresh token separately from diskRefresh.
+          // Never write or create lockfiles next to an external/read-only auth file.
           memoryExternalState = { diskRefresh: startDiskRefresh, cred: next };
         } else {
           writeStoredCredentialUnlocked(resolvedAuthPath, next);
           lastSeenDiskRefresh = next.refresh;
         }
         return { ...next, diskRefresh: currentStored.readOnlyExternal ? startDiskRefresh : next.refresh, accountEpoch: startEpoch };
-      });
+      };
+      // External/unmanaged auth files may live on read-only mounts; never create a .lock file beside them.
+      if (credential.readOnlyExternal) {
+        return commitRefresh();
+      }
+      // Cross-process serialized compare-and-write for MCP-owned auth files.
+      return withAuthFileLock(resolvedAuthPath, commitRefresh);
     })();
     inflightRefresh = refreshPromise;
     inflightIdentity = startDiskRefresh;
