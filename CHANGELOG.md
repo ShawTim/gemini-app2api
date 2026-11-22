@@ -2,6 +2,16 @@
 
 Release notes for Gemini App2API.
 
+## 1.6.6 — 2026-11-22
+
+### Responses `function_call_output` multimodal arrays with tool-image attribution (Fixes #3)
+- **Responses Tool-Result Images** (`src/openai-contract.mjs`, `src/openai-usage.mjs`):
+  - Accepted array `output` on `POST /v1/responses` `function_call_output` items containing `input_text` and `input_image` parts (matching OpenAI Responses & `pi-ai`'s `convertToolResultOutput`), strictly rejecting invalid part types (`output_text`, bare `text`, `logprobs`, `annotations`, `parsed`) and non-string/non-array `output` (`INVALID_TEXT`).
+  - Preserved exact interleaved text positions and parallel tool-call attribution by inserting `[Tool image N for <call_id>]` markers in each tool result and flushing deferred tool images together as a labeled `user` image turn immediately after each consecutive `function_call_output` group (avoiding `PENDING_TOOL_CALLS` on parallel tool calls).
+  - Wired `function_call_output` `input_image` slots into `requestBudget()` (256 MiB image budget, shared `MAX_IMAGES = 256` cap) and `measurePromptImagePayload()` (258 tokens/image), and deduplicated inline base64 image decoding per request in `src/image-input.mjs` + `src/openai-contract.mjs` (4× → 1× decode).
+  - Verified live end-to-end against Google Gemini (`gemini-neon`) on both the exact Issue #3 payload and parallel multi-image attribution (`call_a=red, call_b=blue`).
+- **Protocol & Model Metadata Consolidation** (`native-wire/robin-current.mjs`, `src/openai-contract.mjs`, `src/gateway/*`, `extensions/*`): Consolidated `NATIVE_VERSION` (`1.135.1.1291`), `GATEWAY_USER_AGENT` (`gemini-app2api/1.0`), and shared `MODEL_SPECS` across Gateway, Pi, and OpenClaw with drift-prevention tests.
+
 ## 1.6.5 — 2026-11-22
 
 ### Dynamic gateway & Admin UI version reporting (Fixes #2)
