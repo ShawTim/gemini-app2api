@@ -1,5 +1,8 @@
 # openclaw-gemini-app
 
+[![npm](https://img.shields.io/npm/v/openclaw-gemini-app?logo=npm&label=openclaw-gemini-app)](https://www.npmjs.com/package/openclaw-gemini-app)
+[![ClawHub](https://img.shields.io/badge/ClawHub-openclaw--gemini--app-F97316)](https://clawhub.ai/shawtim/plugins/openclaw-gemini-app)
+
 ![openclaw-gemini-app — Native OpenClaw Provider Plugin for Gemini over Direct HTTP/2](https://raw.githubusercontent.com/ShawTim/gemini-app2api/main/docs/assets/openclaw-extension.jpg)
 
 Zero-dependency native Google Gemini HTTP/2 provider plugin for **OpenClaw** (`openclaw`). Connect your Google Gemini subscription (**AI Pro**, **AI Ultra**, or **Free**) directly in-process via OAuth—no local gateway server, no Docker, and zero external npm dependencies.

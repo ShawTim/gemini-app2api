@@ -1,5 +1,8 @@
 # `pi-gemini-app` — Google Gemini App Provider for Pi
 
+[![npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
+[![Pi Packages](https://img.shields.io/badge/Pi%20Packages-pi--gemini--app-6366F1)](https://pi.dev/packages/pi-gemini-app?name=pi-gemini-app)
+
 ![pi-gemini-app — Native Pi Extension for Gemini Neon over Direct HTTP/2](https://raw.githubusercontent.com/ShawTim/gemini-app2api/main/docs/assets/pi-extension.jpg)
 
 Native in-process provider extension for `@earendil-works/pi-coding-agent` (`pi`) and GooeyPi. Connects directly to Gemini's native HTTP/2 endpoint (`ProcessQuery`) inside the Pi process—no separate HTTP gateway server, Docker container, or extra npm runtime dependencies required.
