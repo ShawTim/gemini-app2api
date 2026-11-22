@@ -180,7 +180,7 @@ for (const width of [390, 1440]) test(`daily layout, label semantics, keyboard a
     expect(await more.evaluate(n => getComputedStyle(n).outlineStyle)).toBe('solid');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     expect(await more.evaluate(n => getComputedStyle(n.closest('article')).animationName)).toBe('none');
-    await page.locator('#language-toggle').click();
+    await page.locator('#lang-zh-HK').click();
     await expect(page.locator('nav a')).toHaveText(['帳戶', 'API 金鑰', '設定']);
     await expect(current(page, 'acc-0')).toHaveText('0% 已用');
     await page.reload();
@@ -282,8 +282,8 @@ test('unwanted labels are absent even with all old quota/subscription details ex
   const forbidden = /\bCached\b|\bStale\b|Google reported|Google 回報|快取|過時/i;
   try {
     await login(page, f);
-    for (const language of ['en', 'zh-HK']) {
-      if (await page.locator('html').getAttribute('lang') !== language) await page.locator('#language-toggle').click();
+    for (const language of ['en', 'zh-HK', 'zh-CN']) {
+      if (await page.locator('html').getAttribute('lang') !== language) await page.locator(`#lang-${language}`).click();
       for (const route of ['accounts', 'overview']) {
         await page.goto(f.base + '/admin/#' + route);
         await expect(page.locator(`[data-page="${route}"]`)).toHaveAttribute('aria-busy', 'false');
@@ -302,7 +302,7 @@ test('unwanted labels are absent even with all old quota/subscription details ex
     expect(calls).toBe(0);
     await page.goto(f.base + '/admin/#accounts');
     await expect(page.locator('[data-page="accounts"]')).toHaveAttribute('aria-busy', 'false');
-    if (await page.locator('html').getAttribute('lang') !== 'en') await page.locator('#language-toggle').click();
+    if (await page.locator('html').getAttribute('lang') !== 'en') await page.locator('#lang-en').click();
     await expect(page.locator('html')).toHaveAttribute('lang', 'en');
     await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     const view = page.locator('#account-drawer [data-quota="acc-0"]');

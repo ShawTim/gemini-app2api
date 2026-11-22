@@ -21,6 +21,7 @@ const fixed = [
   "package-lock.json",
   "README.md",
   "README.zh.md",
+  "README.zh-CN.md",
   "LICENSE",
   "DISCLAIMER.md",
   "SECURITY.md",

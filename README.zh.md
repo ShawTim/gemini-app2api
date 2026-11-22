@@ -4,7 +4,7 @@
 
 **你的開發工具、你的 Gemini 訂閱帳戶、零依賴原生 HTTP/2。**
 
-透過免伺服器的獨立 In-Process 插件，或支援多帳戶池化的純 Node.js 閘道，將你合資格的 Google Gemini 帳戶直接接上 **Pi**、**OpenClaw**、**Cursor**、**Cline**、**Roo Code**、**Codex CLI** 與官方 OpenAI SDK。
+透過免伺服器的獨立 In-Process 插件，或支援多帳戶池化與原生 `POST /mcp` 的純 Node.js 閘道，將你合資格的 Google Gemini 帳戶直接接上 **Pi**、**OpenClaw**、**OpenCode**、**Claude Code**、**Cursor**、**Cline**、**Roo Code**、**Codex CLI**、**MCP 客戶端**與官方 OpenAI SDK。
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
 [![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
@@ -14,7 +14,7 @@
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-[English](README.md) · **繁體中文** · [快速開始](#quick-start) · [連接客戶端](#connect-your-client) · [模型與配額](#quota-consumption) · [API 參考](docs/API_SUPPORT.md) · [維運指南](docs/OPERATIONS.md)
+[English](README.md) · **繁體中文** · [简体中文](README.zh-CN.md) · [快速開始](#quick-start) · [連接客戶端](#connect-your-client) · [模型與配額](#quota-consumption) · [API 參考](docs/API_SUPPORT.md) · [維運指南](docs/OPERATIONS.md)
 
 </div>
 
@@ -32,14 +32,16 @@
 
 <a id="pi-extension"></a><a id="openclaw-plugin"></a>
 
-| 客戶端 | 安裝指令 | 登入與查詢配額 | 說明 |
+| 客戶端 | 安裝／執行指令 | 登入與查詢配額 | 說明 |
 |---|---|---|---|
 | **Pi / GooeyPi** | `pi install npm:pi-gemini-app` | `/login gemini-app` · `/gemini-quota` | [`extensions/pi/README.md`](extensions/pi/README.md) |
 | **OpenClaw** | `openclaw plugins install npm:openclaw-gemini-app` *（或 ClawHub）* | `openclaw models auth login --provider gemini-app` · `/usage` | [`extensions/openclaw/README.md`](extensions/openclaw/README.md) |
+| **OpenCode** | `npm run build:opencode-package` *（零依賴 Bun/Node 插件）* | `opencode auth login`（`gemini-app`） | [`extensions/opencode/README.md`](extensions/opencode/README.md) |
+| **獨立 MCP（stdio）** | `node extensions/mcp/cli.js serve` *（或 `npm run build:mcp-package`）* | `node extensions/mcp/cli.js login` · `quota` | [`extensions/mcp/README.md`](extensions/mcp/README.md) |
 
-兩款插件均在進程內直連原生 HTTP/2（`15s` PING 保活、`HTTPS_PROXY` 支援、256 工具宣告、並行多圖上載、免費帳號自動切換 `gemini-auto`）。
+全部獨立擴充套件均在進程內直連原生 HTTP/2（`15s` PING 保活、`HTTPS_PROXY` 支援、256 工具宣告、並行多圖上載、免費帳號自動切換 `gemini-auto`）。
 
-### 路線 B — 自架 OpenAI 相容閘道伺服器
+### 路線 B — 自架 OpenAI 相容與 MCP 閘道伺服器
 
 需要 **Node.js `>= 22`**（macOS / Linux / WSL2）或 **Docker Compose**，以及具備 Gemini 存取權限的 Google 帳戶（AI Studio API Key 屬不同服務）。
 
@@ -88,9 +90,10 @@ docker run -d --name gemini-app2api --init --restart unless-stopped \
 | 設定項 | 填寫值 |
 |---|---|
 | **Base URL** | `http://127.0.0.1:18989/v1` *（或 Compose 內網 `http://gateway:18989/v1`／自訂 HTTPS 代理）* |
-| **API Key** | 於後台 **API keys** 建立的客戶端金鑰 |
+| **MCP 端點** | `http://127.0.0.1:18989/mcp` *（Streamable HTTP；可於後台 **設定** 一鍵開關；stdio 橋接可用 `bin/gemini-gateway mcp`）* |
+| **API Key** | 於後台 **API keys** 建立的客戶端金鑰 *（同時驗證 `/v1/*` 與 `/mcp`）* |
 | **模型** | `gemini-neon` *（旗艦 Pro；`gemini-argon` 自動別名至此）*、`gemini-hydrogen` *（高速）*、`gemini-flash-lite` |
-| **端點** | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/responses`（[完整規格](docs/API_SUPPORT.md)） |
+| **端點** | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/responses` · `POST /mcp`（[完整規格](docs/API_SUPPORT.md)） |
 
 ```sh
 curl -fsS http://127.0.0.1:18989/v1/chat/completions \
@@ -100,8 +103,22 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 ```
 
 <details>
-<summary><strong>常用客戶端設定範本 — Codex CLI、Cursor、Cline / Roo Code、Cherry Studio、OpenAI SDK</strong></summary>
+<summary><strong>常用客戶端設定範本 — MCP（Claude Code / Cursor / Windsurf / VS Code）、Codex CLI、Cline / Roo Code、Cherry Studio、OpenAI SDK</strong></summary>
 
+- **MCP 客戶端（Streamable HTTP — Claude Code、Cursor、Windsurf、VS Code、Codex）** —— 透過閘道多帳戶池提供 `ask_gemini`、`gemini_search`、`gemini_quota` 工具（亦可於管理台一鍵複製）：
+  ```json
+  {
+    "mcpServers": {
+      "gemini-app": {
+        "url": "http://127.0.0.1:18989/mcp",
+        "headers": {
+          "Authorization": "Bearer ${GEMINI_GATEWAY_KEY}"
+        }
+      }
+    }
+  }
+  ```
+  純 stdio MCP 客戶端（如 Claude Desktop）可透過 `bin/gemini-gateway mcp`（設定 `GEMINI_GATEWAY_URL` + `GEMINI_GATEWAY_API_KEY`）橋接，或使用獨立版 [`extensions/mcp`](extensions/mcp/README.md)。
 - **OpenAI Codex CLI（`~/.codex/config.toml`）** —— 原生 `/v1/responses` 與 `namespace` 工具：
   ```toml
   model = "gemini-hydrogen" # 或 "gemini-neon"
@@ -161,7 +178,7 @@ Gemini AI Pro 帳戶實測 `GetUsageInfo` 參考數據（`neon_pro_policy`，非
 **核心亮點：**
 - **穩定傳輸與代理支援：** `15s` HTTP/2 `PING`＋TCP 保活、零依賴 `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` 隧道、關機重啟回傳可重試 `503 SERVER_SHUTDOWN`，以及有界自動恢復。
 - **專為長流程 E2E 與 Agent 迴圈打造：** 支援最多 `256` 個工具宣告（`512 KiB` / `16,384` 節點）、結構化輸出（`json_schema` / `json_object`）、可選 `native_search` 網頁引用，以及並行 HTTP/2 多圖上載（安全護欄 `256` 張／單張 `20 MiB`＋同帳號純記憶體 `blobId` 快取）。
-- **零依賴安全與雙語後台：** `0700`/`0600` 私密狀態、`scrypt` 密碼雜湊、SHA-256 金鑰庫、CSRF/Origin 防護，以及零提示詞日誌的帳戶 × 模型即時觀測後台（`English` / `繁體中文`）。
+- **零依賴安全與三語後台：** `0700`/`0600` 私密狀態、`scrypt` 密碼雜湊、SHA-256 金鑰庫、CSRF/Origin 防護、`POST /mcp` 一鍵開關與接入範本，以及零提示詞日誌的帳戶 × 模型即時觀測後台（`English` / `繁體中文` / `简体中文`）。
 
 ![Gemini App2API 維運管理台 —— 深色主題（合成示範資料）](docs/assets/admin-v2-demo-dark-desktop.png)
 
@@ -182,6 +199,8 @@ Gemini AI Pro 帳戶實測 `GetUsageInfo` 參考數據（`neon_pro_policy`，非
 |---|---|
 | [Pi 擴充套件（`extensions/pi/README.md`）](extensions/pi/README.md) | 適用於 Pi Coding Agent 與 GooeyPi 的獨立 `pi-gemini-app` 插件 |
 | [OpenClaw 插件（`extensions/openclaw/README.md`）](extensions/openclaw/README.md) | 適用於 OpenClaw 與 ClawHub 的獨立 `openclaw-gemini-app` Provider 插件 |
+| [OpenCode 插件（`extensions/opencode/README.md`）](extensions/opencode/README.md) | 適用於 OpenCode（Bun 與 Node）的獨立 `opencode-gemini-app` 原生 Provider 插件 |
+| [MCP 伺服器（`extensions/mcp/README.md`）](extensions/mcp/README.md) | 獨立 stdio MCP 伺服器（`ask_gemini`、`gemini_search`、`gemini_quota`） |
 | [API 支援規格（`docs/API_SUPPORT.md`）](docs/API_SUPPORT.md) | 端點、工具、結構化輸出、圖片、`native_search` 與錯誤代碼 |
 | [維運指南（`docs/OPERATIONS.md`）](docs/OPERATIONS.md) | `.env` 設定、Docker Compose、TLS 反向代理、`launchd` 與疑難排解 |
 | [完成與失敗語義（`docs/COMPLETION_CONTRACT.md`）](docs/COMPLETION_CONTRACT.md) | 部分輸出保留、零輸出 `GENERATION_FAILED` 與 Agent 迴圈安全 |

@@ -39,7 +39,7 @@ for (const width of [390, 1440]) test(`quota semantics preserve provenance, date
     await expect(q).toContainText('not a guarantee that all quota refills to maximum');
     await page.keyboard.press('Escape');
     await expect(page.locator('#account-drawer')).toBeHidden();
-    await page.locator('#language-toggle').click();
+    await page.locator('#lang-zh-HK').click();
     await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     await expect(q.locator('[data-quota-percent-meaning]').first()).toHaveText('已用');
     await expect(q.locator('[data-quota-provider-time]').first()).toContainText('用量視窗更新時間：');

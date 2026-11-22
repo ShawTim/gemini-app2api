@@ -63,15 +63,25 @@ test('Admin UI exposes MCP endpoints, snippets, and bilingual mcpEnabled toggle 
     await page.locator('#snippet-mcp-http').click();
     await expect(page.locator('#client-mcp-disabled-notice')).toBeVisible();
 
-    // 6. Bilingual zh-HK toggle re-enables MCP cleanly
+    // 6. Trilingual zh-HK and zh-CN switches update UI cleanly and re-enable MCP
     await page.goto(f.base + '/admin/#settings');
-    await page.locator('#language-toggle').click();
+    await page.locator('#lang-zh-HK').click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-HK');
     const zhToggle = page.getByRole('switch', { name: '啟用 MCP Streamable HTTP 端點' });
     await expect(zhToggle).not.toBeChecked();
-    await zhToggle.check();
+
+    await page.locator('#lang-zh-CN').click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+    await expect(page.locator('nav a')).toHaveText(['账户', 'API 密钥', '设置']);
+    const cnToggle = page.getByRole('switch', { name: '启用 MCP Streamable HTTP 端点' });
+    await expect(cnToggle).not.toBeChecked();
+    await cnToggle.check();
     await page.locator('#save-settings').click();
     await expect(page.locator('#settings-feedback')).toBeVisible();
     expect(f.store.settings().mcpEnabled).toBe(true);
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+    await expect(cnToggle).toBeChecked();
 
     const enabledRes = await f.api('/mcp', {
       method: 'POST',

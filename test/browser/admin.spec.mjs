@@ -259,7 +259,7 @@ test("demo is network-free, responsive, bilingual, themed and keyboard reachable
   await page.goto(f.base + "/admin/?demo=1");
   await expect(page.locator("#demo-banner")).toBeVisible();
   await page.locator("#theme-toggle").click();
-  await page.locator("#language-toggle").click();
+  await page.locator("#lang-zh-HK").click();
   await route(page, "accounts");
   const demoPopups = []; context.pages().forEach(p => { if (p !== page) demoPopups.push(p); });
   page.on("popup", popup => demoPopups.push(popup));
@@ -557,7 +557,7 @@ test("new-user rejection remains observable without a local retry allowance or b
   await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(state()).toHaveAttribute("data-provider-state","verified");expect(opened).toBe(2);
   await page.keyboard.press('Escape');await expect(page.locator('#account-drawer')).toBeHidden();
-  await page.locator("#language-toggle").click();
+  await page.locator("#lang-zh-HK").click();
   await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(state()).toContainText("曾成功驗證");
   await page.keyboard.press('Escape');
@@ -764,7 +764,7 @@ for (const width of [390, 1440]) test(`technical quota and model evidence stay a
   await page.keyboard.press('Escape');
   await expect(drawer).toBeHidden();
 
-  await page.locator('#language-toggle').click();
+  await page.locator('#lang-zh-HK').click();
   await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(drawer.locator('[data-quota-value-note]')).toContainText('不等於剩餘額度');
   await expect(drawer.locator('[data-model-checked-at]')).toContainText('上次成功驗證');
@@ -852,7 +852,7 @@ test("overview attention tiles, category chip, Sign-in needed filter, i18n and p
   await expect(page.locator('#session-results')).toContainText('Upstream precondition rejected');
   await expect(page.locator('#session-results')).toContainText('Tool format recovered');
 
-  await page.locator('#language-toggle').click();
+  await page.locator('#lang-zh-HK').click();
   await expect(page.locator('#session-results')).toContainText('配額耗盡');
   await expect(page.locator('#session-results')).toContainText('上游前置條件被拒');
   await expect(page.locator('#session-results')).toContainText('工具格式錯誤後重試');
@@ -963,7 +963,7 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   expect(await page.locator('#app').evaluate(n => n.inert)).toBe(false);
   await expect(opener).toBeFocused();
 
-  await page.locator('#language-toggle').click();
+  await page.locator('#lang-zh-HK').click();
   await opener.focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('#account-drawer')).toContainText('請求 · ');
@@ -975,7 +975,7 @@ test("delayed key copy never leaks across logout, bulk refresh syncs focused dra
   await page.keyboard.press('Escape');
   await expect(page.locator('#account-drawer')).toBeHidden();
   await expect(opener).toBeFocused();
-  await page.locator('#language-toggle').click();
+  await page.locator('#lang-en').click();
 
   await page.locator('#quick-filter-attention').click();
   await expect(page.locator('#quick-filter-attention')).toHaveText('Attention (0)');
@@ -1657,7 +1657,7 @@ test("drawer distinguishes capacity-saturated signed-in accounts from sign-in er
   await expect(drawer).not.toContainText('Unavailable until signed in');
   await page.locator('#drawer-close').click();
 
-  await page.locator('#language-toggle').click();
+  await page.locator('#lang-zh-HK').click();
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-HK');
 
   await page.locator('[data-account-card="acc-busy"] [data-action="open-drawer"]').click();
@@ -1730,7 +1730,7 @@ test("overview and account drawer render bilingual metadata-only model telemetry
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
-  await page.locator("#language-toggle").click();
+  await page.locator("#lang-zh-HK").click();
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-HK");
   await expect(panel).toContainText("模型流量與穩定性分佈");
   await expect(panel).toContainText("僅統計中繼資料 · 零提示詞日誌");
@@ -1764,7 +1764,7 @@ test("overview and account drawer render bilingual metadata-only model telemetry
 
   await page.locator("#drawer-close").click();
   await expect(drawer).toBeHidden();
-  await page.locator("#language-toggle").click();
+  await page.locator("#lang-en").click();
   await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
   await expect(drawerTelemetry).toContainText("Per-Model Traffic & Errors");
   await page.locator("#drawer-close").click();

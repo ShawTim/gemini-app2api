@@ -4,7 +4,7 @@
 
 **Your coding agents. Your Gemini subscriptions. Zero-dependency native HTTP/2.**
 
-Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **Cursor**, **Cline**, **Roo Code**, **Codex CLI**, and OpenAI SDKs—via standalone in-process plugins (no server needed) or a self-hosted Node.js gateway with multi-account pooling.
+Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **OpenCode**, **Claude Code**, **Cursor**, **Cline**, **Roo Code**, **Codex CLI**, **MCP clients**, and OpenAI SDKs—via standalone in-process plugins (no server needed) or a self-hosted Node.js gateway with multi-account pooling and native `POST /mcp`.
 
 [![CI](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml/badge.svg)](https://github.com/ShawTim/gemini-app2api/actions/workflows/ci.yml)
 [![pi-gemini-app on npm](https://img.shields.io/npm/v/pi-gemini-app?logo=npm&label=pi-gemini-app)](https://www.npmjs.com/package/pi-gemini-app)
@@ -14,7 +14,7 @@ Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **Cursor**, **
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748B)](LICENSE)
 
-**English** · [繁體中文](README.zh.md) · [Quick Start](#quick-start) · [Connect Client](#connect-your-client) · [Models & Quota](#quota-consumption) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
+**English** · [繁體中文](README.zh.md) · [简体中文](README.zh-CN.md) · [Quick Start](#quick-start) · [Connect Client](#connect-your-client) · [Models & Quota](#quota-consumption) · [API Reference](docs/API_SUPPORT.md) · [Operations](docs/OPERATIONS.md)
 
 </div>
 
@@ -32,14 +32,16 @@ Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **Cursor**, **
 
 <a id="pi-extension"></a><a id="openclaw-plugin"></a>
 
-| Host | Install | Sign In & Quota | Guide |
+| Host | Install / Run | Sign In & Quota | Guide |
 |---|---|---|---|
 | **Pi / GooeyPi** | `pi install npm:pi-gemini-app` | `/login gemini-app` · `/gemini-quota` | [`extensions/pi/README.md`](extensions/pi/README.md) |
 | **OpenClaw** | `openclaw plugins install npm:openclaw-gemini-app` *(or ClawHub)* | `openclaw models auth login --provider gemini-app` · `/usage` | [`extensions/openclaw/README.md`](extensions/openclaw/README.md) |
+| **OpenCode** | `npm run build:opencode-package` *(zero-dep Bun/Node plugin)* | `opencode auth login` (`gemini-app`) | [`extensions/opencode/README.md`](extensions/opencode/README.md) |
+| **Standalone MCP (stdio)** | `node extensions/mcp/cli.js serve` *(or `npm run build:mcp-package`)* | `node extensions/mcp/cli.js login` · `quota` | [`extensions/mcp/README.md`](extensions/mcp/README.md) |
 
-Both plugins run in-process over direct HTTP/2 (`15s` PING keepalives, `HTTPS_PROXY` support, 256 tools, parallel multimodal image uploads, automatic Free-tier `gemini-auto` filtering).
+All standalone extensions run in-process over direct HTTP/2 (`15s` PING keepalives, `HTTPS_PROXY` support, 256 tools, parallel multimodal image uploads, automatic Free-tier `gemini-auto` filtering).
 
-### Path B — Self-Hosted OpenAI-Compatible Gateway
+### Path B — Self-Hosted OpenAI-Compatible & MCP Gateway
 
 Requires **Node.js `>= 22`** (macOS / Linux / WSL2) or **Docker Compose**, plus a Google account with Gemini access (AI Studio API keys are a different service).
 
@@ -88,9 +90,10 @@ See [Operations Guide](docs/OPERATIONS.md#docker--linux-loopback-publishing--lin
 | Setting | Value |
 |---|---|
 | **Base URL** | `http://127.0.0.1:18989/v1` *(or `http://gateway:18989/v1` inside Compose / your HTTPS proxy URL)* |
-| **API Key** | Client key from **API keys** |
+| **MCP Endpoint** | `http://127.0.0.1:18989/mcp` *(Streamable HTTP; toggleable in Admin **Settings**; stdio bridge via `bin/gemini-gateway mcp`)* |
+| **API Key** | Client key from **API keys** *(authenticates both `/v1/*` and `/mcp`)* |
 | **Models** | `gemini-neon` *(flagship Pro; `gemini-argon` aliases here)*, `gemini-hydrogen` *(fast)*, `gemini-flash-lite` |
-| **Endpoints** | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/responses` ([full contract](docs/API_SUPPORT.md)) |
+| **Endpoints** | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/responses` · `POST /mcp` ([full contract](docs/API_SUPPORT.md)) |
 
 ```sh
 curl -fsS http://127.0.0.1:18989/v1/chat/completions \
@@ -100,8 +103,22 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 ```
 
 <details>
-<summary><strong>Client Recipes — Codex CLI, Cursor, Cline / Roo Code, Cherry Studio, OpenAI SDKs</strong></summary>
+<summary><strong>Client Recipes — MCP (Claude Code / Cursor / Windsurf / VS Code), Codex CLI, Cline / Roo Code, Cherry Studio, OpenAI SDKs</strong></summary>
 
+- **MCP Clients (Streamable HTTP — Claude Code, Cursor, Windsurf, VS Code, Codex)** — exposes `ask_gemini`, `gemini_search`, and `gemini_quota` backed by your gateway's multi-account pool (also one-click copyable from Admin UI):
+  ```json
+  {
+    "mcpServers": {
+      "gemini-app": {
+        "url": "http://127.0.0.1:18989/mcp",
+        "headers": {
+          "Authorization": "Bearer ${GEMINI_GATEWAY_KEY}"
+        }
+      }
+    }
+  }
+  ```
+  For stdio-only MCP clients (e.g. Claude Desktop), run `bin/gemini-gateway mcp` with `GEMINI_GATEWAY_URL` + `GEMINI_GATEWAY_API_KEY`, or use standalone [`extensions/mcp`](extensions/mcp/README.md).
 - **OpenAI Codex CLI (`~/.codex/config.toml`)** — native `/v1/responses` + namespace tools:
   ```toml
   model = "gemini-hydrogen" # or "gemini-neon"
@@ -161,7 +178,7 @@ Empirical `GetUsageInfo` observations on Gemini AI Pro accounts (`neon_pro_polic
 **Highlights:**
 - **Resilient HTTP/2 & Proxy Support:** `15s` HTTP/2 `PING` + TCP keepalives, zero-dependency `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` `CONNECT` tunneling, retryable `503 SERVER_SHUTDOWN` restarts, and bounded automatic recovery.
 - **Built for Long E2E & Agent Loops:** Up to `256` caller tool declarations (`512 KiB` / `16,384` nodes), structured outputs (`json_schema` / `json_object`), opt-in `native_search` citations, and parallel HTTP/2 multimodal image uploads (`256` images / `20 MiB` per image safety bounds + per-account in-memory `blobId` caching).
-- **Zero-Dependency Security & Bilingual Console:** `0700`/`0600` private state, `scrypt` admin auth, SHA-256 key vault, CSRF/Origin guards, and live per-account × per-model telemetry (`English` / `繁體中文`, zero prompt logging).
+- **Zero-Dependency Security & Trilingual Console:** `0700`/`0600` private state, `scrypt` admin auth, SHA-256 key vault, CSRF/Origin guards, one-click `POST /mcp` toggle & quick-connect snippets, and live per-account × per-model telemetry (`English` / `繁體中文` / `简体中文`, zero prompt logging).
 
 ![Gemini App2API Operations Console — Dark Theme (synthetic demo data)](docs/assets/admin-v2-demo-dark-desktop.png)
 
@@ -182,6 +199,8 @@ Empirical `GetUsageInfo` observations on Gemini AI Pro accounts (`neon_pro_polic
 |---|---|
 | [Pi Extension (`extensions/pi/README.md`)](extensions/pi/README.md) | Standalone `pi-gemini-app` plugin for Pi Coding Agent & GooeyPi |
 | [OpenClaw Plugin (`extensions/openclaw/README.md`)](extensions/openclaw/README.md) | Standalone `openclaw-gemini-app` provider plugin for OpenClaw & ClawHub |
+| [OpenCode Plugin (`extensions/opencode/README.md`)](extensions/opencode/README.md) | Standalone `opencode-gemini-app` native provider plugin for OpenCode (Bun & Node) |
+| [MCP Server (`extensions/mcp/README.md`)](extensions/mcp/README.md) | Standalone stdio MCP server (`ask_gemini`, `gemini_search`, `gemini_quota`) |
 | [API Support (`docs/API_SUPPORT.md`)](docs/API_SUPPORT.md) | Endpoints, tools, structured outputs, images, `native_search`, error codes |
 | [Operations (`docs/OPERATIONS.md`)](docs/OPERATIONS.md) | `.env` config, Docker Compose, TLS reverse proxy, `launchd`, troubleshooting |
 | [Completion Contract (`docs/COMPLETION_CONTRACT.md`)](docs/COMPLETION_CONTRACT.md) | Partial-output preservation, zero-output `GENERATION_FAILED`, agent loop safety |

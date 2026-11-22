@@ -18,7 +18,7 @@ test('deployment-excluded account remains visible and signed in, without any pro
     await expect(drawer.locator('[data-provider-model="gemini-hydrogen"]')).toHaveAttribute('data-provider-state', 'unverified');
     await page.keyboard.press('Escape');
     await expect(b.locator('.daily-test [data-action="test-model"]')).toBeDisabled();
-    await page.locator('#language-toggle').click(); await expect(b.locator('[data-routing-excluded]')).toHaveText('不會用於請求');
+    await page.locator('#lang-zh-HK').click(); await expect(b.locator('[data-routing-excluded]')).toHaveText('不會用於請求');
     expect(f.seen).toHaveLength(0); expect(providerRequests).toBe(0); expect(JSON.stringify(f.store.data.accounts[1])).toBe(before);
   } finally { await f.close(); }
 });

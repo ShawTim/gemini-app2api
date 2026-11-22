@@ -22,7 +22,7 @@ test('remote-image switch defaults off, saves/reloads, discards drafts and is bi
     expect(f.store.settings().allowRemoteImages).toBe(true);
     await page.reload();
     await expect(toggle).toBeChecked();
-    await page.locator('#language-toggle').click();
+    await page.locator('#lang-zh-HK').click();
     const chinese = page.getByRole('switch', { name: '允許遠端圖片 URL' });
     await expect(chinese).toBeChecked();
     await chinese.uncheck();

@@ -51,10 +51,15 @@ for (const width of [390, 1440]) test(`commercial console routes, mobile data an
   await page.locator('#clear-request-filters').click();
   await expect(page.locator('#request-search')).toBeFocused();
   await expect(page.locator('#request-search')).toHaveValue('');
-  await page.locator('#language-toggle').click();
+  await page.locator('#lang-zh-HK').click();
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-HK');
   await navigate(page, 'models');
   await expect(page.locator('#page-content')).toContainText('客戶端設定');
+  await page.locator('#lang-zh-CN').click();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+  await expect(page.locator('#page-content')).toContainText('客户端设置');
+  await page.locator('#lang-zh-HK').click();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-HK');
   await expect(page.locator('#playground-form')).toHaveCount(0);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   expect(await page.locator('#page-content > .stack').evaluate(n => getComputedStyle(n).animationName)).toBe('none');

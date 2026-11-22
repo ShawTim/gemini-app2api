@@ -8,8 +8,9 @@ const $ = id => document.getElementById(id);
 const DEMO = new URLSearchParams(location.search).get('demo') === '1';
 const pref = key => { try { return localStorage.getItem(key); } catch { return null; } };
 const savePref = (key, value) => { try { localStorage.setItem(key, value); } catch { /* Storage is optional. */ } };
+const savedLang = pref('gemini_lang') || '';
 const S = {
-  lang: /^(zh|zh-HK)$/.test(pref('gemini_lang') || '') ? 'zh-HK' : 'en',
+  lang: savedLang === 'zh-CN' ? 'zh-CN' : /^(zh|zh-HK)$/.test(savedLang) ? 'zh-HK' : 'en',
   theme: pref('gemini_theme') === 'light' ? 'light' : 'dark',
   authenticated: false, authRequired: true, checkingSession: !DEMO, csrf: '', epoch: 0, routeEpoch: 0, overview: null, accounts: null, keys: null,
   demoScenario: 'sample', demoFault: false,
@@ -23,45 +24,82 @@ const S = {
   accountQuickFilter: '', selectedAccountId: '', pendingAccountLookup: '', preset: 'codex', drawerReturnFocus: null,
 };
 const revealedKeys = new Map();
-const L = (en, zh) => S.lang === 'zh-HK' ? zh : en;
+const ZH_CN_PHRASES = [
+  ['工作階段', '会话'], ['登入階段', '登录会话'], ['中繼資料', '元数据'], ['重新整理', '刷新'],
+  ['重新導向', '重定向'], ['重新登入', '重新登录'], ['剪貼簿', '剪贴板'], ['用戶端', '客户端'],
+  ['客戶端', '客户端'], ['設定檔', '配置文件'], ['識別碼', '标识'], ['連接埠', '端口'],
+  ['位元組', '字节'], ['伺服器', '服务器'], ['瀏覽器', '浏览器'], ['提示詞', '提示词'],
+  ['營運管理', '运维管理'], ['閘道', '网关'], ['帳戶', '账户'], ['金鑰', '密钥'],
+  ['本機', '本地'], ['私隱', '隐私'], ['網路', '网络'], ['網絡', '网络'],
+  ['登入', '登录'], ['登出', '退出登录'], ['電郵', '邮箱'], ['檔案', '文件'],
+  ['設定', '设置'], ['預設', '默认'], ['儲存', '保存'], ['匯出', '导出'],
+  ['資訊', '信息'], ['訊息', '消息'], ['回覆', '回复'], ['回應', '响应'],
+  ['連線', '连接'], ['逾時', '超时'], ['並行', '并发'], ['支援', '支持'],
+  ['相容', '兼容'], ['運作', '运行'], ['檢視', '查看'], ['載入', '加载'],
+  ['搜尋', '搜索'], ['篩選', '筛选'], ['複製', '复制'], ['撤銷', '撤销'],
+  ['建立', '创建'], ['示範', '演示'], ['憑證', '凭据'], ['驗證', '验证'],
+  ['封鎖', '阻止'], ['公網', '公网'], ['位址', '地址'], ['分頁', '标签页'],
+  ['雜湊', '哈希'], ['軟錯誤', '软错误'], ['紀錄', '记录'], ['筆數', '条数'],
+  ['套用', '应用'], ['切換', '切换'], ['顯示', '显示'], ['隱藏', '隐藏'],
+  ['進階', '高级'], ['暫時', '临时'], ['過往', '历史'], ['唔代表', '不代表'],
+  ['唔需要', '不需要'], ['唔係', '不是'], ['唔會', '不会'], ['呢個', '这个'],
+  ['先能', '才能'], ['先可', '才可'], ['先確認', '再确认'], ['喺此', '在此'],
+  ['喺本機', '在本地'], ['今次', '本次'], ['嘅', '的'], ['咗', '了'],
+  ['喺', '在'], ['唔', '不'], ['僅', '仅'], ['亦', '也'],
+];
+const ZH_CN_TRAD = '並佈來係個偵備傳僅優儲允內兩別則動務匯區協卻參員啟單嘗圍圖執報境增實寫將專尋對導尚層屬帳延後徑從復態憑憶應戶捨採探接控換據擇擬敗數斷於明晰時暫會期條棄概構標樣橋機檔檢欄權次歡歷段沒測游源準滿瀏為無營狀獨環產畫當登發盡監確碼稱稽稿穩空窗站端筆範簽簿籤精紀約級細終組結絕絡統綁網綴緒線緩總繁繼續置義耗聯脈致與舊草薦藏處衝補裡製複覆見規視覽觀言訂計訊託記設許診詞詢試話詳誌認語誤說請證識議護讀變費貼資起蹤軟較載輪輸轉迎返追送透這速連週進逾運過道達遠適遲選還部郵銷錄錯鎖鐘鑰閉開間閘閱關限階際障隨隱集雙雜離零電需露響頁項須預題額類顯餘驗驟體鮮點';
+const ZH_CN_SIMP = '并布来系个侦备传仅优储允内两别则动务汇区协却参员启单尝围图执报境增实写将专寻对导尚层属帐延后径从复态凭忆应户舍采探接控换据择拟败数断于明晰时暂会期条弃概构标样桥机档检栏权次欢历段没测游源准满浏为无营状独环产画当登发尽监确码称稽稿稳空窗站端笔范签簿签精纪约级细终组结绝络统绑网缀绪线缓总繁继续置义耗联脉致与旧草荐藏处冲补里制复复见规视览观言订计讯托记设许诊词询试话详志认语误说请证识议护读变费贴资起踪软较载轮输转迎返追送透这速连周进逾运过道达远适迟选还部邮销录错锁钟钥闭开间闸阅关限阶际障随隐集双杂离零电需露响页项须预题额类显余验骤体鲜点';
+const ZH_CN_MAP = new Map([...ZH_CN_TRAD].map((ch, idx) => [ch, ZH_CN_SIMP[idx]]));
+function toZhCN(text) {
+  if (typeof text !== 'string' || !text) return text;
+  let out = text;
+  for (const [from, to] of ZH_CN_PHRASES) {
+    if (out.includes(from)) out = out.replaceAll(from, to);
+  }
+  let res = '';
+  for (const ch of out) res += ZH_CN_MAP.get(ch) || ch;
+  return res;
+}
+const L = (en, zhHK, zhCN) => S.lang === 'zh-HK' ? zhHK : S.lang === 'zh-CN' ? (zhCN ?? toZhCN(zhHK)) : en;
 const words = {
-  overview: ['Overview', '總覽'], accounts: ['Accounts', '帳戶'],
-  sessions: ['Sessions & failovers', '工作階段與故障轉移'], requests: ['Requests & errors', '請求與錯誤'],
-  models: ['Client setup', '客戶端設定'], playground: ['Test request', '測試請求'], keys: ['API keys', 'API 金鑰'], settings: ['Settings', '設定'],
-  ready: ['Signed in', '已登入'], signed_in: ['Signed in', '已登入'], cooldown: ['Cooldown', '冷卻中'], auth_error: ['Authentication error', '驗證失敗'],
-  login_required: ['Login required', '需要登入'], disabled: ['Disabled', '已停用'], unknown: ['Unknown', '未知'],
-  cancel: ['Cancel', '取消'], close: ['Close', '關閉'], confirm: ['Confirm', '確認'], loading: ['Loading…', '讀取中…'],
-  refresh: ['Refresh', '重新整理'], retry: ['Try again', '重試'], account: ['Account', '帳戶'],
-  status: ['Status', '狀態'], model: ['Model', '模型'], time: ['Time', '時間'], latency: ['Latency', '延遲'],
-  requestsCount: ['Requests', '請求數'], errors: ['Errors', '錯誤'], label: ['Label', '標籤'],
-  enable: ['Enable', '啟用'], disable: ['Disable', '停用'], remove: ['Remove', '移除'], rename: ['Rename', '重新命名'],
-  export: ['Export metadata', '匯出中繼資料'], previous: ['Previous', '上一頁'], next: ['Next', '下一頁'],
-  empty: ['Nothing here yet', '暫無紀錄'], noMatch: ['No matching records', '沒有符合的紀錄'],
-  copy: ['Copy', '複製'], copied: ['Copied to clipboard.', '已複製到剪貼簿。'],
-  copyFailed: ['Clipboard unavailable. Select the text and copy manually.', '無法使用剪貼簿，請選取文字手動複製。'],
-  saved: ['Changes saved.', '已儲存變更。'], logout: ['Sign out', '登出'], demo: ['Demo', '示範'],
+  overview: ['Overview', '總覽', '总览'], accounts: ['Accounts', '帳戶', '账户'],
+  sessions: ['Sessions & failovers', '工作階段與故障轉移', '会话与故障转移'], requests: ['Requests & errors', '請求與錯誤', '请求与错误'],
+  models: ['Client setup', '客戶端設定', '客户端配置'], playground: ['Test request', '測試請求', '测试请求'], keys: ['API keys', 'API 金鑰', 'API 密钥'], settings: ['Settings', '設定', '设置'],
+  ready: ['Signed in', '已登入', '已登录'], signed_in: ['Signed in', '已登入', '已登录'], cooldown: ['Cooldown', '冷卻中', '冷却中'], auth_error: ['Authentication error', '驗證失敗', '认证失败'],
+  login_required: ['Login required', '需要登入', '需要登录'], disabled: ['Disabled', '已停用', '已停用'], unknown: ['Unknown', '未知', '未知'],
+  cancel: ['Cancel', '取消', '取消'], close: ['Close', '關閉', '关闭'], confirm: ['Confirm', '確認', '确认'], loading: ['Loading…', '讀取中…', '加载中…'],
+  refresh: ['Refresh', '重新整理', '刷新'], retry: ['Try again', '重試', '重试'], account: ['Account', '帳戶', '账户'],
+  status: ['Status', '狀態', '状态'], model: ['Model', '模型', '模型'], time: ['Time', '時間', '时间'], latency: ['Latency', '延遲', '延迟'],
+  requestsCount: ['Requests', '請求數', '请求数'], errors: ['Errors', '錯誤', '错误'], label: ['Label', '標籤', '标签'],
+  enable: ['Enable', '啟用', '启用'], disable: ['Disable', '停用', '停用'], remove: ['Remove', '移除', '移除'], rename: ['Rename', '重新命名', '重命名'],
+  export: ['Export metadata', '匯出中繼資料', '导出元数据'], previous: ['Previous', '上一頁', '上一页'], next: ['Next', '下一頁', '下一页'],
+  empty: ['Nothing here yet', '暫無紀錄', '暂无记录'], noMatch: ['No matching records', '沒有符合的紀錄', '没有匹配的记录'],
+  copy: ['Copy', '複製', '复制'], copied: ['Copied to clipboard.', '已複製到剪貼簿。', '已复制到剪贴板。'],
+  copyFailed: ['Clipboard unavailable. Select the text and copy manually.', '無法使用剪貼簿，請選取文字手動複製。', '剪贴板不可用，请选中文本手动复制。'],
+  saved: ['Changes saved.', '已儲存變更。', '已保存更改。'], logout: ['Sign out', '登出', '退出登录'], demo: ['Demo', '示範', '演示'],
 };
 const failoverReasons = {
-  quota: ['Quota exhausted', '配額耗盡'],
-  rate_limit: ['Rate limit', '速率限制'],
-  transient: ['Temporary upstream failure', '暫時上游故障'],
-  network_error: ['Temporary network failure', '暫時網絡故障'],
-  auth: ['Authentication rejected', '驗證被拒'],
-  auth_error: ['Authentication rejected', '驗證被拒'],
-  precondition: ['Upstream precondition rejected', '上游前置條件被拒'],
-  other: ['Upstream failure', '上游錯誤'],
-  account_unavailable: ['Account unavailable', '帳戶未能使用'],
-  requested_model_changed: ['Requested model changed', '請求模型已變更'],
-  empty_response: ['Empty response recovered', '空白回應後重試'],
-  short_output: ['Replaced a too-short fragment', '取代過短輸出後重試'],
-  transport: ['Transport interruption recovered', '傳輸中斷後重試'],
-  provider_soft_error: ['Provider soft-error recovered', '供應商軟錯誤後重試'],
-  tool_protocol: ['Tool format recovered', '工具格式錯誤後重試'],
-  incomplete_response: ['Incomplete response recovered', '不完整回應後重試'],
+  quota: ['Quota exhausted', '配額耗盡', '配额耗尽'],
+  rate_limit: ['Rate limit', '速率限制', '速率限制'],
+  transient: ['Temporary upstream failure', '暫時上游故障', '临时上游故障'],
+  network_error: ['Temporary network failure', '暫時網絡故障', '临时网络故障'],
+  auth: ['Authentication rejected', '驗證被拒', '认证被拒'],
+  auth_error: ['Authentication rejected', '驗證被拒', '认证被拒'],
+  precondition: ['Upstream precondition rejected', '上游前置條件被拒', '上游前置条件被拒'],
+  other: ['Upstream failure', '上游錯誤', '上游错误'],
+  account_unavailable: ['Account unavailable', '帳戶未能使用', '账户不可用'],
+  requested_model_changed: ['Requested model changed', '請求模型已變更', '请求模型已变更'],
+  empty_response: ['Empty response recovered', '空白回應後重試', '空响应后已恢复'],
+  short_output: ['Replaced a too-short fragment', '取代過短輸出後重試', '已替换过短片段'],
+  transport: ['Transport interruption recovered', '傳輸中斷後重試', '传输中断后已恢复'],
+  provider_soft_error: ['Provider soft-error recovered', '供應商軟錯誤後重試', '供应商软错误后已恢复'],
+  tool_protocol: ['Tool format recovered', '工具格式錯誤後重試', '工具格式错误后已恢复'],
+  incomplete_response: ['Incomplete response recovered', '不完整回應後重試', '不完整响应后已恢复'],
 };
 const I18N = {
   en: Object.fromEntries([...Object.entries(words), ...Object.entries(failoverReasons)].map(([k, [en]]) => [k, en])),
   'zh-HK': Object.fromEntries([...Object.entries(words), ...Object.entries(failoverReasons)].map(([k, [, zh]]) => [k, zh])),
+  'zh-CN': Object.fromEntries([...Object.entries(words), ...Object.entries(failoverReasons)].map(([k, [, , cn]]) => [k, cn])),
 };
 const t = key => (I18N[S.lang] || I18N.en)[key] || key;
 const paths = {
@@ -183,8 +221,29 @@ function download(name, data) {
 }
 function applyPreferences() { document.documentElement.lang = S.lang; document.documentElement.dataset.theme = S.theme; document.title = `Gemini App2API · ${L('Operations', '營運管理')}`; $('skip-link').textContent = L('Skip to content', '跳至內容'); }
 function preferenceControls() {
-  return [btn(S.lang === 'en' ? '繁中' : 'English', () => { S.lang = S.lang === 'en' ? 'zh-HK' : 'en'; savePref('gemini_lang', S.lang); applyPreferences(); render(); }, { id: 'language-toggle', 'aria-label': L('Switch to Traditional Chinese (Hong Kong)', '切換至英文') }),
-    btn(icon(S.theme === 'dark' ? 'sun' : 'moon'), () => { S.theme = S.theme === 'dark' ? 'light' : 'dark'; savePref('gemini_theme', S.theme); render(); }, { id: 'theme-toggle', class: 'icon-button', 'aria-label': L('Toggle light / dark theme', '切換日間／夜間主題') })];
+  const langs = [
+    ['en', 'EN', 'English'],
+    ['zh-HK', '繁', '繁體中文'],
+    ['zh-CN', '简', '简体中文'],
+  ];
+  return [
+    el('div', { class: 'lang-switch', id: 'language-switch', role: 'group', 'aria-label': L('Language', '語言', '语言') },
+      langs.map(([code, short, full]) => btn(short, () => {
+        if (S.lang === code) return;
+        S.lang = code;
+        savePref('gemini_lang', S.lang);
+        applyPreferences();
+        render();
+      }, {
+        id: `lang-${code}`,
+        class: 'lang-option',
+        'data-lang': code,
+        'aria-pressed': String(S.lang === code),
+        'aria-label': full,
+        title: full,
+      }))),
+    btn(icon(S.theme === 'dark' ? 'sun' : 'moon'), () => { S.theme = S.theme === 'dark' ? 'light' : 'dark'; savePref('gemini_theme', S.theme); render(); }, { id: 'theme-toggle', class: 'icon-button', 'aria-label': L('Toggle light / dark theme', '切換日間／夜間主題', '切换浅色／深色主题') }),
+  ];
 }
 function safeError(error) {
   const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'REQUEST_FAILED';

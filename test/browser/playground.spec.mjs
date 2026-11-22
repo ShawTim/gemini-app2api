@@ -36,7 +36,7 @@ for (const width of [390, 1440]) test(`advanced test request keeps confirmation 
   await expect(page.locator('#test-response-details')).toContainText('Resolved native mode1');
   expect(JSON.stringify(await page.evaluate(() => ({ ...localStorage, ...sessionStorage })))).not.toContain('Synthetic test message');
   await page.screenshot({ path: info.outputPath(`test-request-${width}.png`), fullPage: true });
-  await page.locator('#language-toggle').click(); await expect(page.locator('#page-title')).toHaveText('測試請求');
+  await page.locator('#lang-zh-HK').click(); await expect(page.locator('#page-title')).toHaveText('測試請求');
   await page.evaluate(() => { location.hash = 'overview'; });
   for (const id of ['overview-setup', 'overview-accounts', 'overview-details']) await expect(page.locator('#' + id)).not.toHaveAttribute('open');
   await expect(page.locator('.shell-evidence')).toHaveCount(0);

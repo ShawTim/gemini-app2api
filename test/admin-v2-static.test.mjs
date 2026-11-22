@@ -39,7 +39,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, toZhCN, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -62,12 +62,21 @@ test('motion, themes, stable tracks and keyboard focus are explicit', () => {
   assert.doesNotMatch(css, /transition:\s*all\b|0\.3s ease\b/);
 });
 
-test('all reusable core labels have English and Hong Kong Traditional Chinese', () => {
-  const { words } = fixture();
-  for (const [key, pair] of Object.entries(words)) {
-    assert.equal(pair.length, 2, key);
-    assert.ok(pair.every(v => typeof v === 'string' && v.length), key);
+test('all reusable core labels have English, Traditional Chinese (HK), and Simplified Chinese (CN)', () => {
+  const { words, I18N, toZhCN } = fixture();
+  for (const [key, triple] of Object.entries(words)) {
+    assert.equal(triple.length, 3, key);
+    assert.ok(triple.every(v => typeof v === 'string' && v.length), key);
+    assert.ok(typeof I18N.en[key] === 'string' && I18N.en[key].length > 0, key);
+    assert.ok(typeof I18N['zh-HK'][key] === 'string' && I18N['zh-HK'][key].length > 0, key);
+    assert.ok(typeof I18N['zh-CN'][key] === 'string' && I18N['zh-CN'][key].length > 0, key);
   }
+  // Verify toZhCN converts every zh-HK string cleanly with zero Cantonese leftovers
+  const bodySrc = source.slice(source.indexOf('function empty'));
+  const converted = toZhCN(bodySrc);
+  assert.equal(/[唔咗喺嘅冇嗰啲仲咩駛睇]/.test(converted), false, 'unexpected Cantonese character in zh-CN');
+  assert.equal(toZhCN('閘道回報新活動後，紀錄會在這裡顯示。'), '网关回报新活动后，记录会在这里显示。');
+  assert.equal(toZhCN('Bearer 金鑰同時驗證 /v1/* 與 /mcp 客戶端請求，可隨時在此複製或撤銷。'), 'Bearer 密钥同时验证 /v1/* 与 /mcp 客户端请求，可随时在此复制或撤销。');
 });
 
 test('request exports use a field allowlist and redact URL, email and arbitrary errors', () => {
@@ -884,4 +893,9 @@ test('admin-v2 supports /mcp path metadata, mcpEnabled editable setting, and MCP
   assert.match(f.safeError({ code: 'MCP_DISABLED', status: 403 }), /MCP endpoint.*disabled.*MCP_DISABLED.*HTTP 403/i);
   f.S.lang = 'zh-HK';
   assert.match(f.safeError({ code: 'MCP_DISABLED', status: 403 }), /MCP 端點.*停用.*MCP_DISABLED.*HTTP 403/);
+  f.S.lang = 'zh-CN';
+  assert.match(f.safeError({ code: 'MCP_DISABLED', status: 403 }), /MCP 端点.*停用.*MCP_DISABLED.*HTTP 403/);
+  assert.equal(f.t('accounts'), '账户');
+  assert.equal(f.t('keys'), 'API 密钥');
+  assert.equal(f.t('settings'), '设置');
 });

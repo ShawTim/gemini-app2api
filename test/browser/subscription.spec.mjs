@@ -46,7 +46,7 @@ test('subscription lookup is explicit, account scoped, bilingual and clear about
     await expect(row.locator('[data-subscription-feedback]')).toContainText('Last confirmed: Google AI Pro');
     expect(calls).toBe(2);
     await page.keyboard.press('Escape');
-    await page.locator('#language-toggle').click();
+    await page.locator('#lang-zh-HK').click();
     await page.locator('[data-account-card="acc-0"] [data-action="open-drawer"]').click();
     await expect(row.locator('[data-subscription-tier]')).toHaveText('未知');
     await expect(button).toHaveText('查詢訂閱');
