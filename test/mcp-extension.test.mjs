@@ -1,0 +1,351 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { deflateSync } from 'node:zlib';
+import { startLoopbackLogin as realStartLoopbackLogin, refreshNativeCredential as realRefreshNativeCredential } from '../native-wire/oauth-loopback.mjs';
+import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
+import { createMcpAuthManager, resolveGatewayConfig, writeStoredCredential } from '../extensions/mcp/auth.js';
+import { createMcpToolHandlers, MCP_TOOL_DEFINITIONS } from '../extensions/mcp/tools.js';
+import { createMcpServer } from '../extensions/mcp/server.js';
+import { runMcpCli } from '../extensions/mcp/cli.js';
+
+function makeTinyPng() {
+  const crcTable = Uint32Array.from({ length: 256 }, (_, v) => {
+    for (let i = 0; i < 8; i++) v = v & 1 ? (v >>> 1) ^ 0xedb88320 : v >>> 1;
+    return v >>> 0;
+  });
+  const crc32 = (buf) => {
+    let v = 0xffffffff;
+    for (const byte of buf) v = crcTable[(v ^ byte) & 255] ^ (v >>> 8);
+    return (v ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const t = Buffer.from(type), len = Buffer.alloc(4), crc = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    crc.writeUInt32BE(crc32(Buffer.concat([t, data])));
+    return Buffer.concat([len, t, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(Buffer.from([0, 255, 0, 0]))),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+const TINY_PNG = makeTinyPng();
+const TINY_PNG_URL = `data:image/png;base64,${TINY_PNG.toString('base64')}`;
+
+test('MCP stdio server handles initialize, ping, tools/list, invalid JSON, unknown method, and cancellation', async () => {
+  let aborted = false;
+  let releaseTool;
+  const toolHandlers = {
+    tools: MCP_TOOL_DEFINITIONS,
+    callTool: async (name, args, { signal }) => {
+      if (name === 'ask_gemini' && args.prompt === 'hang') {
+        return await new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            aborted = true;
+            resolve({ isError: true, content: [{ type: 'text', text: 'aborted' }] });
+          }, { once: true });
+          releaseTool = () => resolve({ content: [{ type: 'text', text: 'done' }] });
+        });
+      }
+      return { content: [{ type: 'text', text: `ok:${name}` }] };
+    },
+  };
+
+  const server = createMcpServer({ toolHandlers, version: '0.1.0' });
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const lines = [];
+  output.on('data', (chunk) => {
+    for (const line of chunk.toString('utf8').split('\n').filter(Boolean)) {
+      lines.push(JSON.parse(line));
+    }
+  });
+
+  const runner = server.startStdio({ input, output });
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } }) + '\n');
+  input.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }) + '\n');
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }) + '\n');
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'unknown/method' }) + '\n');
+  input.write('{bad json\n');
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'ask_gemini', arguments: { prompt: 'hang' } } }) + '\n');
+  await new Promise((r) => setTimeout(r, 20));
+  input.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 5, reason: 'user cancel' } }) + '\n');
+  await new Promise((r) => setTimeout(r, 20));
+  input.end();
+  await runner.done;
+  releaseTool?.();
+
+  assert.equal(aborted, true);
+  assert.equal(lines.find((l) => l.id === 1).result.protocolVersion, '2025-03-26');
+  assert.deepEqual(lines.find((l) => l.id === 2).result, {});
+  assert.deepEqual(lines.find((l) => l.id === 3).result.tools.map((t) => t.name), ['ask_gemini', 'gemini_search', 'gemini_quota']);
+  assert.equal(lines.find((l) => l.id === 4).error.code, -32601);
+  assert.equal(lines.find((l) => l.id === null).error.code, -32700);
+  // Cancelled request id=5 must not emit a response.
+  assert.equal(lines.find((l) => l.id === 5), undefined);
+});
+
+test('MCP authManager performs real loopback login + scoped refresh + 0600 storage + single-flight refresh', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-auth-test-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const authPath = path.join(tmpDir, 'auth.json');
+
+  const fetchCalls = [];
+  const syntheticFetch = async (url, init) => {
+    const bodyText = String(init?.body ?? '');
+    fetchCalls.push({ url: String(url), bodyText });
+    if (bodyText.includes('grant_type=authorization_code')) {
+      return new Response(
+        JSON.stringify({ access_token: 'initial-flex', refresh_token: 'refresh-mcp-1', expires_in: 3600 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (bodyText.includes('grant_type=refresh_token')) {
+      return new Response(
+        JSON.stringify({ access_token: `scoped-token-${fetchCalls.length}`, expires_in: 3600 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  let termsCalled = 0;
+  let refreshCalls = 0;
+  const auth = createMcpAuthManager({
+    authPath,
+    env: {},
+    startLoopbackLogin: (cfg, opts) => realStartLoopbackLogin(cfg, { ...opts, fetchImpl: syntheticFetch }),
+    refreshNativeCredential: async (cfg, token, opts) => {
+      refreshCalls++;
+      return realRefreshNativeCredential(cfg, token, { ...opts, fetchImpl: syntheticFetch });
+    },
+    acceptGoogleMainTerms: async () => { termsCalled++; },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+  });
+
+  // Trigger real loopback login via remote callback paste on PassThrough streams.
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let printed = '';
+  output.on('data', (chunk) => {
+    printed += chunk.toString('utf8');
+    const match = printed.match(/https:\/\/accounts\.google\.com\/\S+/);
+    if (match && !input.writableEnded) {
+      const authUrl = new URL(match[0]);
+      const redirectUri = authUrl.searchParams.get('redirect_uri');
+      const state = authUrl.searchParams.get('state');
+      input.end(`${redirectUri}?code=synthetic-mcp-code&state=${state}\n`);
+    }
+  });
+
+  const loginRes = await auth.login({ remote: true, input, output });
+  assert.equal(loginRes.subscriptionTier, 'pro');
+  assert.equal(termsCalled, 1);
+  assert.equal(refreshCalls, 1);
+  assert.equal(fs.statSync(authPath).mode & 0o777, 0o600);
+  assert.equal(auth.status().signedIn, true);
+  assert.equal(auth.status().subscriptionTier, 'pro');
+
+  // Expire access token on disk and fire 3 concurrent getValidCredential calls -> single-flight refresh only calls refresh once!
+  writeStoredCredential(authPath, { refresh: 'refresh-mcp-1', access: 'stale', expires: 1, subscriptionTier: 'pro' });
+  const [c1, c2, c3] = await Promise.all([
+    auth.getValidCredential(),
+    auth.getValidCredential(),
+    auth.getValidCredential(),
+  ]);
+  assert.equal(refreshCalls, 2);
+  assert.equal(c1.access, c2.access);
+  assert.equal(c2.access, c3.access);
+
+  // Logout removes stored credentials.
+  assert.equal(auth.logout(), true);
+  assert.equal(auth.status().signedIn, false);
+});
+
+test('ask_gemini, gemini_search, and gemini_quota work in direct mode, free-tier auto mode, and optional gateway mode', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-tools-test-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const imgPath = path.join(tmpDir, 'sample.png');
+  fs.writeFileSync(imgPath, TINY_PNG);
+  const symImgPath = path.join(tmpDir, 'link.png');
+  fs.symlinkSync(imgPath, symImgPath);
+
+  const makeFrame = (text, { mode = 3, thinking = 2, attribution = 'Used 4 Neon High model', search = false } = {}) => {
+    const str = (n, value) => m(n, Buffer.from(value));
+    const modelExtra = search
+      ? [
+          m(6, Buffer.concat([v(1, 0), v(2, 8), str(3, 'https://example.com/a'), str(5, 'Example A')])),
+          m(6, Buffer.concat([v(1, 8), v(2, 16), str(3, 'https://example.com/b'), str(5, 'Example B')])),
+          m(14, Buffer.concat([str(5, 'Example A'), m(8, str(1, 'https://example.com/a'))])),
+          m(14, Buffer.concat([str(5, 'Example B'), m(8, str(1, 'https://example.com/b'))])),
+        ]
+      : [];
+    const inner = [
+      m(1, Buffer.concat([str(1, 'resp-1'), m(2, str(1, text)), ...modelExtra])),
+      v(9, 1),
+      str(30, attribution),
+      v(41, mode),
+      v(42, thinking),
+      ...(search ? [m(8, m(2, Buffer.concat([str(1, 'google'), v(3, 4)])))] : []),
+    ];
+    return m(1003, m(1, Buffer.concat(inner)));
+  };
+
+  let tier = 'pro';
+  let forceAuthFailOnce = true;
+  const seenTurns = [];
+  const authManager = {
+    getValidCredential: async ({ forceRefresh = false } = {}) => ({
+      type: 'oauth',
+      refresh: 'r1',
+      access: forceRefresh ? 'tok-refreshed' : 'tok-1',
+      expires: Date.now() + 600_000,
+      subscriptionTier: tier,
+    }),
+  };
+
+  const handlers = createMcpToolHandlers({
+    authManager,
+    env: {},
+    uploadImages: async (_token, imgs) => imgs.map((img, i) => ({ blobId: `mcp_blob_${i}`, mimeType: img.mimeType })),
+    openTurn: (accessToken, opts) => {
+      seenTurns.push({ accessToken, opts });
+      if (forceAuthFailOnce) {
+        forceAuthFailOnce = false;
+        return {
+          cancel() {},
+          getSafeStatus: () => ({ httpStatus: 401, grpcStatus: 16, ended: true }),
+          events: (async function* () {
+            throw Object.assign(new Error('auth expired'), { code: 'NATIVE_PERMISSION_OR_AUTH', status: 401 });
+          })(),
+        };
+      }
+      const isSearch = Boolean(opts.allowNativeTools);
+      const isAuto = Boolean(opts.smartModelSelection);
+      const text = isSearch ? 'Grounded answer.' : isAuto ? 'reply:gemini-auto' : 'reply:gemini-neon';
+      const frame = makeFrame(text, {
+        mode: isAuto ? 1 : 3,
+        thinking: opts.thinkingLevel ?? 2,
+        attribution: isAuto ? 'Used 4 Hydrogen model' : 'Used 4 Neon High model',
+        search: isSearch,
+      });
+      return {
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 0, ended: true }),
+        events: (async function* () {
+          yield { type: 'frame', bytes: frame };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('mock') }),
+    decodeUsageInfo: () => ({
+      usageRows: [{ label: 'Daily limit', providerPercent: 25, percentMeaning: 'used' }],
+    }),
+    decodeSubscription: () => ({ tier: 'ultra' }),
+  });
+
+  // 1. ask_gemini retries once after auth refresh and loads both local file PNG and inline data URL
+  const askRes = await handlers.callTool('ask_gemini', {
+    prompt: 'Review these images',
+    system: 'Be concise',
+    model: 'gemini-argon',
+    thinking_level: 'low',
+    images: [{ path: imgPath }, { url: TINY_PNG_URL }],
+  });
+  assert.equal(askRes.isError, undefined, askRes.content?.[0]?.text);
+  assert.equal(askRes.content[0].text, 'reply:gemini-neon');
+  assert.equal(seenTurns.length, 2);
+  assert.equal(seenTurns[1].accessToken, 'tok-refreshed');
+  assert.equal(seenTurns[1].opts.thinkingLevel, 1);
+  assert.equal(seenTurns[1].opts.images.length, 2);
+
+  // 2. Symlinked image path is rejected safely
+  const symRes = await handlers.callTool('ask_gemini', { prompt: 'x', images: [{ path: symImgPath }] });
+  assert.equal(symRes.isError, true);
+  assert.match(symRes.content[0].text, /INVALID_IMAGE_PATH/);
+
+  // 3. Free tier auto-routes ask_gemini to gemini-auto
+  tier = 'free';
+  const freeRes = await handlers.callTool('ask_gemini', { prompt: 'hello', model: 'gemini-neon' });
+  assert.equal(freeRes.isError, undefined, freeRes.content?.[0]?.text);
+  assert.equal(freeRes.content[0].text, 'reply:gemini-auto');
+  assert.equal(seenTurns.at(-1).opts.smartModelSelection, true);
+
+  // 4. gemini_search routes native_search=true with allowNativeTools=true and renders verified Markdown sources
+  tier = 'pro';
+  const searchRes = await handlers.callTool('gemini_search', { query: 'latest node lts' });
+  assert.equal(searchRes.isError, undefined, searchRes.content?.[0]?.text);
+  assert.match(searchRes.content[0].text, /Grounded answer\./);
+  assert.match(searchRes.content[0].text, /### Sources/);
+  assert.match(searchRes.content[0].text, /- \[Example A\]\(https:\/\/example\.com\/a\)/);
+  assert.match(searchRes.content[0].text, /- \[Example B\]\(https:\/\/example\.com\/b\)/);
+  assert.equal(seenTurns.at(-1).opts.allowNativeTools, true);
+
+  // 5. gemini_quota returns formatted subscription + usage rows
+  const quotaRes = await handlers.callTool('gemini_quota', {});
+  assert.equal(quotaRes.isError, undefined);
+  assert.match(quotaRes.content[0].text, /AI Ultra/);
+  assert.match(quotaRes.content[0].text, /Daily limit/);
+
+  // 6. Optional Gateway mode routes through GEMINI_GATEWAY_URL
+  const gwRequests = [];
+  const gwHandlers = createMcpToolHandlers({
+    authManager,
+    env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:49688/', GEMINI_GATEWAY_API_KEY: 'gw-test-key' },
+    fetchImpl: async (url, init) => {
+      gwRequests.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+      return new Response(
+        JSON.stringify({
+          model: 'gemini-neon',
+          choices: [{ message: { content: 'from-gateway', annotations: [{ url_citation: { url: 'https://gw.test', title: 'GW' } }] } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    },
+  });
+  const gwRes = await gwHandlers.callTool('gemini_search', { query: 'gateway search' });
+  assert.equal(gwRes.isError, undefined);
+  assert.match(gwRes.content[0].text, /from-gateway/);
+  assert.match(gwRes.content[0].text, /https:\/\/gw\.test/);
+  assert.equal(gwRequests[0].url, 'http://127.0.0.1:49688/v1/chat/completions');
+  assert.equal(gwRequests[0].headers.Authorization, 'Bearer gw-test-key');
+  assert.equal(gwRequests[0].body.native_search, true);
+
+  // 7. Reject credential-bearing GEMINI_GATEWAY_URL
+  assert.throws(() => resolveGatewayConfig({ GEMINI_GATEWAY_URL: 'http://user:pass@127.0.0.1:18989' }), { code: 'INVALID_GATEWAY_URL' });
+});
+
+test('MCP CLI --version, --help, and unknown command return expected exit codes', async () => {
+  const run = async (argv) => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    let out = '', err = '';
+    stdout.on('data', (c) => { out += c.toString('utf8'); });
+    stderr.on('data', (c) => { err += c.toString('utf8'); });
+    const code = await runMcpCli(argv, { stdout, stderr, env: {} });
+    return { code, out, err };
+  };
+  const v = await run(['--version']);
+  assert.equal(v.code, 0);
+  assert.match(v.out.trim(), /^\d+\.\d+\.\d+$/);
+
+  const h = await run(['--help']);
+  assert.equal(h.code, 0);
+  assert.match(h.out, /mcp-gemini-app/);
+
+  const bad = await run(['bogus']);
+  assert.equal(bad.code, 2);
+  assert.match(bad.err, /Unknown command/);
+});

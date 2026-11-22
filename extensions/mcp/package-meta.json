@@ -1,0 +1,35 @@
+{
+  "name": "mcp-gemini-app",
+  "version": "0.1.0",
+  "description": "Zero-dependency native Google Gemini HTTP/2 MCP server (ask_gemini, gemini_search, gemini_quota) over stdio using your Google Gemini subscription via OAuth.",
+  "license": "MIT",
+  "author": "shawtim",
+  "homepage": "https://github.com/ShawTim/gemini-app2api/blob/main/extensions/mcp/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShawTim/gemini-app2api.git",
+    "directory": "extensions/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/ShawTim/gemini-app2api/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gemini",
+    "gemini-neon",
+    "gemini-hydrogen",
+    "google-search",
+    "claude-code",
+    "cursor",
+    "codex",
+    "opencode",
+    "http2"
+  ],
+  "bin": {
+    "mcp-gemini-app": "./extensions/mcp/cli.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
