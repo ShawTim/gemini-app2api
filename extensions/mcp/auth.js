@@ -114,6 +114,50 @@ function isManagedMcpAuthPayload(raw) {
   return Object.keys(raw).every((k) => MCP_LEGACY_MANAGED_KEYS.has(k));
 }
 
+function unlinkIfSameInode(filePath, expectedStat) {
+  if (!expectedStat) return;
+  try {
+    const current = fs.lstatSync(filePath);
+    if (current.dev === expectedStat.dev && current.ino === expectedStat.ino) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    // Already removed or inaccessible.
+  }
+}
+
+function tryReclaimDeadLock(lockPath) {
+  // Serialize stale-lock reclamation via an exclusive .reclaim mutex so two processes
+  // detecting the same dead lock can never race to unlink a newly acquired lock.
+  const reclaimPath = `${lockPath}.reclaim`;
+  let reclaimFd = null;
+  let reclaimStat = null;
+  try {
+    reclaimFd = fs.openSync(reclaimPath, 'wx', 0o600);
+    reclaimStat = fs.fstatSync(reclaimFd);
+  } catch {
+    return false;
+  }
+  try {
+    const st = fs.lstatSync(lockPath);
+    if (!st.isFile() || Date.now() - st.mtimeMs <= LOCK_STALE_MS) {
+      return false;
+    }
+    const content = fs.readFileSync(lockPath, 'utf8').trim();
+    const holderPid = Number.parseInt(content.split(':')[0], 10);
+    if (!Number.isSafeInteger(holderPid) || holderPid <= 0 || isPidAlive(holderPid)) {
+      return false;
+    }
+    unlinkIfSameInode(lockPath, st);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    unlinkIfSameInode(reclaimPath, reclaimStat);
+    try { fs.closeSync(reclaimFd); } catch {}
+  }
+}
+
 function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
   const dir = path.dirname(authPath);
   const existingDir = assertNotSymlink(dir);
@@ -141,15 +185,8 @@ function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
       try {
         const st = fs.lstatSync(lockPath);
         if (st.isFile() && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-          // Only reclaim an old lock if its owning PID is verifiably dead (never evict a live paused holder).
-          const content = fs.readFileSync(lockPath, 'utf8').trim();
-          const holderPid = Number.parseInt(content.split(':')[0], 10);
-          if (Number.isSafeInteger(holderPid) && holderPid > 0 && !isPidAlive(holderPid)) {
-            const recheck = fs.lstatSync(lockPath);
-            if (recheck.dev === st.dev && recheck.ino === st.ino) {
-              fs.unlinkSync(lockPath);
-              continue;
-            }
+          if (tryReclaimDeadLock(lockPath)) {
+            continue;
           }
         }
       } catch {
@@ -166,13 +203,7 @@ function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
   try {
     return fn();
   } finally {
-    try {
-      // Unlink only if lockPath still refers to our exact inode (never remove another holder's lock).
-      const current = fs.lstatSync(lockPath);
-      if (lockStat && current.dev === lockStat.dev && current.ino === lockStat.ino) {
-        fs.unlinkSync(lockPath);
-      }
-    } catch {}
+    unlinkIfSameInode(lockPath, lockStat);
     try { fs.closeSync(lockFd); } catch {}
   }
 }
@@ -232,20 +263,8 @@ export function readStoredCredential(authPath) {
   };
 }
 
-function writeStoredCredentialUnlocked(authPath, credential) {
-  assertWritableManagedAuthFile(authPath, 'UNSAFE_AUTH_OVERWRITE', 'overwrite');
-  const dir = path.dirname(authPath);
-  const existingDir = assertNotSymlink(dir);
-  if (!existingDir) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    try {
-      fs.chmodSync(dir, 0o700);
-    } catch {
-      // Ignore chmod failures on filesystems that do not support POSIX modes.
-    }
-  }
-  const tempPath = `${authPath}.tmp-${process.pid}-${Date.now()}`;
-  const payload = JSON.stringify(
+function formatManagedAuthPayload(credential) {
+  return JSON.stringify(
     {
       owner: MCP_AUTH_OWNER,
       version: 1,
@@ -259,13 +278,90 @@ function writeStoredCredentialUnlocked(authPath, credential) {
     null,
     2,
   ) + '\n';
-  fs.writeFileSync(tempPath, payload, { mode: 0o600 });
+}
+
+function writeStoredCredentialUnlocked(authPath, credential) {
+  assertWritableManagedAuthFile(authPath, 'UNSAFE_AUTH_OVERWRITE', 'overwrite');
+  const dir = path.dirname(authPath);
+  const existingDir = assertNotSymlink(dir);
+  if (!existingDir) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(dir, 0o700);
+    } catch {
+      // Ignore chmod failures on filesystems that do not support POSIX modes.
+    }
+  }
+  const tempPath = `${authPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tempPath, formatManagedAuthPayload(credential), { mode: 0o600 });
   try {
     fs.chmodSync(tempPath, 0o600);
   } catch {
     // Ignore on non-POSIX filesystems.
   }
   fs.renameSync(tempPath, authPath);
+}
+
+// Inode-pinned update for token refreshes: opens the EXISTING file without O_CREAT so a
+// concurrent logout (unlink) can never be resurrected and a concurrent login (rename to new inode)
+// can never be overwritten even at the OS kernel inode level.
+function updateManagedCredentialInPlace(authPath, expectedRefresh, buildNext) {
+  let fd;
+  try {
+    fd = fs.openSync(authPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
+        code: 'OAUTH_LOGGED_OUT',
+      });
+    }
+    throw err;
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw Object.assign(new Error(`Credential path is not a regular file: ${authPath}`), {
+        code: 'UNSAFE_AUTH_PATH',
+      });
+    }
+    if (stat.size > 1024 * 1024) {
+      throw Object.assign(new Error(`Credential file exceeds maximum size: ${authPath}`), {
+        code: 'UNSAFE_AUTH_OVERWRITE',
+      });
+    }
+    const readBuf = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const n = fs.readSync(fd, readBuf, offset, stat.size - offset, offset);
+      if (n === 0) break;
+      offset += n;
+    }
+    let raw = null;
+    try {
+      raw = JSON.parse(readBuf.subarray(0, offset).toString('utf8'));
+    } catch {
+      raw = null;
+    }
+    if (!isManagedMcpAuthPayload(raw)) {
+      throw Object.assign(
+        new Error(`Refusing to overwrite unmanaged or external credential file: ${authPath}`),
+        { code: 'UNSAFE_AUTH_OVERWRITE' },
+      );
+    }
+    if (raw.refresh.trim() !== expectedRefresh) {
+      throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
+        code: 'OAUTH_ACCOUNT_CHANGED',
+      });
+    }
+    const next = buildNext(raw);
+    const outBuf = Buffer.from(formatManagedAuthPayload(next), 'utf8');
+    fs.writeSync(fd, outBuf, 0, outBuf.length, 0);
+    fs.ftruncateSync(fd, outBuf.length);
+    try { fs.fsyncSync(fd); } catch {}
+    return next;
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
 }
 
 export function writeStoredCredential(authPath, credential) {
@@ -360,7 +456,7 @@ export function createMcpAuthManager({
         });
       }
       const subscriptionTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
-      const commitRefresh = () => {
+      const commitExternalRefresh = () => {
         const currentStored = readStoredCredential(resolvedAuthPath);
         if (authGeneration !== startGen || !currentStored) {
           throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
@@ -381,23 +477,45 @@ export function createMcpAuthManager({
           access: refreshed.accessToken,
           expires: computeExpiresAtMs(refreshed.expiresInSeconds),
           subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentStored.subscriptionTier || 'unknown'),
-          readOnlyExternal: Boolean(currentStored.readOnlyExternal),
+          readOnlyExternal: true,
         };
-        if (currentStored.readOnlyExternal) {
-          // Never write or create lockfiles next to an external/read-only auth file.
-          memoryExternalState = { diskRefresh: startDiskRefresh, cred: next };
-        } else {
-          writeStoredCredentialUnlocked(resolvedAuthPath, next);
-          lastSeenDiskRefresh = next.refresh;
-        }
-        return { ...next, diskRefresh: currentStored.readOnlyExternal ? startDiskRefresh : next.refresh, accountEpoch: startEpoch };
+        // Never write or create lockfiles next to an external/read-only auth file.
+        memoryExternalState = { diskRefresh: startDiskRefresh, cred: next };
+        return { ...next, diskRefresh: startDiskRefresh, accountEpoch: startEpoch };
       };
       // External/unmanaged auth files may live on read-only mounts; never create a .lock file beside them.
       if (credential.readOnlyExternal) {
-        return commitRefresh();
+        return commitExternalRefresh();
       }
-      // Cross-process serialized compare-and-write for MCP-owned auth files.
-      return withAuthFileLock(resolvedAuthPath, commitRefresh);
+      // Cross-process serialized AND inode-pinned compare-and-update for MCP-owned auth files.
+      return withAuthFileLock(resolvedAuthPath, () => {
+        if (authGeneration !== startGen) {
+          throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
+            code: 'OAUTH_LOGGED_OUT',
+          });
+        }
+        let next;
+        try {
+          next = updateManagedCredentialInPlace(resolvedAuthPath, startDiskRefresh, (currentRaw) => ({
+            type: 'oauth',
+            refresh: refreshed.refreshToken || startRefresh,
+            access: refreshed.accessToken,
+            expires: computeExpiresAtMs(refreshed.expiresInSeconds),
+            subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentRaw.subscriptionTier || 'unknown'),
+            readOnlyExternal: false,
+          }));
+        } catch (err) {
+          if (err?.code === 'OAUTH_ACCOUNT_CHANGED') {
+            const latest = readStoredCredential(resolvedAuthPath);
+            accountEpoch++;
+            lastSeenDiskRefresh = latest?.refresh ?? null;
+            memoryExternalState = null;
+          }
+          throw err;
+        }
+        lastSeenDiskRefresh = next.refresh;
+        return { ...next, diskRefresh: next.refresh, accountEpoch: startEpoch };
+      });
     })();
     inflightRefresh = refreshPromise;
     inflightIdentity = startDiskRefresh;
