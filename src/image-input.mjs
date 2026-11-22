@@ -103,12 +103,19 @@ export function decodeImageBytes(data, mimeType) {
   if (!width || !height || width > 32768 || height > 32768 || width * height > MAX_PIXELS) fail('IMAGE_DIMENSIONS_TOO_LARGE', 413);
   return { mimeType, data, width, height };
 }
-export function normalizeImageUrl(url, detail) {
+export function normalizeImageUrl(url, detail, decodedCache) {
   if (detail !== undefined && detail !== 'auto') fail('UNSUPPORTED_IMAGE_DETAIL');
   if (typeof url === 'string' && /^https?:/i.test(url)) return parseRemoteImageUrl(url).href;
-  return decodeImageDataUrl(url).url;
+  const cached = decodedCache?.get(url);
+  if (cached) return cached.url;
+  const decoded = decodeImageDataUrl(url);
+  if (decodedCache) {
+    decodedCache.set(url, decoded);
+    decodedCache.set(decoded.url, decoded);
+  }
+  return decoded.url;
 }
-export function collectImageInputs(messages, resolvedImages) {
+export function collectImageInputs(messages, resolvedImages, decodedCache) {
   let total = 0;
   const images = [], transcript = messages.map(message => {
     if (!Array.isArray(message.content)) return message;
@@ -117,7 +124,7 @@ export function collectImageInputs(messages, resolvedImages) {
       if (message.role !== 'user' || part.type !== 'image_url') fail('UNSUPPORTED_IMAGE_ROLE');
       if (images.length >= MAX_IMAGES) fail('IMAGE_COUNT_EXCEEDED', 413);
       const url = part.image_url?.url;
-      const decoded = resolvedImages ? resolvedImages[images.length] : /^https?:/i.test(url) ? { url: parseRemoteImageUrl(url).href } : decodeImageDataUrl(url);
+      const decoded = resolvedImages ? resolvedImages[images.length] : /^https?:/i.test(url) ? { url: parseRemoteImageUrl(url).href } : (decodedCache?.get(url) ?? decodeImageDataUrl(url));
       const { data, mimeType, width, height } = decoded;
       if ((total += (data?.length ?? 0)) > MAX_TOTAL_IMAGE_BYTES) fail('IMAGES_TOO_LARGE', 413);
       images.push(data ? { data, mimeType, width, height } : decoded);

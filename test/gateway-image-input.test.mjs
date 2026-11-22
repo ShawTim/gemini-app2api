@@ -332,7 +332,7 @@ test('Responses function_call_output accepts array output with input_text/input_
   assert.equal(textArrayNorm.body.messages[2].content, 'part-1 part-2');
   assert.equal(buildCanonicalPrompt(textArrayNorm.body).images.length, 0);
 
-  // 3. Array output with input_text + input_image keeps text on tool message and flushes image as one user message.
+  // 3. Array output with input_text + input_image keeps text on tool message with attribution marker and flushes image as one user message.
   const mixedInput = [
     { role: 'user', content: 'Reply with the single word OK.' },
     call('call_test'),
@@ -340,20 +340,25 @@ test('Responses function_call_output accepts array output with input_text/input_
       type: 'function_call_output',
       call_id: 'call_test',
       output: [
-        { type: 'input_text', text: '1x1 png' },
+        { type: 'input_text', text: 'before ' },
         { type: 'input_image', image_url: pngUrl, detail: 'auto' },
+        { type: 'input_text', text: ' after' },
       ],
     },
   ];
   const mixedNorm = normalizeResponsesRequest({ model: 'gemini-neon', tools: [readImageTool], input: mixedInput });
   assert.deepEqual(mixedNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'user']);
-  assert.equal(mixedNorm.body.messages[2].content, '1x1 png');
-  assert.equal(mixedNorm.body.messages[3].content.length, 1);
-  assert.equal(mixedNorm.body.messages[3].content[0].type, 'image_url');
-  assert.equal(buildCanonicalPrompt(mixedNorm.body).images.length, 1);
+  assert.equal(mixedNorm.body.messages[2].content, 'before \n[Tool image 1 for call_test]\n after');
+  assert.equal(mixedNorm.body.messages[3].content.length, 2);
+  assert.equal(mixedNorm.body.messages[3].content[0].text, '[Tool image 1 for call_test]:');
+  assert.equal(mixedNorm.body.messages[3].content[1].type, 'image_url');
+  const mixedPrompt = buildCanonicalPrompt(mixedNorm.body);
+  assert.equal(mixedPrompt.images.length, 1);
+  assert.match(mixedPrompt.messages[0].content, /"tool_call_id":"call_test","content":"before \\n\[Tool image 1 for call_test\]\\n after"/);
+  assert.match(mixedPrompt.messages[0].content, /\[Tool image 1 for call_test\]:\n\[Attached user image 1: image-1\.png\]/);
   assert.deepEqual(measurePromptImagePayload({ input: mixedInput }), { imageCount: 1, imageUrlChars: pngUrl.length });
 
-  // 4. Image-only array output produces empty string on tool message + flushed user image message.
+  // 4. Image-only array output produces attribution marker on tool message + flushed user image message.
   const imgOnlyNorm = normalizeResponsesRequest({
     model: 'gemini-neon',
     tools: [readImageTool],
@@ -364,30 +369,80 @@ test('Responses function_call_output accepts array output with input_text/input_
     ],
   });
   assert.deepEqual(imgOnlyNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'user']);
-  assert.equal(imgOnlyNorm.body.messages[2].content, '');
+  assert.equal(imgOnlyNorm.body.messages[2].content, '[Tool image 1 for call_img_only]');
   assert.equal(buildCanonicalPrompt(imgOnlyNorm.body).images.length, 1);
 
-  // 5. Two parallel tool outputs with images defer and flush together after the tool group (no PENDING_TOOL_CALLS).
+  // 5. Reversed parallel tool outputs across two groups with distinct PNG dimensions preserve exact attribution and order in canonical prompt.
+  const pngA1 = png({ width: 2, height: 1 }), pngA2 = png({ width: 3, height: 2 }), pngC1 = png({ width: 4, height: 1 });
   const groupNorm = normalizeResponsesRequest({
     model: 'gemini-neon',
     tools: [readImageTool],
     input: [
       { role: 'user', content: 'Compare both' },
       call('call_a', 'a.png'),
-      call('call_b', 'b.png'),
-      { type: 'function_call_output', call_id: 'call_a', output: [{ type: 'input_text', text: 'img A' }, { type: 'input_image', image_url: pngUrl }] },
-      { type: 'function_call_output', call_id: 'call_b', output: [{ type: 'input_text', text: 'img B' }, { type: 'input_image', image_url: pngUrl }] },
+      call('call_b', 'b.txt'),
+      { type: 'function_call_output', call_id: 'call_b', output: [{ type: 'input_text', text: 'text only B' }] },
+      {
+        type: 'function_call_output',
+        call_id: 'call_a',
+        output: [
+          { type: 'input_text', text: 'first A' },
+          { type: 'input_image', image_url: url(pngA1) },
+          { type: 'input_text', text: 'second A' },
+          { type: 'input_image', image_url: url(pngA2) },
+        ],
+      },
+      call('call_c', 'c.png'),
+      { type: 'function_call_output', call_id: 'call_c', output: [{ type: 'input_image', image_url: url(pngC1) }] },
       { role: 'user', content: 'Now summarize' },
     ],
   });
-  assert.deepEqual(groupNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'tool', 'user', 'user']);
-  assert.equal(groupNorm.body.messages[2].content, 'img A');
-  assert.equal(groupNorm.body.messages[3].content, 'img B');
-  assert.equal(groupNorm.body.messages[4].content.length, 2);
-  assert.equal(groupNorm.body.messages[5].content, 'Now summarize');
-  assert.equal(buildCanonicalPrompt(groupNorm.body).images.length, 2);
+  assert.deepEqual(groupNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'tool', 'user', 'assistant', 'tool', 'user', 'user']);
+  assert.equal(groupNorm.body.messages[2].content, 'text only B');
+  assert.match(groupNorm.body.messages[3].content, /first A\n\[Tool image 1 for call_a\]\nsecond A\n\[Tool image 2 for call_a\]/);
+  assert.equal(groupNorm.body.messages[6].content, '[Tool image 3 for call_c]');
+  assert.equal(groupNorm.body.messages[8].content, 'Now summarize');
+  const groupPrompt = buildCanonicalPrompt(groupNorm.body);
+  assert.deepEqual(groupPrompt.images.map(i => [i.width, i.height]), [[2, 1], [3, 2], [4, 1]]);
+  assert.match(groupPrompt.messages[0].content, /\[Tool image 1 for call_a\]:\n\[Attached user image 1: image-1\.png\]\n\[Tool image 2 for call_a\]:\n\[Attached user image 2: image-2\.png\]/);
+  assert.match(groupPrompt.messages[0].content, /\[Tool image 3 for call_c\]:\n\[Attached user image 3: image-3\.png\]/);
 
-  // 6. Large (>4 MiB base64) image in function_call_output uses the image budget slot (not REQUEST_MAX_NON_IMAGE_BYTES).
+  // 6. Strict toolOutput validation rejects output_text, bare text, and logprobs inside function_call_output.
+  for (const badPart of [
+    { type: 'output_text', text: 'nope' },
+    { type: 'text', text: 'nope' },
+    { type: 'input_text', text: 'nope', logprobs: null },
+  ]) {
+    rejected(() => normalizeResponsesRequest({
+      model: 'gemini-neon',
+      tools: [readImageTool],
+      input: [{ role: 'user', content: 'Read' }, call('call_strict'), { type: 'function_call_output', call_id: 'call_strict', output: [badPart] }],
+    }), badPart.logprobs !== undefined ? 'UNSUPPORTED_PARAMETER' : 'UNSUPPORTED_CONTENT_TYPE');
+  }
+
+  // 7. Cross-user + multi-tool-output MAX_IMAGES boundary (256 passes, 257 fails with 413 IMAGE_COUNT_EXCEEDED).
+  const toolImages255 = Array.from({ length: 255 }, () => ({ type: 'input_image', image_url: pngUrl }));
+  const atLimit = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: [{ type: 'input_image', image_url: pngUrl }] },
+      call('call_lim'),
+      { type: 'function_call_output', call_id: 'call_lim', output: toolImages255 },
+    ],
+  });
+  assert.equal(buildCanonicalPrompt(atLimit.body).images.length, MAX_IMAGES);
+  rejected(() => normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: [{ type: 'input_image', image_url: pngUrl }] },
+      call('call_over'),
+      { type: 'function_call_output', call_id: 'call_over', output: [...toolImages255, { type: 'input_image', image_url: pngUrl }] },
+    ],
+  }), 'IMAGE_COUNT_EXCEEDED', 413);
+
+  // 8. Large (>4 MiB base64) image in function_call_output uses the image budget slot (not REQUEST_MAX_NON_IMAGE_BYTES).
   const largePngUrl = url(png({ padding: 3.5 * 1024 * 1024 }));
   const largeToolNorm = normalizeResponsesRequest({
     model: 'gemini-neon',
@@ -400,7 +455,7 @@ test('Responses function_call_output accepts array output with input_text/input_
   });
   assert.equal(buildCanonicalPrompt(largeToolNorm.body).images.length, 1);
 
-  // 7. Non-string, non-array output still fails INVALID_TEXT; empty array fails INVALID_MESSAGE_CONTENT.
+  // 9. Non-string, non-array output still fails INVALID_TEXT; empty array fails INVALID_MESSAGE_CONTENT.
   for (const badOutput of [{ text: 'nope' }, 42, null, undefined]) {
     rejected(() => normalizeResponsesRequest({
       model: 'gemini-neon',
@@ -414,7 +469,7 @@ test('Responses function_call_output accepts array output with input_text/input_
     input: [{ role: 'user', content: 'Read' }, call('call_empty'), { type: 'function_call_output', call_id: 'call_empty', output: [] }],
   }), 'INVALID_MESSAGE_CONTENT');
 
-  // 8. End-to-end HTTP POST /v1/responses uploads the tool-result image and returns compact token usage.
+  // 10. End-to-end HTTP POST /v1/responses uploads the tool-result image and returns compact token usage.
   const f = await fixture({ accountCount: 1, allowFailover: false, turns: [{ text: 'OK', mode: 3 }] });
   t.after(() => f.close());
   let uploadedCount = 0;

@@ -160,7 +160,7 @@ function validateReplayAnnotations(annotations, { chat = false } = {}) {
     }
   }
 }
-function content(value, { assistant = false, responses = false, user = false, prefix = 'messages.content' } = {}) {
+function content(value, { assistant = false, responses = false, user = false, toolOutput = false, prefix = 'messages.content', imageCache } = {}) {
   if (value === null && assistant) return null;
   if (typeof value === 'string') return text(value);
   if (!Array.isArray(value) || !value.length || value.length > 1024) fail('INVALID_MESSAGE_CONTENT');
@@ -171,7 +171,12 @@ function content(value, { assistant = false, responses = false, user = false, pr
       if (!responses) keys(part.image_url, ['url', 'detail'], `${prefix}.image_url`);
       const url = responses ? part.image_url : part.image_url.url;
       const detail = responses ? part.detail : part.image_url.detail;
-      return { type: 'image_url', image_url: { url: normalizeImageUrl(url, detail), detail: 'auto' } };
+      return { type: 'image_url', image_url: { url: normalizeImageUrl(url, detail, imageCache), detail: 'auto' } };
+    }
+    if (toolOutput) {
+      keys(part, ['type', 'text'], prefix);
+      if (part.type !== 'input_text') fail('UNSUPPORTED_CONTENT_TYPE');
+      return { type: 'text', text: text(part.text) };
     }
     keys(part, responses ? ['type', 'text', 'annotations', 'logprobs', 'parsed'] : ['type', 'text'], prefix);
     if (part.parsed !== undefined && (part.parsed !== null || !assistant)) fail('UNSUPPORTED_PARAMETER', 400, `${prefix}.parsed`);
@@ -247,8 +252,8 @@ function stripToolAnnotations(tools) {
 }
 
 /** Also used by the provider; computes the EXACT budgeted wire prompt. */
-export function buildCanonicalPrompt(body, resolvedImages) {
-  const { messages: transcript, images } = collectImageInputs(body.messages, resolvedImages);
+export function buildCanonicalPrompt(body, resolvedImages, decodedImageCache) {
+  const { messages: transcript, images } = collectImageInputs(body.messages, resolvedImages, decodedImageCache);
   if (body.native_search && images.length) fail('NATIVE_SEARCH_IMAGES_UNSUPPORTED');
   const { systemText, userText } = flattenMessages(transcript, { maxChars: MAX_CHARS });
   const instruction = body.native_search
@@ -328,7 +333,8 @@ function validateInertOpenAIFields(payload, { responses = false } = {}) {
   }
 }
 
-export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
+export function normalizeChatRequest(payload, { allowAutoModel = false, _imageCache } = {}) {
+  const imageCache = _imageCache ?? new Map();
   keys(payload, ['model', 'messages', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'stream_options', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed', 'logprobs', 'top_logprobs', 'response_format', 'user', 'metadata', 'stop', 'n', 'service_tier', 'logit_bias', 'verbosity', 'modalities']);
   requestBudget(payload);
   validateInertOpenAIFields(payload);
@@ -378,7 +384,7 @@ export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
     if (role !== 'assistant' && message.tool_calls !== undefined) fail('INVALID_TOOL_CALL');
     if (role !== 'tool' && message.tool_call_id !== undefined) fail('INVALID_TOOL_RESULT');
     const messageContent = role === 'assistant' && message.content === undefined && message.tool_calls !== undefined ? null : message.content;
-    const normalized = { role, content: content(messageContent, { assistant: role === 'assistant', user: role === 'user' }) };
+    const normalized = { role, content: content(messageContent, { assistant: role === 'assistant', user: role === 'user', imageCache }) };
     if (role === 'assistant' && message.tool_calls !== undefined) {
       if (!Array.isArray(message.tool_calls) || !message.tool_calls.length || message.tool_calls.length > 32) fail('INVALID_TOOL_CALL');
       normalized.tool_calls = message.tool_calls.map(call => {
@@ -409,11 +415,12 @@ export function normalizeChatRequest(payload, { allowAutoModel = false } = {}) {
       body.stream_options = { include_usage: payload.stream_options.include_usage };
     }
   }
-  buildCanonicalPrompt(body); // Validate budgets BEFORE any account reservation.
+  buildCanonicalPrompt(body, undefined, imageCache); // Validate budgets BEFORE any account reservation.
   return body;
 }
 
 export function normalizeResponsesRequest(payload, { allowAutoModel = false } = {}) {
+  const imageCache = new Map();
   keys(payload, ['model', 'input', 'instructions', 'tools', 'tool_choice', 'thinking_level', 'reasoning_effort', 'stream', 'store', 'parallel_tool_calls', 'reasoning', 'include', 'prompt_cache_key', 'client_metadata', 'native_search', 'temperature', 'top_p', 'max_output_tokens', 'text', 'user', 'metadata', 'service_tier', 'truncation']);
   requestBudget(payload);
   validateInertOpenAIFields(payload, { responses: true });
@@ -427,6 +434,7 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
   if (input.length > MAX_MESSAGES) fail('REQUEST_TOO_LARGE', 413, 'input');
   const { tools, choice, callName, identities } = normalizeResponsesTools(payload);
   const deferredToolImages = [];
+  let toolImageSeq = 0;
   const flushToolImages = () => {
     if (deferredToolImages.length) messages.push({ role: 'user', content: deferredToolImages.splice(0) });
   };
@@ -447,12 +455,19 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
       if (item.id !== undefined) id(item.id);
       const callId = id(item.call_id);
       if (Array.isArray(item.output)) {
-        const normalized = content(item.output, { user: true, responses: true, prefix: 'input.output' });
+        const normalized = content(item.output, { user: true, responses: true, toolOutput: true, prefix: 'input.output', imageCache });
         if (Array.isArray(normalized)) {
-          const toolText = normalized.filter(part => part.type === 'text').map(part => part.text).join('');
-          const imageParts = normalized.filter(part => part.type === 'image_url');
-          messages.push({ role: 'tool', tool_call_id: callId, content: toolText });
-          deferredToolImages.push(...imageParts);
+          const toolTextParts = [];
+          for (const part of normalized) {
+            if (part.type === 'text') {
+              toolTextParts.push(part.text);
+            } else {
+              const label = `[Tool image ${++toolImageSeq} for ${callId}]`;
+              toolTextParts.push(toolTextParts.length ? `\n${label}\n` : label);
+              deferredToolImages.push({ type: 'text', text: `${label}:` }, part);
+            }
+          }
+          messages.push({ role: 'tool', tool_call_id: callId, content: toolTextParts.join('') });
         } else {
           messages.push({ role: 'tool', tool_call_id: callId, content: normalized });
         }
@@ -462,19 +477,19 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
     } else if (item.type === 'input_text') {
       keys(item, ['type', 'text'], 'input'); messages.push({ role: 'user', content: text(item.text) });
     } else if (item.type === 'input_image') {
-      messages.push({ role: 'user', content: content([item], { user: true, responses: true, prefix: 'input' }) });
+      messages.push({ role: 'user', content: content([item], { user: true, responses: true, prefix: 'input', imageCache }) });
     } else {
       keys(item, ['type', 'id', 'status', 'role', 'content'], 'input');
       if (item.type !== undefined && item.type !== 'message') fail('UNSUPPORTED_INPUT_TYPE');
       if (item.id !== undefined) id(item.id);
       if (item.status !== undefined && (item.role !== 'assistant' || item.status !== 'completed')) fail('INVALID_INPUT_STATUS');
-      messages.push({ role: item.role, content: content(item.content, { assistant: item.role === 'assistant', user: item.role === 'user', responses: true, prefix: 'input.content' }) });
+      messages.push({ role: item.role, content: content(item.content, { assistant: item.role === 'assistant', user: item.role === 'user', responses: true, prefix: 'input.content', imageCache }) });
     }
   }
   flushToolImages();
   const { include: _include, ...inertCompat } = compat;
-  const body = normalizeChatRequest({ ...resolved, ...inertCompat, ...(response_format ? { response_format } : {}), messages, tools, tool_choice: choice, [RESPONSE_TOOL_IDENTITIES]: identities }, { allowAutoModel });
-  const projected = collectImageInputs(body.messages).messages;
+  const body = normalizeChatRequest({ ...resolved, ...inertCompat, ...(response_format ? { response_format } : {}), messages, tools, tool_choice: choice, [RESPONSE_TOOL_IDENTITIES]: identities }, { allowAutoModel, _imageCache: imageCache });
+  const projected = collectImageInputs(body.messages, undefined, imageCache).messages;
   return {
     body,
     systemPrompt: projected.filter(m => ['system', 'developer'].includes(m.role)).map(m => m.content).join('\n'),
