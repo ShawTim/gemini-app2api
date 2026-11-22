@@ -418,4 +418,35 @@ test('OpenCode auth handles account switch and logout cleanly without stale toke
   assert.equal(freeJson.model, 'gemini-auto');
   assert.equal(seenFreeMode, null, 'gemini-auto omits modeCategory so Google routes automatically');
   assert.equal(seenFreeThinking, null, 'gemini-auto strips thinking_level');
+
+  // 7. Retry after NATIVE_PERMISSION_OR_AUTH pins original account epoch: never replays A's prompt to B
+  let retryAuth = { type: 'oauth', refresh: 'retry-A', access: 'retry-A-tok', expires: Date.now() + 600_000 };
+  const retrySeenTokens = [];
+  const retryPlugin = createGeminiAppOpenCodePlugin({
+    refreshNativeCredential: async (_cfg, r) => ({ accessToken: `refreshed-${r}`, expiresInSeconds: 3600 }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    openTurn: (tok) => {
+      retrySeenTokens.push(tok);
+      // Switch to Account B before retry runs!
+      retryAuth = { type: 'oauth', refresh: 'retry-B', access: 'retry-B-tok', expires: Date.now() + 600_000 };
+      return {
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 401, grpcStatus: 16, ended: true }),
+        events: (async function* () {
+          yield { type: 'end', httpStatus: 401, grpcStatus: 16 };
+        })(),
+      };
+    },
+  });
+  const retryHooks = await retryPlugin({});
+  const retryLoaded = await retryHooks.auth.loader(async () => retryAuth);
+  const retryRes = await retryLoaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'A secret' }] }),
+  });
+  assert.equal(retryRes.status, 401);
+  assert.equal((await retryRes.json()).error.code, 'OAUTH_ACCOUNT_CHANGED');
+  assert.deepEqual(retrySeenTokens, ['retry-A-tok']);
 });

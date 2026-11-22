@@ -19,6 +19,7 @@ function computeExpiresAtMs(expiresInSeconds) {
 export function createOpenCodeAuthHook({
   client,
   env = process.env,
+  acceptTerms = env?.GEMINI_OPENCODE_ACCEPT_TERMS === '1',
   startLoopbackLogin = defaultStartLoopbackLogin,
   refreshNativeCredential = defaultRefreshNativeCredential,
   acceptGoogleMainTerms = defaultAcceptGoogleMainTerms,
@@ -30,7 +31,8 @@ export function createOpenCodeAuthHook({
   uploadImages,
   now = Date.now,
 } = {}) {
-  let cachedTier = 'unknown';
+  // Advisory display-only tier for provider.models(); each loader maintains its own isolated { identity, tier }.
+  let displayTierState = { identity: null, tier: 'unknown' };
 
   async function detectSubscriptionTier(accessToken, { signal } = {}) {
     try {
@@ -51,7 +53,7 @@ export function createOpenCodeAuthHook({
     }
   }
 
-  async function finalizeLoginTokens(config, tokens, { acceptTerms = false } = {}) {
+  async function finalizeLoginTokens(config, tokens) {
     if (!tokens || typeof tokens.refreshToken !== 'string' || !tokens.refreshToken) {
       return { type: 'failed' };
     }
@@ -70,10 +72,11 @@ export function createOpenCodeAuthHook({
       detectSubscriptionTier(scoped.accessToken),
       detectAccountId(scoped.accessToken),
     ]);
-    cachedTier = tier;
+    const refresh = scoped.refreshToken || tokens.refreshToken;
+    displayTierState = { identity: refresh, tier };
     return {
       type: 'success',
-      refresh: scoped.refreshToken || tokens.refreshToken,
+      refresh,
       access: scoped.accessToken,
       expires: computeExpiresAtMs(scoped.expiresInSeconds ?? tokens.expiresInSeconds),
       ...(accountId ? { accountId } : {}),
@@ -95,7 +98,7 @@ export function createOpenCodeAuthHook({
       return {
         url: authUrl,
         instructions:
-          'Open the URL in your browser, complete Google sign-in, then copy and paste the full localhost redirect URL (containing code=...) below.',
+          'Open the URL in your browser, complete Google sign-in, then paste the full localhost redirect URL (containing code=...) below. Sign-in does not auto-accept Gemini ToS; accept in https://gemini.google.com/ (or opt in via GEMINI_OPENCODE_ACCEPT_TERMS=1).',
         method: 'code',
         async callback(pastedUrl) {
           try {
@@ -117,7 +120,7 @@ export function createOpenCodeAuthHook({
     return {
       url: authUrl,
       instructions:
-        'Complete Google sign-in in your browser. OpenCode will detect the localhost OAuth callback automatically.',
+        'Complete Google sign-in in your browser. OpenCode will detect the localhost callback automatically. Sign-in does not auto-accept Gemini ToS; accept in https://gemini.google.com/ (or opt in via GEMINI_OPENCODE_ACCEPT_TERMS=1).',
       method: 'auto',
       async callback() {
         try {
@@ -138,14 +141,15 @@ export function createOpenCodeAuthHook({
       return {};
     }
 
-    // Track in-memory refreshed credential and tier strictly keyed by refresh-token identity
-    // so logout or account switching never reuses or writes back a previous account.
+    // Track in-memory credential, tier, and accountEpoch strictly per-loader so concurrent loaders
+    // or account switches/logouts never cross-contaminate tiers, reuse stale tokens, or write back old accounts.
     let liveCred = {
       refresh: initial.refresh,
       access: initial.access || '',
       expires: Number.isFinite(initial.expires) ? initial.expires : 0,
     };
-    let cachedTierIdentity = null;
+    let tierState = { identity: null, tier: 'unknown' };
+    let accountEpoch = 0;
     let inflightRefresh = null;
     let inflightRefreshIdentity = null;
     let inflightTierProbe = null;
@@ -155,8 +159,8 @@ export function createOpenCodeAuthHook({
       const current = await getAuth();
       if (!current || current.type !== 'oauth' || typeof current.refresh !== 'string' || !current.refresh) {
         liveCred = null;
-        cachedTier = 'unknown';
-        cachedTierIdentity = null;
+        tierState = { identity: null, tier: 'unknown' };
+        accountEpoch++;
         throw Object.assign(new Error('Google Gemini OAuth session is signed out. Run /connect to sign in again.'), {
           code: 'OAUTH_LOGGED_OUT',
           status: 401,
@@ -172,15 +176,15 @@ export function createOpenCodeAuthHook({
     };
 
     const resolveTierForIdentity = async (accessToken, identity, { signal } = {}) => {
-      if (cachedTierIdentity === identity) return cachedTier;
+      if (tierState.identity === identity) return tierState.tier;
       if (inflightTierProbe && inflightTierProbeIdentity === identity) {
         return inflightTierProbe;
       }
       const probePromise = (async () => {
         const tier = await detectSubscriptionTier(accessToken, { signal });
         await verifyIdentityMatches(identity);
-        cachedTier = tier;
-        cachedTierIdentity = identity;
+        tierState = { identity, tier };
+        displayTierState = { identity, tier };
         return tier;
       })();
       inflightTierProbe = probePromise;
@@ -199,23 +203,23 @@ export function createOpenCodeAuthHook({
       const latest = await getAuth();
       if (!latest || latest.type !== 'oauth' || typeof latest.refresh !== 'string' || !latest.refresh) {
         liveCred = null;
-        cachedTier = 'unknown';
-        cachedTierIdentity = null;
+        tierState = { identity: null, tier: 'unknown' };
+        accountEpoch++;
         throw Object.assign(new Error('Google Gemini OAuth session is signed out. Run /connect to sign in again.'), {
           code: 'OAUTH_LOGGED_OUT',
           status: 401,
         });
       }
 
-      // Account switch detected: replace in-memory state immediately regardless of expiry timestamp.
+      // Account switch detected: replace in-memory state immediately and bump accountEpoch.
       if (!liveCred || latest.refresh !== liveCred.refresh) {
         liveCred = {
           refresh: latest.refresh,
           access: latest.access || '',
           expires: Number.isFinite(latest.expires) ? latest.expires : 0,
         };
-        cachedTier = 'unknown';
-        cachedTierIdentity = null;
+        tierState = { identity: null, tier: 'unknown' };
+        accountEpoch++;
       } else if (latest.access && Number.isFinite(latest.expires) && latest.expires > liveCred.expires) {
         liveCred = {
           refresh: latest.refresh,
@@ -224,11 +228,12 @@ export function createOpenCodeAuthHook({
         };
       }
 
+      const activeEpoch = accountEpoch;
       if (!forceRefresh && liveCred.access && liveCred.expires > now() + 60_000) {
         const currentIdentity = liveCred.refresh;
         const currentAccess = liveCred.access;
         const subscriptionTier = await resolveTierForIdentity(currentAccess, currentIdentity, { signal });
-        return { accessToken: currentAccess, subscriptionTier };
+        return { accessToken: currentAccess, subscriptionTier, accountEpoch: activeEpoch };
       }
 
       const startRefreshIdentity = liveCred.refresh;
@@ -256,8 +261,8 @@ export function createOpenCodeAuthHook({
           expires: computeExpiresAtMs(refreshed.expiresInSeconds),
         };
         liveCred = nextCred;
-        cachedTier = tier;
-        cachedTierIdentity = nextCred.refresh;
+        tierState = { identity: nextCred.refresh, tier };
+        displayTierState = { identity: nextCred.refresh, tier };
         try {
           await client?.auth?.set?.({
             path: { id: PROVIDER_ID },
@@ -271,7 +276,7 @@ export function createOpenCodeAuthHook({
         } catch {
           // Non-fatal: keep refreshed access token in memory even if client persistence fails.
         }
-        return { accessToken: nextCred.access, subscriptionTier: tier };
+        return { accessToken: nextCred.access, subscriptionTier: tier, accountEpoch: activeEpoch };
       })();
 
       inflightRefresh = refreshPromise;
@@ -290,7 +295,7 @@ export function createOpenCodeAuthHook({
       apiKey: 'gemini-app-oauth',
       fetch: createOpenCodeFetch({
         resolveAccessToken,
-        getSubscriptionTier: () => cachedTier,
+        getSubscriptionTier: () => tierState.tier,
         ...(openTurn ? { openTurn } : {}),
         ...(uploadImages ? { uploadImages } : {}),
       }),
@@ -314,6 +319,6 @@ export function createOpenCodeAuthHook({
         },
       ],
     },
-    getSubscriptionTier: () => cachedTier,
+    getSubscriptionTier: () => displayTierState.tier,
   };
 }

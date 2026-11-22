@@ -256,7 +256,7 @@ export function createMcpDispatcher({ toolHandlers, name = 'gemini-app2api', ver
     const hasId = Object.hasOwn(message, 'id') && message.id !== undefined;
     const id = hasId ? message.id : null;
     if (message.jsonrpc !== '2.0' || typeof message.method !== 'string' || !message.method) {
-      return hasId ? jsonRpcError(id, -32600, 'Invalid Request') : null;
+      return jsonRpcError(hasId ? id : null, -32600, 'Invalid Request');
     }
 
     const { method, params } = message;

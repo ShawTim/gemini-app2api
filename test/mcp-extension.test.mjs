@@ -421,6 +421,75 @@ test('MCP authManager treats external multi-provider Pi auth.json as strictly re
   releaseRefresh();
   await assert.rejects(() => pendingRefresh, { code: 'OAUTH_LOGGED_OUT' });
   assert.equal(fs.existsSync(ownedPath), false);
+
+  // Foreign file with version:1 + type:'oauth' + refresh BUT extra app-specific keys is refused fail-closed.
+  const foreignOauthPath = path.join(tmpDir, 'foreign-oauth.json');
+  const foreignPayload = { version: 1, type: 'oauth', refresh: 'foreign-r', foreignAppSecret: 'keep' };
+  fs.writeFileSync(foreignOauthPath, JSON.stringify(foreignPayload), { mode: 0o600 });
+  const foreignAuth = createMcpAuthManager({ authPath: foreignOauthPath, env: {} });
+  assert.throws(() => foreignAuth.logout(), { code: 'REFUSE_DELETE_EXTERNAL_AUTH' });
+  await assert.rejects(() => foreignAuth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(foreignOauthPath, 'utf8')), foreignPayload);
+
+  // External read-only Pi file retains rotated refresh tokens in memory without touching disk.
+  const rotPiPath = path.join(tmpDir, 'pi-rot.json');
+  fs.writeFileSync(rotPiPath, JSON.stringify({
+    anthropic: { key: 'keep' },
+    'gemini-app': { type: 'oauth', refresh: 'pi-orig-refresh', access: 'stale', expires: 1 },
+  }), { mode: 0o600 });
+  const seenRefreshes = [];
+  const rotAuth = createMcpAuthManager({
+    authPath: rotPiPath,
+    env: {},
+    refreshNativeCredential: async (_cfg, r) => {
+      seenRefreshes.push(r);
+      return { refreshToken: 'pi-rotated-refresh', accessToken: `tok-${seenRefreshes.length}`, expiresInSeconds: 3600 };
+    },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+  });
+  const r1 = await rotAuth.getValidCredential();
+  assert.equal(r1.access, 'tok-1');
+  // Next call hits in-memory rotated credential even though disk still has pi-orig-refresh.
+  const r2 = await rotAuth.getValidCredential();
+  assert.equal(r2.access, 'tok-1');
+  assert.equal(seenRefreshes.length, 1);
+  // Forced refresh uses rotated refresh token rather than stale disk token.
+  const r3 = await rotAuth.getValidCredential({ forceRefresh: true });
+  assert.equal(r3.access, 'tok-2');
+  assert.deepEqual(seenRefreshes, ['pi-orig-refresh', 'pi-rotated-refresh']);
+
+  // Direct tool retry pins original account epoch: switching account after attempt 1 fails closed.
+  const pinPath = path.join(tmpDir, 'pin-auth.json');
+  writeStoredCredential(pinPath, { refresh: 'acct-A', access: 'tok-A', expires: Date.now() + 600_000, subscriptionTier: 'pro' });
+  const pinAuth = createMcpAuthManager({
+    authPath: pinPath,
+    env: {},
+    refreshNativeCredential: async (_cfg, r) => ({ accessToken: `fresh-${r}`, expiresInSeconds: 3600 }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+  });
+  let pinTurnCalls = 0;
+  const pinTools = createMcpToolHandlers({
+    authManager: pinAuth,
+    env: {},
+    openTurn: () => {
+      pinTurnCalls++;
+      // Switch stored account on disk to acct-B before retry!
+      writeStoredCredential(pinPath, { refresh: 'acct-B', access: 'tok-B', expires: Date.now() + 600_000, subscriptionTier: 'pro' });
+      return {
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 401, grpcStatus: 16, ended: true }),
+        events: (async function* () {
+          yield { type: 'end', httpStatus: 401, grpcStatus: 16 };
+        })(),
+      };
+    },
+  });
+  const pinRes = await pinTools.callTool('ask_gemini', { prompt: 'secret for A' });
+  assert.equal(pinRes.isError, true);
+  assert.match(pinRes.content[0].text, /OAUTH_ACCOUNT_CHANGED/);
+  assert.equal(pinTurnCalls, 1, 'must never replay Account A prompt to Account B');
 });
 
 test('MCP stdio server drops only an oversized line and continues serving subsequent lines in the same chunk', async () => {

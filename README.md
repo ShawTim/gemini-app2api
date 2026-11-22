@@ -110,6 +110,7 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
   {
     "mcpServers": {
       "gemini-app": {
+        "type": "http",
         "url": "http://127.0.0.1:18989/mcp",
         "headers": {
           "Authorization": "Bearer ${GEMINI_GATEWAY_KEY}"

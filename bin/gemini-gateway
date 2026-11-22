@@ -117,8 +117,8 @@ try {
       // so the gateway's req/res close listener aborts upstream generation immediately.
       if (!hasId && parsed.method === "notifications/cancelled") {
         const targetId = parsed.params?.requestId;
-        if (targetId !== undefined && targetId !== null) {
-          const entry = activeById.get(String(targetId));
+        if (typeof targetId === "string" || typeof targetId === "number") {
+          const entry = activeById.get(`${typeof targetId}:${targetId}`);
           if (entry) {
             entry.cancel();
           }
@@ -141,7 +141,8 @@ try {
       let cancelledByClient = false;
       const timeoutId = setTimeout(() => controller.abort(new Error("Gateway /mcp request timed out")), requestTimeoutMs);
       timeoutId.unref?.();
-      const idKey = hasId && reqId !== null && reqId !== undefined ? String(reqId) : null;
+      // Preserve JSON-RPC ID type (number vs string) so id 1 and id "1" never collide.
+      const idKey = hasId && (typeof reqId === "string" || typeof reqId === "number") ? `${typeof reqId}:${reqId}` : null;
       const entry = {
         controller,
         cancel() {

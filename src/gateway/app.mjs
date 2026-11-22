@@ -248,7 +248,7 @@ function json(res, value, status = 200) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(value));
 }
-async function readJson(req, limit) {
+async function readJson(req, limit, { distinguishNonObject = false } = {}) {
   if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] ?? ""))
     throw fault("JSON_CONTENT_TYPE_REQUIRED", 415);
   const chunks = [];
@@ -261,22 +261,25 @@ async function readJson(req, limit) {
     }
     chunks.push(chunk);
   }
+  let text;
+  let value;
   try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(
-        Buffer.concat(chunks),
-      ),
-      value = JSON.parse(text);
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      throw Error();
-    // Two different measurements. The usage estimator works in characters; an
-    // operator-facing byte limit must compare UTF-8 bytes, otherwise non-ASCII input
-    // is undercounted by up to 3x. `length` is the raw received body byte count.
-    Object.defineProperty(value, "__promptChars", { value: text.length, enumerable: false });
-    Object.defineProperty(value, "__promptBytes", { value: length, enumerable: false });
-    return value;
+    text = new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(chunks),
+    );
+    value = JSON.parse(text);
   } catch {
     throw fault("INVALID_JSON");
   }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw fault(distinguishNonObject ? "INVALID_REQUEST" : "INVALID_JSON");
+  }
+  // Two different measurements. The usage estimator works in characters; an
+  // operator-facing byte limit must compare UTF-8 bytes, otherwise non-ASCII input
+  // is undercounted by up to 3x. `length` is the raw received body byte count.
+  Object.defineProperty(value, "__promptChars", { value: text.length, enumerable: false });
+  Object.defineProperty(value, "__promptBytes", { value: length, enumerable: false });
+  return value;
 }
 function only(obj, keys) {
   const unexpected = Object.keys(obj).find((k) => !keys.includes(k));
@@ -1074,7 +1077,7 @@ export function createGateway({
         }
         let rpcMessage;
         try {
-          rpcMessage = await readJson(req, store.settings().maxBodyBytes);
+          rpcMessage = await readJson(req, store.settings().maxBodyBytes, { distinguishNonObject: true });
         } catch (err) {
           if (err?.code === "INVALID_JSON") {
             return json(res, jsonRpcError(null, -32700, "Parse error"), 200);

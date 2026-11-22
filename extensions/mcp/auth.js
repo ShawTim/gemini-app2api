@@ -68,17 +68,79 @@ function assertNotSymlink(targetPath) {
   return stat;
 }
 
+const MCP_AUTH_OWNER = 'mcp-gemini-app';
+const MCP_MANAGED_KEYS = new Set([
+  'owner',
+  'version',
+  'type',
+  'refresh',
+  'access',
+  'expires',
+  'subscriptionTier',
+  'updatedAt',
+]);
+const LOCK_STALE_MS = 10_000;
+const LOCK_TIMEOUT_MS = 2_000;
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSyncMs(ms) {
+  try {
+    Atomics.wait(SLEEP_BUF, 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* bounded fallback */ }
+  }
+}
+
 function isManagedMcpAuthPayload(raw) {
-  return Boolean(
-    raw &&
-    typeof raw === 'object' &&
-    !Array.isArray(raw) &&
-    raw.type === 'oauth' &&
-    raw.version === 1 &&
-    typeof raw.refresh === 'string' &&
-    raw.refresh.trim() &&
-    !Object.hasOwn(raw, 'gemini-app'),
-  );
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  if (raw.type !== 'oauth' || raw.version !== 1) return false;
+  if (typeof raw.refresh !== 'string' || !raw.refresh.trim()) return false;
+  if (Object.hasOwn(raw, 'gemini-app')) return false;
+  if (raw.owner === MCP_AUTH_OWNER) return true;
+  // Backwards-compatible check for pre-owner MCP files: reject if ANY foreign key is present.
+  return Object.keys(raw).every((k) => MCP_MANAGED_KEYS.has(k));
+}
+
+function withAuthFileLock(authPath, fn, { createParentDir = false } = {}) {
+  const dir = path.dirname(authPath);
+  const existingDir = assertNotSymlink(dir);
+  if (!existingDir) {
+    if (!createParentDir) return fn();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(dir, 0o700); } catch {}
+  }
+  const lockPath = `${authPath}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let lockFd = null;
+  while (lockFd === null) {
+    try {
+      lockFd = fs.openSync(lockPath, 'wx', 0o600);
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        const st = fs.lstatSync(lockPath);
+        if (st.isFile() && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw Object.assign(new Error(`Timed out waiting for auth file lock: ${lockPath}`), {
+          code: 'AUTH_LOCK_TIMEOUT',
+        });
+      }
+      sleepSyncMs(15);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try { fs.closeSync(lockFd); } catch {}
+    try { fs.unlinkSync(lockPath); } catch {}
+  }
 }
 
 function assertWritableManagedAuthFile(authPath, code, actionVerb) {
@@ -136,7 +198,7 @@ export function readStoredCredential(authPath) {
   };
 }
 
-export function writeStoredCredential(authPath, credential) {
+function writeStoredCredentialUnlocked(authPath, credential) {
   assertWritableManagedAuthFile(authPath, 'UNSAFE_AUTH_OVERWRITE', 'overwrite');
   const dir = path.dirname(authPath);
   const existingDir = assertNotSymlink(dir);
@@ -151,6 +213,7 @@ export function writeStoredCredential(authPath, credential) {
   const tempPath = `${authPath}.tmp-${process.pid}-${Date.now()}`;
   const payload = JSON.stringify(
     {
+      owner: MCP_AUTH_OWNER,
       version: 1,
       type: 'oauth',
       refresh: credential.refresh,
@@ -171,11 +234,19 @@ export function writeStoredCredential(authPath, credential) {
   fs.renameSync(tempPath, authPath);
 }
 
+export function writeStoredCredential(authPath, credential) {
+  return withAuthFileLock(authPath, () => writeStoredCredentialUnlocked(authPath, credential), {
+    createParentDir: true,
+  });
+}
+
 export function clearStoredCredential(authPath) {
-  const stat = assertWritableManagedAuthFile(authPath, 'REFUSE_DELETE_EXTERNAL_AUTH', 'delete');
-  if (!stat) return false;
-  fs.unlinkSync(authPath);
-  return true;
+  return withAuthFileLock(authPath, () => {
+    const stat = assertWritableManagedAuthFile(authPath, 'REFUSE_DELETE_EXTERNAL_AUTH', 'delete');
+    if (!stat) return false;
+    fs.unlinkSync(authPath);
+    return true;
+  });
 }
 
 export function createMcpAuthManager({
@@ -194,7 +265,10 @@ export function createMcpAuthManager({
   let inflightIdentity = null;
   let inflightGen = -1;
   let authGeneration = 0;
-  let memoryExternalCred = null;
+  let accountEpoch = 0;
+  let lastSeenDiskRefresh = null;
+  // Separate external file identity (diskRefresh) from live in-memory rotated credential.
+  let memoryExternalState = null;
 
   async function detectSubscriptionTier(accessToken, { signal } = {}) {
     try {
@@ -209,15 +283,24 @@ export function createMcpAuthManager({
   function loadCredential() {
     const stored = readStoredCredential(resolvedAuthPath);
     if (!stored) {
-      memoryExternalCred = null;
+      if (lastSeenDiskRefresh !== null) {
+        accountEpoch++;
+        lastSeenDiskRefresh = null;
+      }
+      memoryExternalState = null;
       return null;
     }
-    if (stored.readOnlyExternal && memoryExternalCred && memoryExternalCred.refresh === stored.refresh) {
-      if (memoryExternalCred.expires > stored.expires) {
-        return memoryExternalCred;
+    if (lastSeenDiskRefresh !== null && lastSeenDiskRefresh !== stored.refresh) {
+      accountEpoch++;
+      memoryExternalState = null;
+    }
+    lastSeenDiskRefresh = stored.refresh;
+    if (stored.readOnlyExternal && memoryExternalState && memoryExternalState.diskRefresh === stored.refresh) {
+      if (memoryExternalState.cred.expires > stored.expires) {
+        return { ...memoryExternalState.cred, diskRefresh: stored.refresh, accountEpoch };
       }
     }
-    return stored;
+    return { ...stored, diskRefresh: stored.refresh, accountEpoch };
   }
 
   async function refreshCredential(credential, { signal } = {}) {
@@ -228,8 +311,10 @@ export function createMcpAuthManager({
       );
     }
     const startRefresh = credential.refresh;
+    const startDiskRefresh = credential.diskRefresh || credential.refresh;
     const startGen = authGeneration;
-    if (inflightRefresh && inflightIdentity === startRefresh && inflightGen === startGen) {
+    const startEpoch = credential.accountEpoch ?? accountEpoch;
+    if (inflightRefresh && inflightIdentity === startDiskRefresh && inflightGen === startGen) {
       return inflightRefresh;
     }
     const refreshPromise = (async () => {
@@ -241,37 +326,43 @@ export function createMcpAuthManager({
         });
       }
       const subscriptionTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
-      // Re-verify login generation and stored account identity after all network waits
-      // so logout or account switching never resurrects or returns a previous account.
-      const currentStored = readStoredCredential(resolvedAuthPath);
-      if (authGeneration !== startGen || !currentStored) {
-        throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
-          code: 'OAUTH_LOGGED_OUT',
-        });
-      }
-      if (currentStored.refresh !== startRefresh) {
-        throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
-          code: 'OAUTH_ACCOUNT_CHANGED',
-        });
-      }
-      const next = {
-        type: 'oauth',
-        refresh: refreshed.refreshToken || startRefresh,
-        access: refreshed.accessToken,
-        expires: computeExpiresAtMs(refreshed.expiresInSeconds),
-        subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentStored.subscriptionTier || 'unknown'),
-        readOnlyExternal: Boolean(currentStored.readOnlyExternal),
-      };
-      if (currentStored.readOnlyExternal) {
-        // Never mutate or overwrite an external/unmanaged auth file; retain refreshed token in memory only.
-        memoryExternalCred = next;
-      } else {
-        writeStoredCredential(resolvedAuthPath, next);
-      }
-      return next;
+      // Cross-process serialized compare-and-write so concurrent CLI logout or account switch
+      // cannot be resurrected or overwritten by an in-flight refresh.
+      return withAuthFileLock(resolvedAuthPath, () => {
+        const currentStored = readStoredCredential(resolvedAuthPath);
+        if (authGeneration !== startGen || !currentStored) {
+          throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
+            code: 'OAUTH_LOGGED_OUT',
+          });
+        }
+        if (currentStored.refresh !== startDiskRefresh) {
+          accountEpoch++;
+          lastSeenDiskRefresh = currentStored.refresh;
+          memoryExternalState = null;
+          throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
+            code: 'OAUTH_ACCOUNT_CHANGED',
+          });
+        }
+        const next = {
+          type: 'oauth',
+          refresh: refreshed.refreshToken || startRefresh,
+          access: refreshed.accessToken,
+          expires: computeExpiresAtMs(refreshed.expiresInSeconds),
+          subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentStored.subscriptionTier || 'unknown'),
+          readOnlyExternal: Boolean(currentStored.readOnlyExternal),
+        };
+        if (currentStored.readOnlyExternal) {
+          // Never mutate an external/unmanaged file; track rotated refresh token separately from diskRefresh.
+          memoryExternalState = { diskRefresh: startDiskRefresh, cred: next };
+        } else {
+          writeStoredCredentialUnlocked(resolvedAuthPath, next);
+          lastSeenDiskRefresh = next.refresh;
+        }
+        return { ...next, diskRefresh: currentStored.readOnlyExternal ? startDiskRefresh : next.refresh, accountEpoch: startEpoch };
+      });
     })();
     inflightRefresh = refreshPromise;
-    inflightIdentity = startRefresh;
+    inflightIdentity = startDiskRefresh;
     inflightGen = startGen;
     try {
       return await refreshPromise;
@@ -284,13 +375,18 @@ export function createMcpAuthManager({
     }
   }
 
-  async function getValidCredential({ signal, forceRefresh = false } = {}) {
+  async function getValidCredential({ signal, forceRefresh = false, expectedAccountEpoch } = {}) {
     const stored = loadCredential();
     if (!stored) {
       throw Object.assign(
         new Error('Not signed in to Google Gemini. Run `npx mcp-gemini-app login` in your terminal first (or set GEMINI_GATEWAY_URL).'),
-        { code: 'MCP_AUTH_REQUIRED' },
+        { code: expectedAccountEpoch !== undefined ? 'OAUTH_LOGGED_OUT' : 'MCP_AUTH_REQUIRED' },
       );
+    }
+    if (expectedAccountEpoch !== undefined && stored.accountEpoch !== expectedAccountEpoch) {
+      throw Object.assign(new Error('Google Gemini account changed before retry; aborting to prevent cross-account replay.'), {
+        code: 'OAUTH_ACCOUNT_CHANGED',
+      });
     }
     if (!forceRefresh && stored.access && stored.expires > now() + 60_000) {
       return stored;
@@ -369,8 +465,10 @@ export function createMcpAuthManager({
         subscriptionTier,
       };
       authGeneration++;
-      memoryExternalCred = null;
+      accountEpoch++;
+      memoryExternalState = null;
       writeStoredCredential(resolvedAuthPath, credential);
+      lastSeenDiskRefresh = credential.refresh;
       return {
         authPath: resolvedAuthPath,
         subscriptionTier,
@@ -385,7 +483,9 @@ export function createMcpAuthManager({
 
   function logout() {
     authGeneration++;
-    memoryExternalCred = null;
+    accountEpoch++;
+    lastSeenDiskRefresh = null;
+    memoryExternalState = null;
     return clearStoredCredential(resolvedAuthPath);
   }
 

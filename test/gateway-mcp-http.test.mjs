@@ -112,7 +112,7 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
   const askSchema = listBody.result.tools.find((x) => x.name === 'ask_gemini').inputSchema;
   assert.equal(Object.hasOwn(askSchema.properties.images.items.properties, 'path'), false);
 
-  const badJsonRes = await f.request('/mcp', {
+  const badJsonRes = await fetch(`${f.base}/mcp`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${f.key.key}`, 'Content-Type': 'application/json' },
     body: '{bad',
@@ -350,4 +350,12 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
   assert.equal(cancelOutLines.some((x) => x.id === 202), true);
   assert.equal(cancelOutLines.some((x) => x.id === 201), false);
   f.app.provider.runTurn = origTurn;
+
+  // 14. JSON-RPC error contract: valid JSON array [] and empty object {} both return -32600 (not -32700 or 202)
+  const arrRes = await f.api('/mcp', { method: 'POST', body: [] });
+  assert.equal(arrRes.status, 200);
+  assert.equal((await arrRes.json()).error.code, -32600);
+  const emptyObjRes = await f.api('/mcp', { method: 'POST', body: {} });
+  assert.equal(emptyObjRes.status, 200);
+  assert.equal((await emptyObjRes.json()).error.code, -32600);
 });

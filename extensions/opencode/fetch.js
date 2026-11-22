@@ -106,10 +106,12 @@ export function createOpenCodeFetch({
     let attempts = 0;
     let recoveryCode;
     let authRefreshed = false;
+    let pinnedAccountEpoch;
 
     while (true) {
       let currentToken;
       let currentTier;
+      let currentEpoch;
       try {
         const resolved = await resolveAccessToken({ signal, forceRefresh: authRefreshed });
         if (typeof resolved === 'string') {
@@ -118,10 +120,21 @@ export function createOpenCodeFetch({
         } else {
           currentToken = resolved?.accessToken;
           currentTier = resolved?.subscriptionTier ?? getSubscriptionTier();
+          currentEpoch = resolved?.accountEpoch;
         }
         if (typeof currentToken !== 'string' || !currentToken) {
           throw Object.assign(new Error('OAuth did not return a valid access token'), {
             code: 'OAUTH_REFRESH_FAILED',
+            status: 401,
+          });
+        }
+        // Pin retries strictly to the original request's account epoch so switching accounts
+        // between attempt 1 and automatic recovery/auth retry never replays Account A's prompt to Account B.
+        if (pinnedAccountEpoch === undefined) {
+          pinnedAccountEpoch = currentEpoch;
+        } else if (currentEpoch !== undefined && currentEpoch !== pinnedAccountEpoch) {
+          throw Object.assign(new Error('Google Gemini account changed before retry; aborting to prevent cross-account replay.'), {
+            code: 'OAUTH_ACCOUNT_CHANGED',
             status: 401,
           });
         }
@@ -167,7 +180,7 @@ export function createOpenCodeFetch({
         const commitState = getOutputCommitState();
         const committed = commitState.publishedBytes > 0 || commitState.toolCallCount > 0;
         if (!committed && !signal?.aborted) {
-          if (err?.code === 'NATIVE_PERMISSION_OR_AUTH' && !authRefreshed) {
+          if ((err?.code === 'NATIVE_PERMISSION_OR_AUTH' || err?.code === 'NATIVE_AUTH_REJECTED') && !authRefreshed) {
             authRefreshed = true;
             continue;
           }

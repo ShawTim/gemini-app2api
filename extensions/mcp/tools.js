@@ -241,8 +241,14 @@ export function createMcpToolHandlers({
     try {
       return await invoke(cred.access);
     } catch (err) {
-      if (err?.code === 'NATIVE_PERMISSION_OR_AUTH' && !signal?.aborted) {
-        const refreshed = await authManager.getValidCredential({ signal, forceRefresh: true });
+      if ((err?.code === 'NATIVE_PERMISSION_OR_AUTH' || err?.code === 'NATIVE_AUTH_REJECTED') && !signal?.aborted) {
+        // Pin retry strictly to the original request's account epoch so switching accounts
+        // between attempt 1 and retry can never send Account A's prompt/images to Account B.
+        const refreshed = await authManager.getValidCredential({
+          signal,
+          forceRefresh: true,
+          ...(cred.accountEpoch !== undefined ? { expectedAccountEpoch: cred.accountEpoch } : {}),
+        });
         return await invoke(refreshed.access);
       }
       throw err;

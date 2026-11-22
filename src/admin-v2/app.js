@@ -1119,6 +1119,7 @@ function presetSnippetText(preset = S.preset) {
     return JSON.stringify({
       mcpServers: {
         'gemini-app': {
+          type: 'http',
           url: mcpUrl,
           headers: {
             Authorization: 'Bearer ${GEMINI_GATEWAY_KEY}',
@@ -1516,6 +1517,7 @@ function snippet() {
   if (S.snippet === 'mcp-http') return JSON.stringify({
     mcpServers: {
       'gemini-app': {
+        type: 'http',
         url: mcpUrl,
         headers: {
           Authorization: 'Bearer ${GEMINI_GATEWAY_KEY}',
