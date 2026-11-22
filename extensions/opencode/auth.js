@@ -36,11 +36,9 @@ export function createOpenCodeAuthHook({
     try {
       const { payload } = await fetchGoogleUsageInfo(accessToken, { signal, timeoutMs: 8000 });
       const sub = decodeSubscription(payload);
-      const tier = typeof sub?.tier === 'string' && sub.tier ? sub.tier : 'unknown';
-      if (tier !== 'unknown') cachedTier = tier;
-      return tier;
+      return typeof sub?.tier === 'string' && sub.tier ? sub.tier : 'unknown';
     } catch {
-      return cachedTier;
+      return 'unknown';
     }
   }
 
@@ -53,7 +51,7 @@ export function createOpenCodeAuthHook({
     }
   }
 
-  async function finalizeLoginTokens(config, tokens) {
+  async function finalizeLoginTokens(config, tokens, { acceptTerms = false } = {}) {
     if (!tokens || typeof tokens.refreshToken !== 'string' || !tokens.refreshToken) {
       return { type: 'failed' };
     }
@@ -61,10 +59,12 @@ export function createOpenCodeAuthHook({
     if (!scoped?.accessToken) {
       return { type: 'failed' };
     }
-    try {
-      await acceptGoogleMainTerms(scoped.accessToken, { timeoutMs: 15_000 });
-    } catch {
-      // Non-fatal: accounts with already-accepted terms proceed cleanly.
+    if (acceptTerms === true) {
+      try {
+        await acceptGoogleMainTerms(scoped.accessToken, { timeoutMs: 15_000 });
+      } catch {
+        // Non-fatal: accounts with already-accepted terms proceed cleanly.
+      }
     }
     const [tier, accountId] = await Promise.all([
       detectSubscriptionTier(scoped.accessToken),
@@ -138,21 +138,69 @@ export function createOpenCodeAuthHook({
       return {};
     }
 
-    // Track in-memory refreshed credential strictly keyed by refresh-token identity
+    // Track in-memory refreshed credential and tier strictly keyed by refresh-token identity
     // so logout or account switching never reuses or writes back a previous account.
     let liveCred = {
       refresh: initial.refresh,
       access: initial.access || '',
       expires: Number.isFinite(initial.expires) ? initial.expires : 0,
     };
+    let cachedTierIdentity = null;
     let inflightRefresh = null;
     let inflightRefreshIdentity = null;
+    let inflightTierProbe = null;
+    let inflightTierProbeIdentity = null;
+
+    const verifyIdentityMatches = async (expectedRefresh) => {
+      const current = await getAuth();
+      if (!current || current.type !== 'oauth' || typeof current.refresh !== 'string' || !current.refresh) {
+        liveCred = null;
+        cachedTier = 'unknown';
+        cachedTierIdentity = null;
+        throw Object.assign(new Error('Google Gemini OAuth session is signed out. Run /connect to sign in again.'), {
+          code: 'OAUTH_LOGGED_OUT',
+          status: 401,
+        });
+      }
+      if (current.refresh !== expectedRefresh) {
+        throw Object.assign(new Error('Google Gemini OAuth account changed during token refresh; retry request.'), {
+          code: 'OAUTH_ACCOUNT_CHANGED',
+          status: 401,
+        });
+      }
+      return current;
+    };
+
+    const resolveTierForIdentity = async (accessToken, identity, { signal } = {}) => {
+      if (cachedTierIdentity === identity) return cachedTier;
+      if (inflightTierProbe && inflightTierProbeIdentity === identity) {
+        return inflightTierProbe;
+      }
+      const probePromise = (async () => {
+        const tier = await detectSubscriptionTier(accessToken, { signal });
+        await verifyIdentityMatches(identity);
+        cachedTier = tier;
+        cachedTierIdentity = identity;
+        return tier;
+      })();
+      inflightTierProbe = probePromise;
+      inflightTierProbeIdentity = identity;
+      try {
+        return await probePromise;
+      } finally {
+        if (inflightTierProbe === probePromise) {
+          inflightTierProbe = null;
+          inflightTierProbeIdentity = null;
+        }
+      }
+    };
 
     const resolveAccessToken = async ({ signal, forceRefresh = false } = {}) => {
       const latest = await getAuth();
       if (!latest || latest.type !== 'oauth' || typeof latest.refresh !== 'string' || !latest.refresh) {
         liveCred = null;
         cachedTier = 'unknown';
+        cachedTierIdentity = null;
         throw Object.assign(new Error('Google Gemini OAuth session is signed out. Run /connect to sign in again.'), {
           code: 'OAUTH_LOGGED_OUT',
           status: 401,
@@ -167,6 +215,7 @@ export function createOpenCodeAuthHook({
           expires: Number.isFinite(latest.expires) ? latest.expires : 0,
         };
         cachedTier = 'unknown';
+        cachedTierIdentity = null;
       } else if (latest.access && Number.isFinite(latest.expires) && latest.expires > liveCred.expires) {
         liveCred = {
           refresh: latest.refresh,
@@ -176,7 +225,10 @@ export function createOpenCodeAuthHook({
       }
 
       if (!forceRefresh && liveCred.access && liveCred.expires > now() + 60_000) {
-        return liveCred.access;
+        const currentIdentity = liveCred.refresh;
+        const currentAccess = liveCred.access;
+        const subscriptionTier = await resolveTierForIdentity(currentAccess, currentIdentity, { signal });
+        return { accessToken: currentAccess, subscriptionTier };
       }
 
       const startRefreshIdentity = liveCred.refresh;
@@ -193,25 +245,19 @@ export function createOpenCodeAuthHook({
             status: 401,
           });
         }
-        // Re-verify current auth identity before mutating memory or calling client.auth.set.
-        const currentAfter = await getAuth();
-        if (
-          !currentAfter ||
-          currentAfter.type !== 'oauth' ||
-          currentAfter.refresh !== startRefreshIdentity
-        ) {
-          throw Object.assign(new Error('Google Gemini OAuth account changed during token refresh; retry request.'), {
-            code: 'OAUTH_ACCOUNT_CHANGED',
-            status: 401,
-          });
-        }
+        // Probe subscription tier BEFORE mutating live state or writing back, then re-verify
+        // auth identity AFTER all network awaits so account switch / logout during tier detection
+        // can never overwrite the new account or return a stale token.
+        const tier = await detectSubscriptionTier(refreshed.accessToken, { signal });
+        await verifyIdentityMatches(startRefreshIdentity);
         const nextCred = {
           refresh: refreshed.refreshToken || startRefreshIdentity,
           access: refreshed.accessToken,
           expires: computeExpiresAtMs(refreshed.expiresInSeconds),
         };
         liveCred = nextCred;
-        await detectSubscriptionTier(nextCred.access, { signal });
+        cachedTier = tier;
+        cachedTierIdentity = nextCred.refresh;
         try {
           await client?.auth?.set?.({
             path: { id: PROVIDER_ID },
@@ -225,7 +271,7 @@ export function createOpenCodeAuthHook({
         } catch {
           // Non-fatal: keep refreshed access token in memory even if client persistence fails.
         }
-        return nextCred.access;
+        return { accessToken: nextCred.access, subscriptionTier: tier };
       })();
 
       inflightRefresh = refreshPromise;

@@ -378,10 +378,18 @@ export function formatGatewayPoolQuotaSummary({ overviewData, accountsList = [] 
   const tierCounts = new Map();
   let remainingKnown = 0;
   let remainingSum = 0;
+  let snapshotCount = 0;
+  let usageRowsAccountCount = 0;
   for (const acc of accountsList) {
     const tier = acc?.subscription?.tier || 'unknown';
     tierCounts.set(tier, (tierCounts.get(tier) || 0) + 1);
-    const pct = acc?.quota?.remainingPercent;
+    const q = acc?.quota;
+    const pct = q?.remainingPercent;
+    const hasRows = Array.isArray(q?.usageRows) && q.usageRows.length > 0;
+    const hasBudgets = Array.isArray(q?.budgets) && q.budgets.length > 0;
+    const hasOfficialSnapshot = Boolean(q && (typeof pct === 'number' || hasRows || hasBudgets || q.source === 'official'));
+    if (hasOfficialSnapshot) snapshotCount++;
+    if (hasRows || hasBudgets) usageRowsAccountCount++;
     if (typeof pct === 'number' && Number.isFinite(pct)) {
       remainingKnown++;
       remainingSum += pct;
@@ -401,6 +409,10 @@ export function formatGatewayPoolQuotaSummary({ overviewData, accountsList = [] 
   }
   if (remainingKnown > 0) {
     lines.push(`- Saved remaining quota (avg across ${remainingKnown} account(s)): ${Math.round(remainingSum / remainingKnown)}%`);
+  } else if (snapshotCount > 0) {
+    lines.push(
+      `- Saved quota snapshots: ${snapshotCount} account(s) recorded${usageRowsAccountCount ? ` (${usageRowsAccountCount} with detailed usage windows/budgets, not reducible to a single percentage; inspect in /admin Accounts)` : ''}`,
+    );
   } else {
     lines.push('- Saved quota snapshots: none recorded yet (refresh in /admin Accounts to fetch live Google usage)');
   }

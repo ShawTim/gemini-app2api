@@ -1085,6 +1085,16 @@ export function createGateway({
           throw err;
         }
         if (req.aborted || res.destroyed) return;
+        const rawMcpBytes = typeof rpcMessage?.__promptBytes === "number" ? rpcMessage.__promptBytes : 0;
+        const assertMcpPromptLimit = () => {
+          const limit = store.settings().maxPromptBytes;
+          if (limit > 0 && rawMcpBytes > limit) {
+            throw Object.assign(
+              new Error(`MCP request body (${rawMcpBytes} bytes) exceeds maxPromptBytes (${limit} bytes)`),
+              { code: "PROMPT_SIZE_LIMIT", status: 413 },
+            );
+          }
+        };
         const runGatewayChatTool = async (chatPayload, signal) => {
           const capture = createCaptureResponse();
           const onAbort = () => capture.destroy();
@@ -1092,12 +1102,12 @@ export function createGateway({
           const serialized = JSON.stringify(chatPayload);
           const payloadWithChars = { ...chatPayload, stream: false };
           Object.defineProperty(payloadWithChars, "__promptBytes", {
-            value: Buffer.byteLength(serialized, "utf8"),
+            value: Math.max(rawMcpBytes, Buffer.byteLength(serialized, "utf8")),
             enumerable: false,
             configurable: true,
           });
           Object.defineProperty(payloadWithChars, "__promptChars", {
-            value: serialized.length,
+            value: Math.max(typeof rpcMessage?.__promptChars === "number" ? rpcMessage.__promptChars : 0, serialized.length),
             enumerable: false,
             configurable: true,
           });
@@ -1132,6 +1142,7 @@ export function createGateway({
           async callTool(name, args, { signal }) {
             try {
               if (name === "ask_gemini") {
+                assertMcpPromptLimit();
                 const chatPayload = normalizeAskGeminiArgs(args, {
                   allowedModels: protocol.NATIVE_MODELS,
                 });
@@ -1153,6 +1164,7 @@ export function createGateway({
                 };
               }
               if (name === "gemini_search") {
+                assertMcpPromptLimit();
                 const chatPayload = normalizeGeminiSearchArgs(args);
                 const result = await runGatewayChatTool(chatPayload, signal);
                 const sourcesMd = formatMcpCitationsMarkdown(result.annotations);

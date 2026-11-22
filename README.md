@@ -105,7 +105,7 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 <details>
 <summary><strong>Client Recipes — MCP (Claude Code / Cursor / Windsurf / VS Code), Codex CLI, Cline / Roo Code, Cherry Studio, OpenAI SDKs</strong></summary>
 
-- **MCP Clients (Streamable HTTP — Claude Code, Cursor, Windsurf, VS Code, Codex)** — exposes `ask_gemini`, `gemini_search`, and `gemini_quota` backed by your gateway's multi-account pool (also one-click copyable from Admin UI):
+- **MCP Clients (Streamable HTTP — Claude Code, Cursor, Windsurf, Cline)** — exposes `ask_gemini`, `gemini_search`, and `gemini_quota` backed by your gateway's multi-account pool (strict JSON, one-click copyable from Admin UI):
   ```json
   {
     "mcpServers": {
@@ -118,7 +118,9 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
     }
   }
   ```
-  For stdio-only MCP clients (e.g. Claude Desktop), run `bin/gemini-gateway mcp` with `GEMINI_GATEWAY_URL` + `GEMINI_GATEWAY_API_KEY`, or use standalone [`extensions/mcp`](extensions/mcp/README.md).
+  - **VS Code (`.vscode/mcp.json`):** use top-level `"servers"` instead of `"mcpServers"` with `"type": "http"`.
+  - **Codex CLI (`~/.codex/config.toml`):** use `[mcp_servers.gemini_app]` with `url = "http://127.0.0.1:18989/mcp"` and `bearer_token_env_var = "GEMINI_GATEWAY_KEY"`.
+  - **stdio-only MCP clients (e.g. Claude Desktop):** invoke your local `node /path/to/gemini-app2api/bin/gemini-gateway mcp` with `GEMINI_GATEWAY_URL` + `GEMINI_GATEWAY_API_KEY`, or use standalone [`extensions/mcp`](extensions/mcp/README.md).
 - **OpenAI Codex CLI (`~/.codex/config.toml`)** — native `/v1/responses` + namespace tools:
   ```toml
   model = "gemini-hydrogen" # or "gemini-neon"

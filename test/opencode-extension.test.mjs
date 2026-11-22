@@ -110,7 +110,7 @@ test('OpenCode auth methods perform real loopback OAuth + scoped exchange for bo
   assert.equal(codeResult.type, 'success');
   assert.equal(codeResult.refresh, 'oc-refresh-1');
   assert.match(codeResult.access, /^oc-scoped-/);
-  assert.equal(termsCalls, 2);
+  assert.equal(termsCalls, 0, 'OAuth login must not silently accept Gemini ToS without explicit opt-in');
 });
 
 test('OpenCode auth.loader returns in-process fetch supporting SSE streaming, tool calls, JSON, usage, refresh, and errors', async () => {
@@ -357,4 +357,65 @@ test('OpenCode auth handles account switch and logout cleanly without stale toke
   await reader.cancel('consumer done');
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(upstreamCancelled, true);
+
+  // 5. Account switch DURING detectSubscriptionTier() (after refresh succeeded) rejects without writeback
+  let switchDuringTierAuth = { type: 'oauth', refresh: 'tier-A', access: 'stale', expires: 1 };
+  const tierPersisted = [];
+  const tierPlugin = createGeminiAppOpenCodePlugin({
+    refreshNativeCredential: async () => ({ accessToken: 'tier-A-fresh', expiresInSeconds: 3600 }),
+    fetchGoogleUsageInfo: async () => {
+      // Simulate switching to account B while tier probe is awaiting network
+      switchDuringTierAuth = { type: 'oauth', refresh: 'tier-B', access: 'tier-B-tok', expires: Date.now() + 600_000 };
+      return { payload: Buffer.alloc(0) };
+    },
+    decodeSubscription: () => ({ tier: 'pro' }),
+    openTurn: () => { throw new Error('must not open turn after account switch during tier probe'); },
+  });
+  const tierHooks = await tierPlugin({ client: { auth: { set: async (p) => tierPersisted.push(p) } } });
+  const tierLoaded = await tierHooks.auth.loader(async () => switchDuringTierAuth);
+  const tierRaceRes = await tierLoaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(tierRaceRes.status, 401);
+  assert.equal((await tierRaceRes.json()).error.code, 'OAUTH_ACCOUNT_CHANGED');
+  assert.equal(tierPersisted.length, 0);
+
+  // 6. Restart with already-valid Free-tier token probes tier BEFORE selecting model and routes to gemini-auto
+  let seenFreeMode = null;
+  let seenFreeThinking = 'unset';
+  const freePlugin = createGeminiAppOpenCodePlugin({
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'free' }),
+    openTurn: (_tok, opts) => {
+      seenFreeMode = opts.modeCategory;
+      seenFreeThinking = opts.thinkingLevel;
+      return {
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 0, ended: true }),
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeFrame('free auto ok', { mode: 4, thinking: 0 }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+  });
+  const freeHooks = await freePlugin({});
+  const freeLoaded = await freeHooks.auth.loader(async () => ({
+    type: 'oauth',
+    refresh: 'free-refresh-1',
+    access: 'free-valid-access',
+    expires: Date.now() + 600_000,
+  }));
+  const freeRes = await freeLoaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', thinking_level: 2, stream: false, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(freeRes.status, 200);
+  const freeJson = await freeRes.json();
+  assert.equal(freeJson.model, 'gemini-auto');
+  assert.equal(seenFreeMode, null, 'gemini-auto omits modeCategory so Google routes automatically');
+  assert.equal(seenFreeThinking, null, 'gemini-auto strips thinking_level');
 });

@@ -105,7 +105,7 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
 <details>
 <summary><strong>常用客戶端設定範本 — MCP（Claude Code / Cursor / Windsurf / VS Code）、Codex CLI、Cline / Roo Code、Cherry Studio、OpenAI SDK</strong></summary>
 
-- **MCP 客戶端（Streamable HTTP — Claude Code、Cursor、Windsurf、VS Code、Codex）** —— 透過閘道多帳戶池提供 `ask_gemini`、`gemini_search`、`gemini_quota` 工具（亦可於管理台一鍵複製）：
+- **MCP 客戶端（Streamable HTTP — Claude Code、Cursor、Windsurf、Cline）** —— 透過閘道多帳戶池提供 `ask_gemini`、`gemini_search`、`gemini_quota` 工具（嚴格 JSON，可於管理台一鍵複製）：
   ```json
   {
     "mcpServers": {
@@ -118,7 +118,9 @@ curl -fsS http://127.0.0.1:18989/v1/chat/completions \
     }
   }
   ```
-  純 stdio MCP 客戶端（如 Claude Desktop）可透過 `bin/gemini-gateway mcp`（設定 `GEMINI_GATEWAY_URL` + `GEMINI_GATEWAY_API_KEY`）橋接，或使用獨立版 [`extensions/mcp`](extensions/mcp/README.md)。
+  - **VS Code（`.vscode/mcp.json`）：** 頂層鍵請改用 `"servers"` 並加上 `"type": "http"`。
+  - **Codex CLI（`~/.codex/config.toml`）：** 請使用 `[mcp_servers.gemini_app]` 搭配 `url = "http://127.0.0.1:18989/mcp"` 與 `bearer_token_env_var = "GEMINI_GATEWAY_KEY"`。
+  - **純 stdio MCP 客戶端（如 Claude Desktop）：** 執行本機部署路徑 `node /path/to/gemini-app2api/bin/gemini-gateway mcp`（設定 `GEMINI_GATEWAY_URL` + `GEMINI_GATEWAY_API_KEY`），或使用獨立版 [`extensions/mcp`](extensions/mcp/README.md)。
 - **OpenAI Codex CLI（`~/.codex/config.toml`）** —— 原生 `/v1/responses` 與 `namespace` 工具：
   ```toml
   model = "gemini-hydrogen" # 或 "gemini-neon"

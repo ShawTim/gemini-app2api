@@ -102,21 +102,46 @@ export function createOpenCodeFetch({
   }
   const blobCache = createImageBlobCache();
 
-  async function runWithRetry({ payload, isAuto, signal, onDelta, getOutputCommitState }) {
+  async function runWithRetry({ rawBody, requestedModel, signal, onDelta, getOutputCommitState, onModelResolved }) {
     let attempts = 0;
     let recoveryCode;
     let authRefreshed = false;
 
     while (true) {
       let currentToken;
+      let currentTier;
       try {
-        currentToken = await resolveAccessToken({ signal, forceRefresh: authRefreshed });
+        const resolved = await resolveAccessToken({ signal, forceRefresh: authRefreshed });
+        if (typeof resolved === 'string') {
+          currentToken = resolved;
+          currentTier = getSubscriptionTier();
+        } else {
+          currentToken = resolved?.accessToken;
+          currentTier = resolved?.subscriptionTier ?? getSubscriptionTier();
+        }
+        if (typeof currentToken !== 'string' || !currentToken) {
+          throw Object.assign(new Error('OAuth did not return a valid access token'), {
+            code: 'OAUTH_REFRESH_FAILED',
+            status: 401,
+          });
+        }
       } catch (err) {
         throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
           code: err?.code || 'OAUTH_REFRESH_FAILED',
           status: 401,
         });
       }
+
+      // Compute effective model & gemini-auto AFTER resolving the active account's token and tier.
+      const effectiveModel = currentTier === 'free' ? 'gemini-auto' : requestedModel;
+      const isAuto = effectiveModel === 'gemini-auto';
+      const payload = { ...rawBody, model: effectiveModel };
+      if (isAuto) {
+        delete payload.thinking_level;
+        delete payload.reasoning_effort;
+        delete payload.reasoning;
+      }
+      onModelResolved?.(effectiveModel);
 
       const provider = new NativeDirectProvider(
         { getValidAccessToken: async () => currentToken },
@@ -180,32 +205,24 @@ export function createOpenCodeFetch({
     }
 
     const requestedModel = normalizeOpenCodeModelId(rawBody?.model);
-    const tier = getSubscriptionTier();
-    const effectiveModel = tier === 'free' ? 'gemini-auto' : requestedModel;
-    const isAuto = effectiveModel === 'gemini-auto';
+    let effectiveModel = requestedModel;
 
-    const payload = { ...rawBody, model: effectiveModel };
-    if (isAuto) {
-      delete payload.thinking_level;
-      delete payload.reasoning_effort;
-      delete payload.reasoning;
-    }
-
-    const stream = Boolean(payload.stream);
-    const includeUsage = Boolean(payload.stream_options?.include_usage);
-    const promptChars = measurePromptChars(payload);
-    const { imageCount } = measurePromptImagePayload(payload);
+    const stream = Boolean(rawBody?.stream);
+    const includeUsage = Boolean(rawBody?.stream_options?.include_usage);
+    const promptChars = measurePromptChars(rawBody || {});
+    const { imageCount } = measurePromptImagePayload(rawBody || {});
     const created = Math.floor(Date.now() / 1000);
     const completionId = `chatcmpl-${crypto.randomBytes(12).toString('hex')}`;
 
     if (!stream) {
       try {
         const result = await runWithRetry({
-          payload,
-          isAuto,
+          rawBody,
+          requestedModel,
           signal: callerSignal,
           onDelta: () => {},
           getOutputCommitState: () => ({ publishedBytes: 0, toolCallCount: 0 }),
+          onModelResolved: (m) => { effectiveModel = m; },
         });
         const outputBytes = Buffer.byteLength(
           (result.content || '') + (result.calls?.length ? JSON.stringify(result.calls) : ''),
@@ -350,10 +367,11 @@ export function createOpenCodeFetch({
     (async () => {
       try {
         const result = await runWithRetry({
-          payload,
-          isAuto,
+          rawBody,
+          requestedModel,
           signal: streamAbort.signal,
           getOutputCommitState: () => ({ publishedBytes, toolCallCount }),
+          onModelResolved: (m) => { effectiveModel = m; },
           onDelta: async (ev) => {
             if (!ev || typeof ev !== 'object') return;
             if (ev.reset && !emittedAny) return;

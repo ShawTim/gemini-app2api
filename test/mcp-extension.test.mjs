@@ -151,7 +151,7 @@ test('MCP authManager performs real loopback login + scoped refresh + 0600 stora
 
   const loginRes = await auth.login({ remote: true, input, output });
   assert.equal(loginRes.subscriptionTier, 'pro');
-  assert.equal(termsCalled, 1);
+  assert.equal(termsCalled, 0, 'login must not silently accept Gemini ToS without explicit opt-in');
   assert.equal(refreshCalls, 1);
   assert.equal(fs.statSync(authPath).mode & 0o777, 0o600);
   assert.equal(auth.status().signedIn, true);
@@ -384,6 +384,43 @@ test('MCP authManager treats external multi-provider Pi auth.json as strictly re
   assert.throws(() => auth.logout(), { code: 'REFUSE_DELETE_EXTERNAL_AUTH' });
   await assert.rejects(() => auth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
   assert.deepEqual(JSON.parse(fs.readFileSync(piAuthPath, 'utf8')), originalPiAuth);
+
+  // Also refuse unmanaged Pi auth.json WITHOUT gemini-app and corrupt JSON files (fail-closed ownership).
+  const otherPiPath = path.join(tmpDir, 'pi-other.json');
+  fs.writeFileSync(otherPiPath, JSON.stringify({ anthropic: { type: 'api', key: 'sk-keep' } }), { mode: 0o600 });
+  const otherAuth = createMcpAuthManager({ authPath: otherPiPath, env: {} });
+  assert.throws(() => otherAuth.logout(), { code: 'REFUSE_DELETE_EXTERNAL_AUTH' });
+  await assert.rejects(() => otherAuth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(otherPiPath, 'utf8')), { anthropic: { type: 'api', key: 'sk-keep' } });
+
+  const corruptPath = path.join(tmpDir, 'corrupt.json');
+  fs.writeFileSync(corruptPath, '{not valid json', { mode: 0o600 });
+  const corruptAuth = createMcpAuthManager({ authPath: corruptPath, env: {} });
+  assert.throws(() => corruptAuth.logout(), { code: 'REFUSE_DELETE_EXTERNAL_AUTH' });
+  await assert.rejects(() => corruptAuth.login({ remote: true }), { code: 'UNSAFE_AUTH_OVERWRITE' });
+  assert.equal(fs.readFileSync(corruptPath, 'utf8'), '{not valid json');
+
+  // Logout during in-flight refresh on MCP-owned store must reject and never resurrect deleted file.
+  const ownedPath = path.join(tmpDir, 'owned.json');
+  writeStoredCredential(ownedPath, { refresh: 'owned-refresh-1', access: 'stale', expires: 1, subscriptionTier: 'pro' });
+  let releaseRefresh;
+  const slowAuth = createMcpAuthManager({
+    authPath: ownedPath,
+    env: {},
+    refreshNativeCredential: async () => {
+      await new Promise((r) => { releaseRefresh = r; });
+      return { accessToken: 'late-token', expiresInSeconds: 3600 };
+    },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+  });
+  const pendingRefresh = slowAuth.getValidCredential();
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(slowAuth.logout(), true);
+  assert.equal(fs.existsSync(ownedPath), false);
+  releaseRefresh();
+  await assert.rejects(() => pendingRefresh, { code: 'OAUTH_LOGGED_OUT' });
+  assert.equal(fs.existsSync(ownedPath), false);
 });
 
 test('MCP stdio server drops only an oversized line and continues serving subsequent lines in the same chunk', async () => {

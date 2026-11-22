@@ -94,7 +94,9 @@ try {
       }
       return Buffer.concat(chunks, total).toString("utf8");
     };
+    const maxBridgeConcurrent = 8;
     const inFlight = new Set();
+    const activeById = new Map();
     const forward = async (rawLine) => {
       const trimmed = rawLine.trim();
       if (!trimmed) return;
@@ -105,21 +107,56 @@ try {
         writeLine(jsonRpcError(null, -32700, "Parse error"));
         return;
       }
-      const hasId = parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.hasOwn(parsed, "id");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        writeLine(jsonRpcError(null, -32600, "Invalid Request"));
+        return;
+      }
+      const hasId = Object.hasOwn(parsed, "id");
       const reqId = hasId ? parsed.id : null;
+      // Handle client cancellation locally by aborting the matching in-flight HTTP request
+      // so the gateway's req/res close listener aborts upstream generation immediately.
+      if (!hasId && parsed.method === "notifications/cancelled") {
+        const targetId = parsed.params?.requestId;
+        if (targetId !== undefined && targetId !== null) {
+          const entry = activeById.get(String(targetId));
+          if (entry) {
+            entry.cancel();
+          }
+        }
+        return;
+      }
+      if (inFlight.size >= maxBridgeConcurrent) {
+        if (hasId) {
+          writeLine(jsonRpcError(reqId, -32000, `Bridge concurrency limit (${maxBridgeConcurrent}) reached; retry later`));
+        }
+        return;
+      }
       const headers = {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
         "MCP-Protocol-Version": "2025-06-18",
       };
       if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const controller = new AbortController();
+      let cancelledByClient = false;
+      const timeoutId = setTimeout(() => controller.abort(new Error("Gateway /mcp request timed out")), requestTimeoutMs);
+      timeoutId.unref?.();
+      const idKey = hasId && reqId !== null && reqId !== undefined ? String(reqId) : null;
+      const entry = {
+        controller,
+        cancel() {
+          cancelledByClient = true;
+          controller.abort(new Error("Request cancelled by client"));
+        },
+      };
+      if (idKey !== null) activeById.set(idKey, entry);
       try {
         const res = await fetch(mcpUrl, {
           method: "POST",
           headers,
           body: JSON.stringify(parsed),
           redirect: "error",
-          signal: AbortSignal.timeout(requestTimeoutMs),
+          signal: controller.signal,
         });
         if (!hasId || res.status === 202) {
           try { await res.body?.cancel?.(); } catch {}
@@ -140,8 +177,13 @@ try {
         }
         writeLine(body);
       } catch (err) {
-        if (hasId) {
+        if (hasId && !cancelledByClient) {
           writeLine(jsonRpcError(reqId, -32603, String(err?.message || "Gateway /mcp request failed").slice(0, 512)));
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        if (idKey !== null && activeById.get(idKey) === entry) {
+          activeById.delete(idKey);
         }
       }
     };

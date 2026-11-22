@@ -39,7 +39,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, requestMetadata, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, toZhCN, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, requestMetadata, isNormalRequest, presetSnippetText, snippet, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, toZhCN, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -898,4 +898,20 @@ test('admin-v2 supports /mcp path metadata, mcpEnabled editable setting, and MCP
   assert.equal(f.t('accounts'), '账户');
   assert.equal(f.t('keys'), 'API 密钥');
   assert.equal(f.t('settings'), '设置');
+
+  // Strict JSON MCP snippets (no // comments, no untrusted npx -y gemini-app2api), MCP onboarding, and zh-CN preset semantics
+  assert.equal(f.isNormalRequest({ path: '/mcp' }), true);
+  const quickMcp = JSON.parse(f.presetSnippetText('mcp'));
+  assert.equal(quickMcp.mcpServers['gemini-app'].url, 'http://fixture.invalid/mcp');
+  f.S.snippet = 'mcp-http';
+  const httpMcp = JSON.parse(f.snippet());
+  assert.equal(httpMcp.mcpServers['gemini-app'].url, 'http://fixture.invalid/mcp');
+  f.S.snippet = 'mcp-stdio';
+  const stdioMcpText = f.snippet();
+  assert.doesNotMatch(stdioMcpText, /npx/);
+  const stdioMcp = JSON.parse(stdioMcpText);
+  assert.equal(stdioMcp.mcpServers['gemini-app'].command, 'node');
+  assert.equal(stdioMcp.mcpServers['gemini-app'].args[1], 'mcp');
+  assert.match(source, /推荐双模型配置预设：/);
+  assert.match(source, /客户端预设/);
 });

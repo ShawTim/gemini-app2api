@@ -51,7 +51,8 @@ function detectImageMime(bytes, filePath) {
 
 function readLocalImageBounded(filePath) {
   const resolved = path.resolve(filePath);
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+  // Use O_NONBLOCK alongside O_NOFOLLOW so a FIFO path cannot stall the event loop before fstatSync rejects it.
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
   let fd;
   try {
     fd = fs.openSync(resolved, flags);

@@ -13,6 +13,7 @@ Usage:
   mcp-gemini-app [serve]         Start the MCP server over stdio (default)
   mcp-gemini-app login           Sign in to Google Gemini via localhost OAuth
   mcp-gemini-app login --remote  Headless/VPS sign-in (paste localhost redirect URL)
+  mcp-gemini-app login --accept-terms  Explicitly submit Gemini main-service terms acceptance during login
   mcp-gemini-app status          Check authentication mode and token status
   mcp-gemini-app quota           Query current subscription tier and remaining quota
   mcp-gemini-app logout          Remove locally stored OAuth credentials
@@ -54,7 +55,8 @@ export async function runMcpCli(
 
   if (command === 'login') {
     const remote = args.includes('--remote');
-    const result = await auth.login({ remote, input: stdin, output: stderr });
+    const acceptTerms = args.includes('--accept-terms');
+    const result = await auth.login({ remote, acceptTerms, input: stdin, output: stderr });
     const tierLabel = SUBSCRIPTION_LABELS[result.subscriptionTier] || result.subscriptionTier || 'Unknown';
     stdout.write(`Signed in to Google Gemini (tier: ${tierLabel}). Credentials saved to ${result.authPath}\n`);
     return 0;

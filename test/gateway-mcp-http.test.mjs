@@ -287,4 +287,67 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
     method: 'POST',
     body: { jsonrpc: '2.0', id: 101, method: 'ping' },
   })).status, 200);
+
+  // 12. gemini_quota distinguishes usageRows snapshots (remainingPercent: null) from "none recorded yet"
+  f.store.data.accounts[0].quota = {
+    source: 'official',
+    remainingPercent: null,
+    usageRows: [{ label: 'Weekly limit', providerPercent: 32, percentMeaning: 'used' }],
+    updatedAt: new Date().toISOString(),
+  };
+  f.store.save();
+  const rowQuotaBody = await (await f.api('/mcp', {
+    method: 'POST',
+    body: { jsonrpc: '2.0', id: 102, method: 'tools/call', params: { name: 'gemini_quota', arguments: {} } },
+  })).json();
+  assert.match(rowQuotaBody.result.content[0].text, /1 account\(s\) recorded/);
+  assert.doesNotMatch(rowQuotaBody.result.content[0].text, /none recorded yet/);
+
+  // 13. bin/gemini-gateway mcp bridge translates notifications/cancelled into HTTP abort cancelling upstream work
+  let cancelObserved = false;
+  const origTurn = f.app.provider.runTurn.bind(f.app.provider);
+  f.app.provider.runTurn = async (sessionId, body, onDelta, opts) => {
+    const text = body?.messages?.[0]?.content || '';
+    if (typeof text === 'string' && text.includes('WAIT_FOR_BRIDGE_CANCEL')) {
+      return await new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener('abort', () => {
+          cancelObserved = true;
+          reject(Object.assign(new Error('Client aborted'), { code: 'CLIENT_DISCONNECTED', status: 499 }));
+        }, { once: true });
+      });
+    }
+    return origTurn(sessionId, body, onDelta, opts);
+  };
+  const cancelChild = spawn(process.execPath, [cliPath, 'mcp'], {
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      GEMINI_GATEWAY_URL: f.base,
+      GEMINI_GATEWAY_API_KEY: f.key.key,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let cancelStdout = '';
+  cancelChild.stdout.on('data', (c) => { cancelStdout += c.toString('utf8'); });
+  cancelChild.stdin.write(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 201,
+    method: 'tools/call',
+    params: { name: 'ask_gemini', arguments: { prompt: 'WAIT_FOR_BRIDGE_CANCEL' } },
+  }) + '\n');
+  await new Promise((r) => setTimeout(r, 80));
+  cancelChild.stdin.write(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'notifications/cancelled',
+    params: { requestId: 201 },
+  }) + '\n');
+  cancelChild.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 202, method: 'ping' }) + '\n');
+  cancelChild.stdin.end();
+  const cancelExit = await new Promise((resolve) => cancelChild.on('close', resolve));
+  assert.equal(cancelExit, 0);
+  assert.equal(cancelObserved, true);
+  const cancelOutLines = cancelStdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(cancelOutLines.some((x) => x.id === 202), true);
+  assert.equal(cancelOutLines.some((x) => x.id === 201), false);
+  f.app.provider.runTurn = origTurn;
 });

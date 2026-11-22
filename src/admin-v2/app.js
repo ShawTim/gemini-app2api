@@ -186,7 +186,7 @@ const accountStatus = a => {
   const status = a.status === 'ready' && accountCoolingDown(a) ? 'cooldown' : (a.status || 'unknown');
   return badge(t(status), ({ ready: 'teal', cooldown: 'amber', login_required: 'amber', auth_error: 'rose' })[status] || '', true);
 };
-const isNormalRequest = r => ['/v1/chat/completions', '/v1/responses'].includes(r?.path);
+const isNormalRequest = r => ['/v1/chat/completions', '/v1/responses', '/mcp'].includes(r?.path);
 function modelEvidence(accounts = []) {
   const result = { verified: 0, rejected: 0, unverified: 0, latestVerifiedAt: null };
   let latest = 0;
@@ -1116,7 +1116,16 @@ function presetSnippetText(preset = S.preset) {
   }
   if (preset === 'mcp') {
     const mcpUrl = gatewayMcpUrl();
-    return `// Streamable HTTP MCP (Claude Code, Cursor, Windsurf, VS Code, Codex)\n// Tools: ask_gemini, gemini_search, gemini_quota\n{\n  "mcpServers": {\n    "gemini-app": {\n      "url": ${JSON.stringify(mcpUrl)},\n      "headers": {\n        "Authorization": "Bearer \${GEMINI_GATEWAY_KEY}"\n      }\n    }\n  }\n}`;
+    return JSON.stringify({
+      mcpServers: {
+        'gemini-app': {
+          url: mcpUrl,
+          headers: {
+            Authorization: 'Bearer ${GEMINI_GATEWAY_KEY}',
+          },
+        },
+      },
+    }, null, 2);
   }
   if (preset === 'curl') {
     return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gemini-neon","messages":[{"role":"user","content":"Hi"}]}'`;
@@ -1159,8 +1168,8 @@ function bottomDeck() {
           el('div', {}, el('strong', {}, L('Client API Keys', '客戶端 API 金鑰')), el('span', { class: 'muted', style: 'margin-left:8px' }, L(`${keyCount} active`, `${keyCount} 個有效`))),
           link('keys', L('Manage / Reveal →', '管理／顯示 →'), { class: 'button compact' })),
         el('div', { class: 'row' },
-          el('span', { class: 'muted', style: 'font-size:11.5px;font-weight:560' }, L('Recommended Dual-Model Preset:', '推薦雙模型配置預設：')),
-          el('div', { class: 'preset-tabs', role: 'group', 'aria-label': L('Client preset', '客戶端預設') },
+          el('span', { class: 'muted', style: 'font-size:11.5px;font-weight:560' }, L('Recommended Dual-Model Preset:', '推薦雙模型配置預設：', '推荐双模型配置预设：')),
+          el('div', { class: 'preset-tabs', role: 'group', 'aria-label': L('Client preset', '客戶端預設', '客户端预设') },
             [['codex', 'Codex CLI'], ['cline', 'Cline / Roo'], ['mcp', 'MCP'], ['curl', 'cURL']].map(([key, label]) => btn(label, () => { S.preset = key; updateContent(); }, { class: 'preset-tab', 'data-preset': key, 'aria-pressed': String(S.preset === key) })))),
         S.preset === 'mcp' && !mcpEndpointEnabled() && el('p', { class: 'help' }, badge(L('MCP disabled', 'MCP 已停用'), 'amber'), ' ', L('Enable POST /mcp in ', '請先於設定啟用 POST /mcp：'), link('settings', L('Settings →', '設定 →'))),
         el('pre', { class: 'deck-snippet', tabindex: '0', 'aria-label': L('Quick connect configuration', '快速接入設定') }, presetSnippetText()),
@@ -1504,8 +1513,28 @@ function snippet() {
   const model = S.clientModel || '<MODEL_ID>';
   if (S.snippet === 'python') return `import os\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=${JSON.stringify(base)},\n    api_key=os.environ["GEMINI_GATEWAY_KEY"],\n)\nresponse = client.chat.completions.create(\n    model=${JSON.stringify(model)},\n    messages=[{"role": "user", "content": "Hello"}],\n    extra_body={"thinking_level": 2},\n)\nprint(response.choices[0].message.content)`;
   if (S.snippet === 'javascript') return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: ${JSON.stringify(base)},\n  apiKey: process.env.GEMINI_GATEWAY_KEY,\n});\nconst response = await client.chat.completions.create({\n  model: ${JSON.stringify(model)},\n  messages: [{ role: "user", content: "Hello" }],\n  thinking_level: 2,\n});\nconsole.log(response.choices[0].message.content);`;
-  if (S.snippet === 'mcp-http') return `// Streamable HTTP MCP (Claude Code, Cursor, Windsurf, VS Code, Codex)\n// Tools: ask_gemini, gemini_search, gemini_quota\n{\n  "mcpServers": {\n    "gemini-app": {\n      "url": ${JSON.stringify(mcpUrl)},\n      "headers": {\n        "Authorization": "Bearer \${GEMINI_GATEWAY_KEY}"\n      }\n    }\n  }\n}`;
-  if (S.snippet === 'mcp-stdio') return `// stdio MCP bridge to this gateway (for stdio-only clients e.g. Claude Desktop)\n{\n  "mcpServers": {\n    "gemini-app": {\n      "command": "npx",\n      "args": ["-y", "gemini-app2api", "mcp"],\n      "env": {\n        "GEMINI_GATEWAY_URL": ${JSON.stringify(origin)},\n        "GEMINI_GATEWAY_API_KEY": "\${GEMINI_GATEWAY_KEY}"\n      }\n    }\n  }\n}`;
+  if (S.snippet === 'mcp-http') return JSON.stringify({
+    mcpServers: {
+      'gemini-app': {
+        url: mcpUrl,
+        headers: {
+          Authorization: 'Bearer ${GEMINI_GATEWAY_KEY}',
+        },
+      },
+    },
+  }, null, 2);
+  if (S.snippet === 'mcp-stdio') return JSON.stringify({
+    mcpServers: {
+      'gemini-app': {
+        command: 'node',
+        args: ['/absolute/path/to/gemini-app2api/bin/gemini-gateway', 'mcp'],
+        env: {
+          GEMINI_GATEWAY_URL: origin,
+          GEMINI_GATEWAY_API_KEY: '${GEMINI_GATEWAY_KEY}',
+        },
+      },
+    },
+  }, null, 2);
   return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model, messages: [{ role: 'user', content: 'Hello' }], thinking_level: 2 }, null, 2).replace(/'/g, "'\\''")}'`;
 }
 async function copyClientExample() {
@@ -1520,9 +1549,9 @@ function modelsPage() {
   const modelSelect = select('client-model', options.length ? options : [['', L('No models reported', '未有回報模型')]], S.clientModel, value => { S.clientModel = value; $('client-snippet').textContent = snippet(); });
   modelSelect.disabled = !options.length || S.testBusy;
   const snippetHelp = S.snippet === 'mcp-http'
-    ? L('Streamable HTTP MCP endpoint · exposes ask_gemini, gemini_search, and gemini_quota via the same Bearer API keys and multi-account pool. Local image file paths are blocked on HTTP /mcp.', 'Streamable HTTP MCP 端點 · 透過相同 Bearer API 金鑰及多帳戶池提供 ask_gemini、gemini_search 與 gemini_quota 工具；HTTP /mcp 會封鎖本機圖片路徑。')
+    ? L('Streamable HTTP MCP JSON (Claude Code / Cursor / Windsurf / Cline) · exposes ask_gemini, gemini_search, and gemini_quota via Bearer API keys. VS Code uses top-level "servers" and Codex CLI uses [mcp_servers.gemini_app] TOML; replace ${GEMINI_GATEWAY_KEY} if your client does not expand env vars.', 'Streamable HTTP MCP 嚴格 JSON（適用 Claude Code / Cursor / Windsurf / Cline）· 透過 Bearer API 金鑰提供 ask_gemini、gemini_search 與 gemini_quota。VS Code 須改用頂層 "servers"，Codex CLI 須使用 [mcp_servers.gemini_app] TOML；若客戶端不支援環境變數展開請自行替換。')
     : S.snippet === 'mcp-stdio'
-      ? L('stdio MCP bridge · forwards JSON-RPC over stdin/stdout to this gateway’s POST /mcp endpoint. Use GEMINI_GATEWAY_URL + GEMINI_GATEWAY_API_KEY.', 'stdio MCP 橋接模式 · 透過 stdin/stdout 轉發 JSON-RPC 至本閘道 POST /mcp 端點。請設定 GEMINI_GATEWAY_URL 及 GEMINI_GATEWAY_API_KEY。')
+      ? L('stdio MCP bridge (e.g. Claude Desktop) · point args[0] to your local deployed gemini-app2api/bin/gemini-gateway path. Forwards JSON-RPC over stdin/stdout to POST /mcp using GEMINI_GATEWAY_URL + GEMINI_GATEWAY_API_KEY.', 'stdio MCP 橋接（如 Claude Desktop）· 請將 args[0] 改為你本機部署的 gemini-app2api/bin/gemini-gateway 絕對路徑，透過 stdin/stdout 轉發 JSON-RPC 至 POST /mcp。')
       : L('Chat Completions example · requested thinking level 2. The resolved level must be read from the actual response, not assumed.', 'Chat Completions 範例 · 請求 thinking level 2。實際 resolved level 須以真實回應為準，不應假定相同。');
   const clients = panel(L('Client setup', '客戶端設定'), L('Use a caller API key, never your admin password or Google credentials.', '請使用呼叫端 API 金鑰，切勿使用管理員密碼或 Google 憑證。'), body(el('div', { class: 'form-stack' },
     el('div', { class: 'connection-facts' }, el('label', {}, 'Base URL', el('input', { id: 'client-base', value: base, readonly: true })), btn([icon('copy'), L('Copy URL', '複製網址')], () => copy(base), { id: 'copy-client-base' }), el('label', {}, L('Model', '模型'), modelSelect)),
