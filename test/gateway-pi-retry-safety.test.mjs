@@ -66,12 +66,21 @@ test('non-PI cache hints remain inert, while standard affinity headers are recog
   const f = await fixture({ accountCount: 4, allowFailover: false }); t.after(() => f.close());
   for (let i = 0; i < 2; i++) { const r = await send(f, body, { 'User-Agent': 'codex_cli/test' }); assert.equal(r.status, 200); await r.text(); }
   assert.equal(new Set(f.app.overview().requests.map(r => r.accountId)).size, 2);
-  for (const header of ['x-session-affinity', 'session_id']) {
+  for (const header of ['x-session-affinity', 'session-id', 'session_id']) {
     const before = f.app.overview().requests.length;
     for (let i = 0; i < 2; i++) { const r = await send(f, { ...body, messages: [{ role: 'user', content: header + i }] }, { [header]: 'explicit_' + header }); assert.equal(r.status, 200); await r.text(); }
     const rows = f.app.overview().requests.slice(0, f.app.overview().requests.length - before);
     assert.equal(new Set(rows.map(r => r.accountId)).size, 1); assert.ok(rows.every(r => r.sessionSource === header));
   }
+  // Issue #4: Pi 1.5.2 versioned User-Agent + prompt_cache_key without explicit header maintains affinity
+  const beforePi15 = f.app.overview().requests.length;
+  for (let i = 0; i < 2; i++) {
+    const r = await send(f, { ...body, prompt_cache_key: 'pi-152-session' }, { 'User-Agent': 'pi/1.5.2 (win32; node/v24.13.0; x64)' });
+    assert.equal(r.status, 200); await r.text();
+  }
+  const pi15Rows = f.app.overview().requests.slice(0, f.app.overview().requests.length - beforePi15);
+  assert.equal(new Set(pi15Rows.map(r => r.accountId)).size, 1);
+  assert.ok(pi15Rows.every(r => r.sessionSource === 'pi_prompt_cache_key'));
 });
 
 test('proven downgrade cancels before reading the rest of a response or releasing deltas', async () => {

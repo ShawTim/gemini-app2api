@@ -11,7 +11,7 @@ const headerValue = (headers, name) => {
 
 /** Resolve explicit session identity, with a narrowly-scoped PI cache-key fallback. */
 export function resolveSessionIdentity(headers, canonical) {
-  for (const name of ['x-session-id', 'x-session-affinity', 'session_id']) {
+  for (const name of ['x-session-id', 'x-session-affinity', 'session-id', 'session_id']) {
     const value = headerValue(headers, name);
     if (value !== undefined) {
       if (typeof value !== 'string' || !SESSION_ID.test(value)) throw fault('INVALID_SESSION_ID', 400);
@@ -19,7 +19,11 @@ export function resolveSessionIdentity(headers, canonical) {
     }
   }
   const userAgent = headerValue(headers, 'user-agent');
-  const isPi = typeof userAgent === 'string' && (/^pi \(/i.test(userAgent) || /^pi-desktop(?:\/|$)/i.test(userAgent));
+  const isPi = typeof userAgent === 'string' && (
+    /^pi \(/i.test(userAgent) ||
+    /^pi\/[0-9A-Za-z._+-]+(?: \(|$)/i.test(userAgent) ||
+    /^pi-desktop(?:\/|$)/i.test(userAgent)
+  );
   const cacheKey = canonical?.prompt_cache_key;
   if (isPi && typeof cacheKey === 'string' && cacheKey.length > 0 && Buffer.byteLength(cacheKey, 'utf8') <= 128) {
     // PI delegates inherit the parent's cache key. Their retained first user

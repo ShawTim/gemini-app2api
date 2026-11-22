@@ -12,22 +12,38 @@ test('PI cache key fallback is stable and derived without exposing the key', () 
   const first = resolveSessionIdentity({ ...piHeaders, 'user-agent': undefined }, {});
   const left = resolveSessionIdentity({ 'user-agent': 'pi (darwin 25.1)', unused: 'x' }, { prompt_cache_key: cacheKey });
   const right = resolveSessionIdentity({ 'user-agent': 'PI-DESKTOP/0.1' }, { prompt_cache_key: cacheKey });
+  const versioned = resolveSessionIdentity({ 'user-agent': 'pi/1.5.2 (win32; node/v24.13.0; x64)' }, { prompt_cache_key: cacheKey });
+  const versionedBare = resolveSessionIdentity({ 'user-agent': 'pi/1.5.2-rc.1' }, { prompt_cache_key: cacheKey });
   assert.equal(first.sessionId, undefined);
   assert.equal(left.source, 'pi_prompt_cache_key'); assert.equal(left.sessionId, right.sessionId);
+  assert.equal(versioned.source, 'pi_prompt_cache_key'); assert.equal(versioned.sessionId, left.sessionId);
+  assert.equal(versionedBare.source, 'pi_prompt_cache_key'); assert.equal(versionedBare.sessionId, left.sessionId);
   assert.match(left.sessionId, /^pi_cache_[a-f0-9]{64}$/); assert.equal(left.sessionId.includes(cacheKey), false);
 });
 
 test('explicit headers win in documented priority order', () => {
-  assert.deepEqual(resolveSessionIdentity({ 'x-session-id': 'one', 'x-session-affinity': 'two', session_id: 'three' }, {}), { sessionId: 'one', source: 'x-session-id' });
-  assert.deepEqual(resolveSessionIdentity({ 'x-session-affinity': 'two', session_id: 'three' }, {}), { sessionId: 'two', source: 'x-session-affinity' });
-  assert.deepEqual(resolveSessionIdentity({ session_id: 'three' }, {}), { sessionId: 'three', source: 'session_id' });
+  assert.deepEqual(resolveSessionIdentity({ 'x-session-id': 'one', 'x-session-affinity': 'two', 'session-id': 'three', session_id: 'four' }, {}), { sessionId: 'one', source: 'x-session-id' });
+  assert.deepEqual(resolveSessionIdentity({ 'x-session-affinity': 'two', 'session-id': 'three', session_id: 'four' }, {}), { sessionId: 'two', source: 'x-session-affinity' });
+  assert.deepEqual(resolveSessionIdentity({ 'session-id': 'three', session_id: 'four' }, {}), { sessionId: 'three', source: 'session-id' });
+  assert.deepEqual(resolveSessionIdentity({ session_id: 'four' }, {}), { sessionId: 'four', source: 'session_id' });
   assert.deepEqual(resolveSessionIdentity({ ...piHeaders, 'X-Session-ID': 'explicit' }, { prompt_cache_key: 'private' }), { sessionId: 'explicit', source: 'x-session-id' });
+  // Issue #4: Pi 1.5.2 exact headers
+  assert.deepEqual(
+    resolveSessionIdentity(
+      { 'user-agent': 'pi/1.5.2 (win32; node/v24.13.0; x64)', 'session-id': '01a1fa0e-4718-7198-b508-f8001f4f88ec' },
+      {},
+    ),
+    { sessionId: '01a1fa0e-4718-7198-b508-f8001f4f88ec', source: 'session-id' },
+  );
 });
 
 test('non-PI prompt cache key stays inert and malformed explicit identity fails', () => {
-  assert.deepEqual(resolveSessionIdentity({ 'user-agent': 'curl/8', 'x-session-id': undefined }, { prompt_cache_key: 'key' }), { sessionId: undefined, source: 'generated' });
+  for (const ua of ['curl/8', 'pip/24.0 (python)', 'pi', 'pi/1.5.2 extra', 'pi/foo/bar']) {
+    assert.deepEqual(resolveSessionIdentity({ 'user-agent': ua, 'x-session-id': undefined }, { prompt_cache_key: 'key' }), { sessionId: undefined, source: 'generated' });
+  }
   for (const value of [[], ['valid'], '', 'has space', 'x'.repeat(129), 4]) {
     assert.throws(() => resolveSessionIdentity({ 'x-session-id': value }, { prompt_cache_key: 'key' }), error => error.code === 'INVALID_SESSION_ID' && error.status === 400);
+    assert.throws(() => resolveSessionIdentity({ 'session-id': value }, { prompt_cache_key: 'key' }), error => error.code === 'INVALID_SESSION_ID' && error.status === 400);
   }
 });
 

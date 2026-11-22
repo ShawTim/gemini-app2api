@@ -172,7 +172,7 @@ Caller tools use fenced `tool_call` JSON blocks (`3` or more matching backticks 
 
 ## Sessions and failover
 
-- **Caller isolation & soft affinity**: API keys isolate callers. Session identity uses explicit headers (`X-Session-ID`, `X-Session-Affinity`, `session_id`, `1–128` ASCII `[A-Za-z0-9_-]` chars) or a hashed `prompt_cache_key` digest for recognized coding agents. Affinity is a **soft routing preference**, never an admission mutex: distinct requests in one session run concurrently, and if the preferred account is busy or unavailable, routing selects another eligible account immediately.
+- **Caller isolation & soft affinity**: API keys isolate callers. Session identity uses explicit headers (`X-Session-ID`, `X-Session-Affinity`, `session-id`, `session_id`, `1–128` ASCII `[A-Za-z0-9_-]` chars) or a hashed `prompt_cache_key` digest for recognized coding agents. Affinity is a **soft routing preference**, never an admission mutex: distinct requests in one session run concurrently, and if the preferred account is busy or unavailable, routing selects another eligible account immediately.
 - **Full-history account switches**: Every failover attempt replays the complete validated caller history with no cross-account opaque state.
 - **Configurable within-request recovery**:
   - `GATEWAY_QUOTA_FAILOVER=1` (`quotaFailover`): Traverses remaining eligible accounts (at most once each under the original request deadline) on explicit upstream quota refusals (`429`).
