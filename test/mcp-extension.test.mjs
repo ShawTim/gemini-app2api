@@ -422,6 +422,27 @@ test('MCP authManager treats external multi-provider Pi auth.json as strictly re
   await assert.rejects(() => pendingRefresh, { code: 'OAUTH_LOGGED_OUT' });
   assert.equal(fs.existsSync(ownedPath), false);
 
+  // Concurrent new login (rename to a new inode, even with the SAME refresh token) during refresh must not be overwritten.
+  writeStoredCredential(ownedPath, { refresh: 'same-refresh-1', access: 'stale-old', expires: 1, subscriptionTier: 'pro' });
+  let releaseSameRefresh;
+  const inodeAuth = createMcpAuthManager({
+    authPath: ownedPath,
+    env: {},
+    refreshNativeCredential: async () => {
+      await new Promise((r) => { releaseSameRefresh = r; });
+      return { accessToken: 'old-refresh-token', expiresInSeconds: 3600 };
+    },
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+  });
+  const pendingInodeRefresh = inodeAuth.getValidCredential();
+  await new Promise((r) => setTimeout(r, 15));
+  // External process completes a fresh login (renameSync -> brand new inode) with the SAME refresh token.
+  writeStoredCredential(ownedPath, { refresh: 'same-refresh-1', access: 'brand-new-login-access', expires: Date.now() + 600_000, subscriptionTier: 'ultra' });
+  releaseSameRefresh();
+  await assert.rejects(() => pendingInodeRefresh, { code: 'OAUTH_ACCOUNT_CHANGED' });
+  assert.equal(JSON.parse(fs.readFileSync(ownedPath, 'utf8')).access, 'brand-new-login-access');
+
   // Foreign file with version:1 + type:'oauth' + refresh BUT extra app-specific keys is refused fail-closed.
   const foreignOauthPath = path.join(tmpDir, 'foreign-oauth.json');
   const foreignPayload = { version: 1, type: 'oauth', refresh: 'foreign-r', foreignAppSecret: 'keep' };

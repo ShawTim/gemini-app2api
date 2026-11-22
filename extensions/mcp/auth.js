@@ -302,13 +302,15 @@ function writeStoredCredentialUnlocked(authPath, credential) {
   fs.renameSync(tempPath, authPath);
 }
 
-// Inode-pinned update for token refreshes: opens the EXISTING file without O_CREAT so a
-// concurrent logout (unlink) can never be resurrected and a concurrent login (rename to new inode)
-// can never be overwritten even at the OS kernel inode level.
-function updateManagedCredentialInPlace(authPath, expectedRefresh, buildNext) {
-  let fd;
+// Inode-pinned update for token refreshes: receives a pre-opened fd (opened BEFORE the
+// upstream refresh request) and verifies that authPath still points to that exact (dev, ino)
+// before writing solely through the pinned fd. A concurrent logout (unlink) can never be
+// resurrected, and a concurrent login (rename to a new inode, even with the same refresh token)
+// can never be overwritten at any point during or after the refresh wait.
+function updatePinnedCredentialInPlace(authPath, pinnedFd, pinnedStat, expectedRefresh, buildNext) {
+  let currentPathStat;
   try {
-    fd = fs.openSync(authPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
+    currentPathStat = fs.lstatSync(authPath);
   } catch (err) {
     if (err?.code === 'ENOENT') {
       throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
@@ -317,51 +319,56 @@ function updateManagedCredentialInPlace(authPath, expectedRefresh, buildNext) {
     }
     throw err;
   }
-  try {
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile()) {
-      throw Object.assign(new Error(`Credential path is not a regular file: ${authPath}`), {
-        code: 'UNSAFE_AUTH_PATH',
-      });
-    }
-    if (stat.size > 1024 * 1024) {
-      throw Object.assign(new Error(`Credential file exceeds maximum size: ${authPath}`), {
-        code: 'UNSAFE_AUTH_OVERWRITE',
-      });
-    }
-    const readBuf = Buffer.alloc(stat.size);
-    let offset = 0;
-    while (offset < stat.size) {
-      const n = fs.readSync(fd, readBuf, offset, stat.size - offset, offset);
-      if (n === 0) break;
-      offset += n;
-    }
-    let raw = null;
-    try {
-      raw = JSON.parse(readBuf.subarray(0, offset).toString('utf8'));
-    } catch {
-      raw = null;
-    }
-    if (!isManagedMcpAuthPayload(raw)) {
-      throw Object.assign(
-        new Error(`Refusing to overwrite unmanaged or external credential file: ${authPath}`),
-        { code: 'UNSAFE_AUTH_OVERWRITE' },
-      );
-    }
-    if (raw.refresh.trim() !== expectedRefresh) {
-      throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
-        code: 'OAUTH_ACCOUNT_CHANGED',
-      });
-    }
-    const next = buildNext(raw);
-    const outBuf = Buffer.from(formatManagedAuthPayload(next), 'utf8');
-    fs.writeSync(fd, outBuf, 0, outBuf.length, 0);
-    fs.ftruncateSync(fd, outBuf.length);
-    try { fs.fsyncSync(fd); } catch {}
-    return next;
-  } finally {
-    try { fs.closeSync(fd); } catch {}
+  if (
+    !currentPathStat.isFile() ||
+    currentPathStat.dev !== pinnedStat.dev ||
+    currentPathStat.ino !== pinnedStat.ino
+  ) {
+    throw Object.assign(new Error('Google Gemini credential file was replaced during token refresh; retry request.'), {
+      code: 'OAUTH_ACCOUNT_CHANGED',
+    });
   }
+  const stat = fs.fstatSync(pinnedFd);
+  if (!stat.isFile()) {
+    throw Object.assign(new Error(`Credential path is not a regular file: ${authPath}`), {
+      code: 'UNSAFE_AUTH_PATH',
+    });
+  }
+  if (stat.size > 1024 * 1024) {
+    throw Object.assign(new Error(`Credential file exceeds maximum size: ${authPath}`), {
+      code: 'UNSAFE_AUTH_OVERWRITE',
+    });
+  }
+  const readBuf = Buffer.alloc(stat.size);
+  let offset = 0;
+  while (offset < stat.size) {
+    const n = fs.readSync(pinnedFd, readBuf, offset, stat.size - offset, offset);
+    if (n === 0) break;
+    offset += n;
+  }
+  let raw = null;
+  try {
+    raw = JSON.parse(readBuf.subarray(0, offset).toString('utf8'));
+  } catch {
+    raw = null;
+  }
+  if (!isManagedMcpAuthPayload(raw)) {
+    throw Object.assign(
+      new Error(`Refusing to overwrite unmanaged or external credential file: ${authPath}`),
+      { code: 'UNSAFE_AUTH_OVERWRITE' },
+    );
+  }
+  if (raw.refresh.trim() !== expectedRefresh) {
+    throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
+      code: 'OAUTH_ACCOUNT_CHANGED',
+    });
+  }
+  const next = buildNext(raw);
+  const outBuf = Buffer.from(formatManagedAuthPayload(next), 'utf8');
+  fs.writeSync(pinnedFd, outBuf, 0, outBuf.length, 0);
+  fs.ftruncateSync(pinnedFd, outBuf.length);
+  try { fs.fsyncSync(pinnedFd); } catch {}
+  return next;
 }
 
 export function writeStoredCredential(authPath, credential) {
@@ -448,74 +455,112 @@ export function createMcpAuthManager({
       return inflightRefresh;
     }
     const refreshPromise = (async () => {
-      const config = resolveOAuthConfig({ defaultProfile, env });
-      const refreshed = await refreshNativeCredential(config, startRefresh, { signal });
-      if (!refreshed?.accessToken) {
-        throw Object.assign(new Error('OAuth refresh did not return an access token'), {
-          code: 'OAUTH_REFRESH_FAILED',
-        });
-      }
-      const subscriptionTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
-      const commitExternalRefresh = () => {
-        const currentStored = readStoredCredential(resolvedAuthPath);
-        if (authGeneration !== startGen || !currentStored) {
-          throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
-            code: 'OAUTH_LOGGED_OUT',
-          });
-        }
-        if (currentStored.refresh !== startDiskRefresh) {
-          accountEpoch++;
-          lastSeenDiskRefresh = currentStored.refresh;
-          memoryExternalState = null;
-          throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
-            code: 'OAUTH_ACCOUNT_CHANGED',
-          });
-        }
-        const next = {
-          type: 'oauth',
-          refresh: refreshed.refreshToken || startRefresh,
-          access: refreshed.accessToken,
-          expires: computeExpiresAtMs(refreshed.expiresInSeconds),
-          subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentStored.subscriptionTier || 'unknown'),
-          readOnlyExternal: true,
-        };
-        // Never write or create lockfiles next to an external/read-only auth file.
-        memoryExternalState = { diskRefresh: startDiskRefresh, cred: next };
-        return { ...next, diskRefresh: startDiskRefresh, accountEpoch: startEpoch };
-      };
-      // External/unmanaged auth files may live on read-only mounts; never create a .lock file beside them.
-      if (credential.readOnlyExternal) {
-        return commitExternalRefresh();
-      }
-      // Cross-process serialized AND inode-pinned compare-and-update for MCP-owned auth files.
-      return withAuthFileLock(resolvedAuthPath, () => {
-        if (authGeneration !== startGen) {
-          throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
-            code: 'OAUTH_LOGGED_OUT',
-          });
-        }
-        let next;
+      // Pin the original MCP-owned file inode BEFORE starting any network wait so a concurrent
+      // login (rename to a new inode) or logout (unlink) during refresh can never be overwritten.
+      let pinnedFd = null;
+      let pinnedStat = null;
+      if (!credential.readOnlyExternal) {
         try {
-          next = updateManagedCredentialInPlace(resolvedAuthPath, startDiskRefresh, (currentRaw) => ({
+          pinnedFd = fs.openSync(resolvedAuthPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
+          pinnedStat = fs.fstatSync(pinnedFd);
+          if (!pinnedStat.isFile()) {
+            throw Object.assign(new Error(`Credential path is not a regular file: ${resolvedAuthPath}`), {
+              code: 'UNSAFE_AUTH_PATH',
+            });
+          }
+        } catch (err) {
+          if (pinnedFd !== null) {
+            try { fs.closeSync(pinnedFd); } catch {}
+            pinnedFd = null;
+          }
+          if (err?.code === 'ENOENT') {
+            throw Object.assign(new Error('Google Gemini session was signed out before token refresh.'), {
+              code: 'OAUTH_LOGGED_OUT',
+            });
+          }
+          throw err;
+        }
+      }
+      try {
+        const config = resolveOAuthConfig({ defaultProfile, env });
+        const refreshed = await refreshNativeCredential(config, startRefresh, { signal });
+        if (!refreshed?.accessToken) {
+          throw Object.assign(new Error('OAuth refresh did not return an access token'), {
+            code: 'OAUTH_REFRESH_FAILED',
+          });
+        }
+        const subscriptionTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
+        const commitExternalRefresh = () => {
+          const currentStored = readStoredCredential(resolvedAuthPath);
+          if (authGeneration !== startGen || !currentStored) {
+            throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
+              code: 'OAUTH_LOGGED_OUT',
+            });
+          }
+          if (currentStored.refresh !== startDiskRefresh) {
+            accountEpoch++;
+            lastSeenDiskRefresh = currentStored.refresh;
+            memoryExternalState = null;
+            throw Object.assign(new Error('Google Gemini account changed during token refresh; retry request.'), {
+              code: 'OAUTH_ACCOUNT_CHANGED',
+            });
+          }
+          const next = {
             type: 'oauth',
             refresh: refreshed.refreshToken || startRefresh,
             access: refreshed.accessToken,
             expires: computeExpiresAtMs(refreshed.expiresInSeconds),
-            subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentRaw.subscriptionTier || 'unknown'),
-            readOnlyExternal: false,
-          }));
-        } catch (err) {
-          if (err?.code === 'OAUTH_ACCOUNT_CHANGED') {
-            const latest = readStoredCredential(resolvedAuthPath);
-            accountEpoch++;
-            lastSeenDiskRefresh = latest?.refresh ?? null;
-            memoryExternalState = null;
-          }
-          throw err;
+            subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentStored.subscriptionTier || 'unknown'),
+            readOnlyExternal: true,
+          };
+          // Never write or create lockfiles next to an external/read-only auth file.
+          memoryExternalState = { diskRefresh: startDiskRefresh, cred: next };
+          return { ...next, diskRefresh: startDiskRefresh, accountEpoch: startEpoch };
+        };
+        // External/unmanaged auth files may live on read-only mounts; never create a .lock file beside them.
+        if (credential.readOnlyExternal) {
+          return commitExternalRefresh();
         }
-        lastSeenDiskRefresh = next.refresh;
-        return { ...next, diskRefresh: next.refresh, accountEpoch: startEpoch };
-      });
+        // Cross-process serialized AND pre-refresh inode-pinned compare-and-update for MCP-owned auth files.
+        return withAuthFileLock(resolvedAuthPath, () => {
+          if (authGeneration !== startGen) {
+            throw Object.assign(new Error('Google Gemini session was signed out during token refresh.'), {
+              code: 'OAUTH_LOGGED_OUT',
+            });
+          }
+          let next;
+          try {
+            next = updatePinnedCredentialInPlace(
+              resolvedAuthPath,
+              pinnedFd,
+              pinnedStat,
+              startDiskRefresh,
+              (currentRaw) => ({
+                type: 'oauth',
+                refresh: refreshed.refreshToken || startRefresh,
+                access: refreshed.accessToken,
+                expires: computeExpiresAtMs(refreshed.expiresInSeconds),
+                subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentRaw.subscriptionTier || 'unknown'),
+                readOnlyExternal: false,
+              }),
+            );
+          } catch (err) {
+            if (err?.code === 'OAUTH_ACCOUNT_CHANGED') {
+              const latest = readStoredCredential(resolvedAuthPath);
+              accountEpoch++;
+              lastSeenDiskRefresh = latest?.refresh ?? null;
+              memoryExternalState = null;
+            }
+            throw err;
+          }
+          lastSeenDiskRefresh = next.refresh;
+          return { ...next, diskRefresh: next.refresh, accountEpoch: startEpoch };
+        });
+      } finally {
+        if (pinnedFd !== null) {
+          try { fs.closeSync(pinnedFd); } catch {}
+        }
+      }
     })();
     inflightRefresh = refreshPromise;
     inflightIdentity = startDiskRefresh;
