@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import http2 from 'node:http2';
 import { deflateSync } from 'node:zlib';
 import { normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, PROMPT_MAX_BYTES } from '../src/openai-contract.mjs';
+import { measurePromptImagePayload } from '../src/openai-usage.mjs';
 import { decodeImageDataUrl, collectImageInputs, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../src/image-input.mjs';
 import { buildConsumerToolInitial } from '../native-wire/consumer-tool-codec.mjs';
 import { buildClientGenerate, GrpcMessageReader, frameGrpcMessage } from '../native-wire/robin-current.mjs';
@@ -286,4 +287,164 @@ test('image turns retain downgrade/reset verification and never release failed o
     else assert.equal(error.code, code);
     assert.equal(out.includes('must not leak'), false); assert.equal(out.includes('data: '), false);
   }
+});
+
+test('Responses function_call_output accepts array output with input_text/input_image and defers images past tool groups', async t => {
+  const readImageTool = {
+    type: 'function',
+    name: 'read_image',
+    description: 'Read an image.',
+    parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'], additionalProperties: false },
+  };
+  const pngUrl = url(PNG);
+  const call = (call_id, file_path = 'tiny.png') => ({
+    type: 'function_call',
+    call_id,
+    name: 'read_image',
+    arguments: JSON.stringify({ file_path }),
+  });
+
+  // 1. String output remains unchanged and introduces no synthetic user message or image.
+  const strNorm = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: 'Read file' },
+      call('call_str'),
+      { type: 'function_call_output', call_id: 'call_str', output: 'plain text result' },
+    ],
+  });
+  assert.deepEqual(strNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool']);
+  assert.equal(strNorm.body.messages[2].content, 'plain text result');
+  assert.equal(buildCanonicalPrompt(strNorm.body).images.length, 0);
+
+  // 2. Text-only array output joins onto the tool message with no synthetic user message.
+  const textArrayNorm = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: 'Read file' },
+      call('call_txt'),
+      { type: 'function_call_output', call_id: 'call_txt', output: [{ type: 'input_text', text: 'part-1 ' }, { type: 'input_text', text: 'part-2' }] },
+    ],
+  });
+  assert.deepEqual(textArrayNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool']);
+  assert.equal(textArrayNorm.body.messages[2].content, 'part-1 part-2');
+  assert.equal(buildCanonicalPrompt(textArrayNorm.body).images.length, 0);
+
+  // 3. Array output with input_text + input_image keeps text on tool message and flushes image as one user message.
+  const mixedInput = [
+    { role: 'user', content: 'Reply with the single word OK.' },
+    call('call_test'),
+    {
+      type: 'function_call_output',
+      call_id: 'call_test',
+      output: [
+        { type: 'input_text', text: '1x1 png' },
+        { type: 'input_image', image_url: pngUrl, detail: 'auto' },
+      ],
+    },
+  ];
+  const mixedNorm = normalizeResponsesRequest({ model: 'gemini-neon', tools: [readImageTool], input: mixedInput });
+  assert.deepEqual(mixedNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'user']);
+  assert.equal(mixedNorm.body.messages[2].content, '1x1 png');
+  assert.equal(mixedNorm.body.messages[3].content.length, 1);
+  assert.equal(mixedNorm.body.messages[3].content[0].type, 'image_url');
+  assert.equal(buildCanonicalPrompt(mixedNorm.body).images.length, 1);
+  assert.deepEqual(measurePromptImagePayload({ input: mixedInput }), { imageCount: 1, imageUrlChars: pngUrl.length });
+
+  // 4. Image-only array output produces empty string on tool message + flushed user image message.
+  const imgOnlyNorm = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: 'Show image' },
+      call('call_img_only'),
+      { type: 'function_call_output', call_id: 'call_img_only', output: [{ type: 'input_image', image_url: pngUrl }] },
+    ],
+  });
+  assert.deepEqual(imgOnlyNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'user']);
+  assert.equal(imgOnlyNorm.body.messages[2].content, '');
+  assert.equal(buildCanonicalPrompt(imgOnlyNorm.body).images.length, 1);
+
+  // 5. Two parallel tool outputs with images defer and flush together after the tool group (no PENDING_TOOL_CALLS).
+  const groupNorm = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: 'Compare both' },
+      call('call_a', 'a.png'),
+      call('call_b', 'b.png'),
+      { type: 'function_call_output', call_id: 'call_a', output: [{ type: 'input_text', text: 'img A' }, { type: 'input_image', image_url: pngUrl }] },
+      { type: 'function_call_output', call_id: 'call_b', output: [{ type: 'input_text', text: 'img B' }, { type: 'input_image', image_url: pngUrl }] },
+      { role: 'user', content: 'Now summarize' },
+    ],
+  });
+  assert.deepEqual(groupNorm.body.messages.map(m => m.role), ['user', 'assistant', 'tool', 'tool', 'user', 'user']);
+  assert.equal(groupNorm.body.messages[2].content, 'img A');
+  assert.equal(groupNorm.body.messages[3].content, 'img B');
+  assert.equal(groupNorm.body.messages[4].content.length, 2);
+  assert.equal(groupNorm.body.messages[5].content, 'Now summarize');
+  assert.equal(buildCanonicalPrompt(groupNorm.body).images.length, 2);
+
+  // 6. Large (>4 MiB base64) image in function_call_output uses the image budget slot (not REQUEST_MAX_NON_IMAGE_BYTES).
+  const largePngUrl = url(png({ padding: 3.5 * 1024 * 1024 }));
+  const largeToolNorm = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [
+      { role: 'user', content: 'Inspect large screenshot' },
+      call('call_large'),
+      { type: 'function_call_output', call_id: 'call_large', output: [{ type: 'input_text', text: 'big screenshot' }, { type: 'input_image', image_url: largePngUrl }] },
+    ],
+  });
+  assert.equal(buildCanonicalPrompt(largeToolNorm.body).images.length, 1);
+
+  // 7. Non-string, non-array output still fails INVALID_TEXT; empty array fails INVALID_MESSAGE_CONTENT.
+  for (const badOutput of [{ text: 'nope' }, 42, null, undefined]) {
+    rejected(() => normalizeResponsesRequest({
+      model: 'gemini-neon',
+      tools: [readImageTool],
+      input: [{ role: 'user', content: 'Read' }, call('call_bad'), { type: 'function_call_output', call_id: 'call_bad', output: badOutput }],
+    }), 'INVALID_TEXT');
+  }
+  rejected(() => normalizeResponsesRequest({
+    model: 'gemini-neon',
+    tools: [readImageTool],
+    input: [{ role: 'user', content: 'Read' }, call('call_empty'), { type: 'function_call_output', call_id: 'call_empty', output: [] }],
+  }), 'INVALID_MESSAGE_CONTENT');
+
+  // 8. End-to-end HTTP POST /v1/responses uploads the tool-result image and returns compact token usage.
+  const f = await fixture({ accountCount: 1, allowFailover: false, turns: [{ text: 'OK', mode: 3 }] });
+  t.after(() => f.close());
+  let uploadedCount = 0;
+  f.app.provider.uploadImages = async (_token, imgs) => {
+    uploadedCount += imgs.length;
+    return imgs.map((img, i) => ({ blobId: `tool_img_${i}`, mimeType: img.mimeType }));
+  };
+  const res = await f.api('/v1/responses', {
+    method: 'POST',
+    body: {
+      model: 'gemini-neon',
+      stream: false,
+      tools: [readImageTool],
+      input: [
+        { role: 'user', content: 'Reply with the single word OK.' },
+        call('call_http'),
+        {
+          type: 'function_call_output',
+          call_id: 'call_http',
+          output: [
+            { type: 'input_text', text: '3.5MB png' },
+            { type: 'input_image', image_url: largePngUrl, detail: 'auto' },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.output[0].content[0].text, 'OK');
+  assert.equal(uploadedCount, 1);
+  assert.ok(body.usage.input_tokens >= 258 && body.usage.input_tokens < 1000, `expected compact tool-image token estimate, got ${body.usage.input_tokens}`);
 });

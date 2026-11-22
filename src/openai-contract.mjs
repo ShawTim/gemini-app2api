@@ -86,6 +86,7 @@ function requestBudget(root) {
   for (const item of Array.isArray(root.input) ? root.input.slice(0, MAX_MESSAGES) : []) {
     if (item?.type === 'input_image') mark(item, true);
     if (item?.role === 'user' && Array.isArray(item.content) && item.content.length <= 1024) for (const part of item.content) mark(part, true);
+    if (item?.type === 'function_call_output' && Array.isArray(item.output) && item.output.length <= 1024) for (const part of item.output) mark(part, true);
   }
   const ancestors = new Set();
   const visit = (value, depth, image = false) => {
@@ -425,8 +426,13 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
   if (!Array.isArray(input) || !input.length) fail('INPUT_REQUIRED');
   if (input.length > MAX_MESSAGES) fail('REQUEST_TOO_LARGE', 413, 'input');
   const { tools, choice, callName, identities } = normalizeResponsesTools(payload);
+  const deferredToolImages = [];
+  const flushToolImages = () => {
+    if (deferredToolImages.length) messages.push({ role: 'user', content: deferredToolImages.splice(0) });
+  };
   for (const item of input) {
     if (!plainObject(item)) fail('INVALID_INPUT_ITEM');
+    if (item.type !== 'function_call_output') flushToolImages();
     if (item.type === 'function_call') {
       keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'arguments', 'parsed_arguments'], 'input');
       if (item.parsed_arguments !== undefined && item.parsed_arguments !== null) fail('UNSUPPORTED_PARAMETER', 400, 'input.parsed_arguments');
@@ -439,7 +445,20 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
     } else if (item.type === 'function_call_output') {
       keys(item, ['type', 'id', 'call_id', 'output'], 'input');
       if (item.id !== undefined) id(item.id);
-      messages.push({ role: 'tool', tool_call_id: id(item.call_id), content: text(item.output) });
+      const callId = id(item.call_id);
+      if (Array.isArray(item.output)) {
+        const normalized = content(item.output, { user: true, responses: true, prefix: 'input.output' });
+        if (Array.isArray(normalized)) {
+          const toolText = normalized.filter(part => part.type === 'text').map(part => part.text).join('');
+          const imageParts = normalized.filter(part => part.type === 'image_url');
+          messages.push({ role: 'tool', tool_call_id: callId, content: toolText });
+          deferredToolImages.push(...imageParts);
+        } else {
+          messages.push({ role: 'tool', tool_call_id: callId, content: normalized });
+        }
+      } else {
+        messages.push({ role: 'tool', tool_call_id: callId, content: text(item.output) });
+      }
     } else if (item.type === 'input_text') {
       keys(item, ['type', 'text'], 'input'); messages.push({ role: 'user', content: text(item.text) });
     } else if (item.type === 'input_image') {
@@ -452,6 +471,7 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
       messages.push({ role: item.role, content: content(item.content, { assistant: item.role === 'assistant', user: item.role === 'user', responses: true, prefix: 'input.content' }) });
     }
   }
+  flushToolImages();
   const { include: _include, ...inertCompat } = compat;
   const body = normalizeChatRequest({ ...resolved, ...inertCompat, ...(response_format ? { response_format } : {}), messages, tools, tool_choice: choice, [RESPONSE_TOOL_IDENTITIES]: identities }, { allowAutoModel });
   const projected = collectImageInputs(body.messages).messages;

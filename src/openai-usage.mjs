@@ -32,6 +32,7 @@ export function measurePromptImagePayload(body) {
         imageUrlChars += item.image_url.length;
       } else {
         scanParts(item?.content);
+        scanParts(item?.output);
       }
     }
   }
