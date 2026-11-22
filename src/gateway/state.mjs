@@ -70,6 +70,7 @@ export const defaults = Object.freeze({
   maxPromptBytes: 0,
   continuation: false,
   allowRemoteImages: false,
+  mcpEnabled: true,
   sessionTtlMs: 3600000,
   maxSessions: 256,
 });
@@ -82,6 +83,7 @@ export function validateSettings(input, { partial = false } = {}) {
         "maxConcurrent",
         "continuation",
         "allowRemoteImages",
+        "mcpEnabled",
         "sessionTtlMs",
         "maxSessions",
         "maxPromptBytes",
@@ -108,7 +110,7 @@ export function validateSettings(input, { partial = false } = {}) {
     } else if (k === "continuation") {
       if (typeof v !== "boolean") throw fault("INVALID_SETTINGS");
       if (v) throw fault("UNSUPPORTED_CONTINUATION");
-    } else if (k === "allowRemoteImages") {
+    } else if (k === "allowRemoteImages" || k === "mcpEnabled") {
       if (typeof v !== "boolean") throw fault("INVALID_SETTINGS");
     } else if (!Number.isSafeInteger(v) || v < ranges[k][0] || v > ranges[k][1])
       throw fault("INVALID_SETTINGS");

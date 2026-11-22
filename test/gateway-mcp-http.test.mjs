@@ -264,4 +264,27 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
   assert.equal(errLine.jsonrpc, '2.0');
   assert.equal(errLine.id, 99);
   assert.equal(errLine.error.code, -32000);
+
+  // 10. MCP tool calls record path '/mcp' in overview request telemetry
+  assert.ok(f.app.overview().requests.some((r) => r.path === '/mcp'), 'expected /mcp in overview request metadata');
+
+  // 11. mcpEnabled setting defaults true, validates boolean, and disables POST /mcp with 403 MCP_DISABLED while leaving /v1/* unaffected
+  assert.equal(f.store.settings().mcpEnabled, true);
+  assert.throws(() => f.store.updateSettings({ mcpEnabled: 'false' }), { code: 'INVALID_SETTINGS' });
+  const disableRes = await f.admin('settings', { method: 'PATCH', body: { mcpEnabled: false } });
+  assert.equal(disableRes.status, 200);
+  assert.equal((await disableRes.json()).mcpEnabled, false);
+  const blockedMcp = await f.api('/mcp', {
+    method: 'POST',
+    body: { jsonrpc: '2.0', id: 100, method: 'ping' },
+  });
+  assert.equal(blockedMcp.status, 403);
+  assert.equal((await blockedMcp.json()).error.code, 'MCP_DISABLED');
+  assert.equal((await f.api('/v1/models')).status, 200);
+  const reenableRes = await f.admin('settings', { method: 'PATCH', body: { mcpEnabled: true } });
+  assert.equal(reenableRes.status, 200);
+  assert.equal((await f.api('/mcp', {
+    method: 'POST',
+    body: { jsonrpc: '2.0', id: 101, method: 'ping' },
+  })).status, 200);
 });

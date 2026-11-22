@@ -198,6 +198,7 @@ function safeError(error) {
     INVALID_RESPONSE: L('The server returned an unexpected response. No success was assumed.', '伺服器回傳非預期的回應，未有當作成功。'),
     KEY_SECRET_UNAVAILABLE: L('This key was created in an earlier version that stored only a hash. Create a new key to enable copying.', '此金鑰由只儲存雜湊值的舊版建立。請建立新金鑰以支援隨時複製。'),
     KEY_NOT_FOUND: L('This API key is no longer active.', '此 API 金鑰已失效或已被撤銷。'),
+    MCP_DISABLED: L('The MCP endpoint (POST /mcp) is disabled in Settings.', 'MCP 端點（POST /mcp）已在設定中停用。'),
     DEMO_ONLY: L('Demo only: this action did not contact a provider.', '僅為示範，此操作沒有連接供應商。'),
   };
   return `${messages[code] || L('The operation failed. Your current view and input have been retained. Check sanitized server diagnostics.', '操作失敗，已保留目前畫面及輸入。請檢查已清理的伺服器診斷資料。')} (${code}${error?.status ? ` · HTTP ${error.status}` : ''})`;
@@ -361,6 +362,8 @@ function desktopNavigation() {
   return el('nav', { class: 'daily-nav', 'aria-label': L('Main navigation', '主要導覽') }, ['accounts', 'keys', 'settings'].map(navLink));
 }
 function gatewayBaseUrl() { return location.protocol === 'file:' ? 'http://127.0.0.1:18989/v1' : `${location.origin}/v1`; }
+function gatewayMcpUrl() { return location.protocol === 'file:' ? 'http://127.0.0.1:18989/mcp' : `${location.origin}/mcp`; }
+function mcpEndpointEnabled() { return (S.settings?.mcpEnabled ?? S.overview?.settings?.mcpEnabled) !== false; }
 function render() {
   const savedFocus = captureFocus(); applyPreferences();
   if (!S.authenticated) { closeAccountDrawer(false); renderLogin(); restoreFocus(savedFocus); return; }
@@ -1052,6 +1055,10 @@ function presetSnippetText(preset = S.preset) {
   if (preset === 'cline') {
     return `// Plan / Daily Flagship: gemini-neon (512k Pro · ~1.6-2x quota; gemini-argon aliases here)\n// Fast / High-Volume:    gemini-hydrogen (512k · ~2x faster)\n{\n  "apiProvider": "openai",\n  "openAiBaseUrl": ${JSON.stringify(base)},\n  "openAiModelId": "gemini-neon"\n}`;
   }
+  if (preset === 'mcp') {
+    const mcpUrl = gatewayMcpUrl();
+    return `// Streamable HTTP MCP (Claude Code, Cursor, Windsurf, VS Code, Codex)\n// Tools: ask_gemini, gemini_search, gemini_quota\n{\n  "mcpServers": {\n    "gemini-app": {\n      "url": ${JSON.stringify(mcpUrl)},\n      "headers": {\n        "Authorization": "Bearer \${GEMINI_GATEWAY_KEY}"\n      }\n    }\n  }\n}`;
+  }
   if (preset === 'curl') {
     return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gemini-neon","messages":[{"role":"user","content":"Hi"}]}'`;
   }
@@ -1095,7 +1102,8 @@ function bottomDeck() {
         el('div', { class: 'row' },
           el('span', { class: 'muted', style: 'font-size:11.5px;font-weight:560' }, L('Recommended Dual-Model Preset:', '推薦雙模型配置預設：')),
           el('div', { class: 'preset-tabs', role: 'group', 'aria-label': L('Client preset', '客戶端預設') },
-            [['codex', 'Codex CLI'], ['cline', 'Cline / Roo'], ['curl', 'cURL']].map(([key, label]) => btn(label, () => { S.preset = key; updateContent(); }, { class: 'preset-tab', 'aria-pressed': String(S.preset === key) })))),
+            [['codex', 'Codex CLI'], ['cline', 'Cline / Roo'], ['mcp', 'MCP'], ['curl', 'cURL']].map(([key, label]) => btn(label, () => { S.preset = key; updateContent(); }, { class: 'preset-tab', 'data-preset': key, 'aria-pressed': String(S.preset === key) })))),
+        S.preset === 'mcp' && !mcpEndpointEnabled() && el('p', { class: 'help' }, badge(L('MCP disabled', 'MCP 已停用'), 'amber'), ' ', L('Enable POST /mcp in ', '請先於設定啟用 POST /mcp：'), link('settings', L('Settings →', '設定 →'))),
         el('pre', { class: 'deck-snippet', tabindex: '0', 'aria-label': L('Quick connect configuration', '快速接入設定') }, presetSnippetText()),
         el('div', { class: 'row' },
           btn([icon('copy'), L('Copy preset', '複製配置')], () => copy(presetSnippetText()), { class: 'compact' }),
@@ -1368,7 +1376,7 @@ function requestMetadata(r) {
     const value = r[key];
     if (['number', 'boolean'].includes(typeof value) || value === null) result[key] = value;
     else if (typeof value === 'string') {
-      if (key === 'path') result[key] = ['/v1/models', '/v1/chat/completions', '/v1/responses'].includes(value) ? value : '[other endpoint]';
+      if (key === 'path') result[key] = ['/v1/models', '/v1/chat/completions', '/v1/responses', '/mcp'].includes(value) ? value : '[other endpoint]';
       else if (key === 'errorCode') result[key] = /^[A-Z0-9_]{1,64}$/.test(value) ? value : '[redacted]';
       else result[key] = /https?:|@|Bearer\s|sk-|gsk_/i.test(value) ? '[redacted]' : value.slice(0, 160);
     }
@@ -1432,9 +1440,13 @@ function inspectRequest(raw) {
 function modelOptions() { return (S.overview.models || []).map(model => [model, model]); }
 function snippet() {
   const base = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>/v1' : `${location.origin}/v1`;
+  const origin = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>' : location.origin;
+  const mcpUrl = `${origin}/mcp`;
   const model = S.clientModel || '<MODEL_ID>';
   if (S.snippet === 'python') return `import os\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=${JSON.stringify(base)},\n    api_key=os.environ["GEMINI_GATEWAY_KEY"],\n)\nresponse = client.chat.completions.create(\n    model=${JSON.stringify(model)},\n    messages=[{"role": "user", "content": "Hello"}],\n    extra_body={"thinking_level": 2},\n)\nprint(response.choices[0].message.content)`;
   if (S.snippet === 'javascript') return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: ${JSON.stringify(base)},\n  apiKey: process.env.GEMINI_GATEWAY_KEY,\n});\nconst response = await client.chat.completions.create({\n  model: ${JSON.stringify(model)},\n  messages: [{ role: "user", content: "Hello" }],\n  thinking_level: 2,\n});\nconsole.log(response.choices[0].message.content);`;
+  if (S.snippet === 'mcp-http') return `// Streamable HTTP MCP (Claude Code, Cursor, Windsurf, VS Code, Codex)\n// Tools: ask_gemini, gemini_search, gemini_quota\n{\n  "mcpServers": {\n    "gemini-app": {\n      "url": ${JSON.stringify(mcpUrl)},\n      "headers": {\n        "Authorization": "Bearer \${GEMINI_GATEWAY_KEY}"\n      }\n    }\n  }\n}`;
+  if (S.snippet === 'mcp-stdio') return `// stdio MCP bridge to this gateway (for stdio-only clients e.g. Claude Desktop)\n{\n  "mcpServers": {\n    "gemini-app": {\n      "command": "npx",\n      "args": ["-y", "gemini-app2api", "mcp"],\n      "env": {\n        "GEMINI_GATEWAY_URL": ${JSON.stringify(origin)},\n        "GEMINI_GATEWAY_API_KEY": "\${GEMINI_GATEWAY_KEY}"\n      }\n    }\n  }\n}`;
   return `curl ${JSON.stringify(`${base}/chat/completions`)} \\\n  -H "Authorization: Bearer $GEMINI_GATEWAY_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model, messages: [{ role: 'user', content: 'Hello' }], thinking_level: 2 }, null, 2).replace(/'/g, "'\\''")}'`;
 }
 async function copyClientExample() {
@@ -1443,14 +1455,29 @@ async function copyClientExample() {
 function modelsPage() {
   const options = modelOptions(); if (!options.some(([m]) => m === S.clientModel)) S.clientModel = options[0]?.[0] || '';
   const base = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>/v1' : `${location.origin}/v1`;
+  const mcpUrl = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>/mcp' : `${location.origin}/mcp`;
+  const mcpOn = mcpEndpointEnabled();
+  const isMcpSnippet = S.snippet === 'mcp-http' || S.snippet === 'mcp-stdio';
   const modelSelect = select('client-model', options.length ? options : [['', L('No models reported', '未有回報模型')]], S.clientModel, value => { S.clientModel = value; $('client-snippet').textContent = snippet(); });
   modelSelect.disabled = !options.length || S.testBusy;
+  const snippetHelp = S.snippet === 'mcp-http'
+    ? L('Streamable HTTP MCP endpoint · exposes ask_gemini, gemini_search, and gemini_quota via the same Bearer API keys and multi-account pool. Local image file paths are blocked on HTTP /mcp.', 'Streamable HTTP MCP 端點 · 透過相同 Bearer API 金鑰及多帳戶池提供 ask_gemini、gemini_search 與 gemini_quota 工具；HTTP /mcp 會封鎖本機圖片路徑。')
+    : S.snippet === 'mcp-stdio'
+      ? L('stdio MCP bridge · forwards JSON-RPC over stdin/stdout to this gateway’s POST /mcp endpoint. Use GEMINI_GATEWAY_URL + GEMINI_GATEWAY_API_KEY.', 'stdio MCP 橋接模式 · 透過 stdin/stdout 轉發 JSON-RPC 至本閘道 POST /mcp 端點。請設定 GEMINI_GATEWAY_URL 及 GEMINI_GATEWAY_API_KEY。')
+      : L('Chat Completions example · requested thinking level 2. The resolved level must be read from the actual response, not assumed.', 'Chat Completions 範例 · 請求 thinking level 2。實際 resolved level 須以真實回應為準，不應假定相同。');
   const clients = panel(L('Client setup', '客戶端設定'), L('Use a caller API key, never your admin password or Google credentials.', '請使用呼叫端 API 金鑰，切勿使用管理員密碼或 Google 憑證。'), body(el('div', { class: 'form-stack' },
     el('div', { class: 'connection-facts' }, el('label', {}, 'Base URL', el('input', { id: 'client-base', value: base, readonly: true })), btn([icon('copy'), L('Copy URL', '複製網址')], () => copy(base), { id: 'copy-client-base' }), el('label', {}, L('Model', '模型'), modelSelect)),
+    el('div', { class: 'connection-mcp-row' },
+      el('label', {}, L('MCP Endpoint (Streamable HTTP)', 'MCP 端點（Streamable HTTP）'), el('input', { id: 'client-mcp-url', value: mcpUrl, readonly: true })),
+      btn([icon('copy'), L('Copy MCP URL', '複製 MCP 網址')], () => copy(mcpUrl), { id: 'copy-client-mcp' }),
+      el('div', { class: 'mcp-status-cell' },
+        badge(mcpOn ? L('MCP enabled', 'MCP 已啟用') : L('MCP disabled', 'MCP 已停用'), mcpOn ? 'teal' : 'amber', false, { id: 'client-mcp-status' }),
+        link('settings', mcpOn ? L('Settings →', '設定 →') : L('Enable in Settings →', '到設定啟用 →'), { class: 'button compact quiet' }))),
     el('p', { class: 'help' }, L('Key environment variable: ', '金鑰環境變數：'), mono('GEMINI_GATEWAY_KEY'), L(' · Supply it privately in your client environment. This console never inserts a key into examples.', ' · 請在客戶端環境私下設定。管理台不會將金鑰加入範例。')),
-    el('div', { class: 'segmented', 'aria-label': L('Example language', '範例語言') }, [['curl', 'cURL'], ['python', 'Python'], ['javascript', 'JavaScript']].map(([key, name]) => btn(name, () => { S.snippet = key; updateContent(); }, { id: `snippet-${key}`, 'aria-pressed': String(S.snippet === key), 'data-snippet': key }))),
-    el('p', { class: 'help' }, L('Chat Completions example · requested thinking level 2. The resolved level must be read from the actual response, not assumed.', 'Chat Completions 範例 · 請求 thinking level 2。實際 resolved level 須以真實回應為準，不應假定相同。')),
-    el('pre', { id: 'client-snippet', tabindex: '0', 'aria-label': L('Client connection example', '客戶端連線範例') }, snippet()), el('div', { class: 'row' }, btn([icon('copy'), L('Copy example', '複製範例')], copyClientExample, { id: 'copy-snippet', disabled: !options.length }), link('keys', L('Manage API keys →', '管理 API 金鑰 →'))),
+    el('div', { class: 'segmented', 'aria-label': L('Example language', '範例語言') }, [['curl', 'cURL'], ['python', 'Python'], ['javascript', 'JavaScript'], ['mcp-http', 'MCP (HTTP)'], ['mcp-stdio', 'MCP (stdio)']].map(([key, name]) => btn(name, () => { S.snippet = key; updateContent(); }, { id: `snippet-${key}`, 'aria-pressed': String(S.snippet === key), 'data-snippet': key }))),
+    el('p', { class: 'help', id: 'client-snippet-help' }, snippetHelp),
+    isMcpSnippet && !mcpOn && notice(L('POST /mcp is currently disabled in Settings. Enable it before connecting an MCP client.', 'POST /mcp 目前已在設定中停用，請先啟用再連接 MCP 客戶端。'), 'amber', { id: 'client-mcp-disabled-notice' }),
+    el('pre', { id: 'client-snippet', tabindex: '0', 'aria-label': L('Client connection example', '客戶端連線範例') }, snippet()), el('div', { class: 'row' }, btn([icon('copy'), L('Copy example', '複製範例')], copyClientExample, { id: 'copy-snippet', disabled: !isMcpSnippet && !options.length }), link('keys', L('Manage API keys →', '管理 API 金鑰 →'))),
     el('p', { class: 'help', id: 'client-copy-state', role: 'status' }, S.configCopied ? L('Copied in this view, not verified as connected. Run a normal request, then inspect Requests.', '本次畫面已複製，但未驗證連線。請發出正常請求，再到請求頁檢視。') : L('Examples are not executed here. No model request is sent automatically.', '範例不會在此執行，亦不會自動發送模型請求。')))));
   const catalogue = panel(L('Advertised models', '已提供的模型'), L('Reported IDs, not a live access or quota check.', '已回報識別碼，並非即時存取或配額檢查。'), options.length ? options.map(([m]) => el('div', { class: 'model-row' }, el('h3', {}, m), btn([icon('copy'), L('Copy ID', '複製識別碼')], () => copy(m), { id: `copy-model-${m}`, class: 'quiet' }))) : empty());
   const capabilities = fold('capabilities-details', L('Supported API, prompt tools & limits', '支援 API、提示詞工具與限制'), body(el('div', { class: 'form-stack' }, notice(L('Tool calling uses the disclosed prompt protocol, not native structured function calling. The caller executes tools; this console does not.', '工具呼叫採用已披露的提示詞協議，並非原生結構化函數呼叫。工具由呼叫端執行，本管理台不會執行。')), el('p', {}, L('Chat Completions and Responses support an explicit text, structured-output, and function subset. Ordinary SSE streams incrementally after a 2,048-byte prefix hold, while structured-output and native_search turns buffer until terminal validation. Replay the complete linked history; opaque continuation is unsupported.', 'Chat Completions 及 Responses 支援明確的文字、結構化輸出與函數子集。一般 SSE 會在保留首 2,048 位元組前綴後增量串流；結構化輸出及 native_search 請求則會緩衝至完成終端驗證。每輪須重播完整關聯歷史；不支援不透明續接。')), el('p', {}, L('Token usage reports gateway heuristic estimates (estimated: true), never official Google billing counters. Native search (native_search: true) is a separate explicit opt-in, not OpenAI web_search. Unsupported options fail explicitly.', 'Token 用量回報閘道估算值（estimated: true），並非官方 Google 計費或精確統計。原生搜尋（native_search: true）須獨立明確啟用，並非 OpenAI 內建 web_search 工具。不支援選項會明確報錯。')))), S.capabilitiesOpen, { class: 'panel section-fold' });
@@ -1533,9 +1560,13 @@ async function toggleRevealKey(k) {
 function keysPage() {
   const keys = S.keys === null ? null : S.keys.filter(k => !k.revokedAt);
   const base = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>/v1' : `${location.origin}/v1`;
+  const mcpUrl = location.protocol === 'file:' ? '<GATEWAY_ORIGIN>/mcp' : `${location.origin}/mcp`;
+  const mcpOn = mcpEndpointEnabled();
   const endpointStrip = el('section', { class: 'panel endpoint-strip' }, el('div', { class: 'endpoint-strip-main' },
-    el('div', { class: 'endpoint-strip-copy' }, el('span', { class: 'eyebrow' }, L('OPENAI-COMPATIBLE ENDPOINT', 'OPENAI 相容端點')), el('div', { class: 'endpoint-url-row' }, mono(base), btn([icon('copy'), L('Copy Base URL', '複製 Base URL')], () => copy(base), { id: 'copy-keys-base', class: 'compact' }))),
-    el('div', { class: 'endpoint-strip-aside' }, el('span', { class: 'help' }, L('Bearer keys authenticate /v1/* client requests and can be copied or revoked here anytime.', 'Bearer 金鑰用於驗證 /v1/* 客戶端請求，可隨時在此複製或撤銷。')), link('models', L('Client setup →', '客戶端設定 →'), { class: 'button compact quiet' }))));
+    el('div', { class: 'endpoint-strip-group' },
+      el('div', { class: 'endpoint-strip-copy' }, el('span', { class: 'eyebrow' }, L('OPENAI-COMPATIBLE ENDPOINT', 'OPENAI 相容端點')), el('div', { class: 'endpoint-url-row' }, mono(base), btn([icon('copy'), L('Copy Base URL', '複製 Base URL')], () => copy(base), { id: 'copy-keys-base', class: 'compact' }))),
+      el('div', { class: 'endpoint-strip-copy' }, el('span', { class: 'eyebrow' }, L('MCP STREAMABLE HTTP ENDPOINT', 'MCP STREAMABLE HTTP 端點')), el('div', { class: 'endpoint-url-row' }, mono(mcpUrl), btn([icon('copy'), L('Copy MCP URL', '複製 MCP 網址')], () => copy(mcpUrl), { id: 'copy-keys-mcp', class: 'compact' }), badge(mcpOn ? L('Enabled', '已啟用') : L('Disabled', '已停用'), mcpOn ? 'teal' : 'amber', false, { id: 'keys-mcp-status' })))),
+    el('div', { class: 'endpoint-strip-aside' }, el('span', { class: 'help' }, L('Bearer keys authenticate both /v1/* and /mcp client requests and can be copied or revoked here anytime.', 'Bearer 金鑰同時驗證 /v1/* 與 /mcp 客戶端請求，可隨時在此複製或撤銷。')), link('models', L('Client setup →', '客戶端設定 →'), { class: 'button compact quiet' }))));
   return [endpointStrip,
     panel(L('Gateway API keys', '閘道 API 金鑰'), L('Only active keys are listed. Revoked keys stop working immediately and are removed from this list.', '只列出有效金鑰。撤銷後會即時失效並從清單移除。'), keys === null ? (S.loading ? el('div', { class: 'loading' }, t('loading')) : empty(L('Keys not loaded', '尚未讀取金鑰'), L('Refresh to retry. No credentials are assumed.', '請重新整理以重試，不會假定任何憑證。'))) : keys.length ? table([t('label'), L('API key', 'API 金鑰'), L('Created', '建立時間'), L('Last used', '上次使用'), L('Actions', '操作')], keys.map(k => {
       const shown = revealedKeys.get(k.id);
@@ -1548,7 +1579,7 @@ function keysPage() {
       return [k.label || '—', secretCell, date(k.createdAt), date(k.lastUsedAt), actionCell];
     }), t('keys')) : empty(L('No active API keys', '沒有有效 API 金鑰'), L('Create a separate key for each client so you can copy or revoke it independently.', '為每個客戶端建立獨立金鑰，方便隨時複製或撤銷。')))];
 }
-const editableSettings = ['timeoutMs', 'maxConcurrent', 'continuation', 'allowRemoteImages', 'sessionTtlMs', 'maxSessions'];
+const editableSettings = ['timeoutMs', 'maxConcurrent', 'continuation', 'allowRemoteImages', 'mcpEnabled', 'sessionTtlMs', 'maxSessions'];
 function readableMilliseconds(value) { return finite(value) && Number.isInteger(value) && value >= 0 ? `${value} ms = ${value / 1000} s = ${value / 60000} min` : L('Enter whole milliseconds.', '請輸入整數毫秒。'); }
 function settingsPage() {
   const settings = S.settings || {}, draft = S.draft || Object.fromEntries(editableSettings.map(k => [k, settings[k]]));
@@ -1559,6 +1590,7 @@ function settingsPage() {
     el('fieldset', {}, el('legend', {}, L('Request limits', '請求限制')), el('div', { class: 'form-grid' }, field('timeoutMs'), field('maxConcurrent'))),
     el('fieldset', {}, el('legend', {}, L('Sticky routing sessions', '固定路由工作階段')), el('div', { class: 'form-grid' }, field('sessionTtlMs'), field('maxSessions'))),
     el('fieldset', {}, el('legend', {}, L('Remote image URLs', '遠端圖片網址')), el('label', { class: 'check-label' }, el('input', { id: 'setting-allowRemoteImages', name: 'allowRemoteImages', type: 'checkbox', role: 'switch', checked: draft.allowRemoteImages === true, disabled: S.settingsBusy, 'aria-describedby': 'remote-images-help', onChange: event => changed('allowRemoteImages', event.target.checked) }), L('Allow remote image URLs', '允許遠端圖片 URL')), el('p', { class: 'help', id: 'remote-images-help' }, L('Off by default. When enabled, the gateway downloads public images and uploads them to Google. The image host sees the gateway IP. Public-address, redirect, size and timeout protections always apply. Base64 images are unaffected. Save to apply to new requests; requests already running may finish.', '預設關閉。開啟後，閘道會下載公網圖片並上傳 Google；圖片網站會見到閘道 IP。公網位址、重新導向、大小及逾時保護一直有效。Base64 圖片不受影響。儲存後套用至新請求；已執行的請求可能繼續完成。'))),
+    el('fieldset', {}, el('legend', {}, L('MCP endpoint (POST /mcp)', 'MCP 端點（POST /mcp）')), el('label', { class: 'check-label' }, el('input', { id: 'setting-mcpEnabled', name: 'mcpEnabled', type: 'checkbox', role: 'switch', checked: draft.mcpEnabled !== false, disabled: S.settingsBusy, 'aria-describedby': 'mcp-enabled-help', onChange: event => changed('mcpEnabled', event.target.checked) }), L('Enable MCP Streamable HTTP endpoint', '啟用 MCP Streamable HTTP 端點')), el('p', { class: 'help', id: 'mcp-enabled-help' }, L('On by default. Exposes ask_gemini, gemini_search, and gemini_quota at POST /mcp using the same Bearer API keys, Origin allowlist, and multi-account pool. Local image file paths are blocked on HTTP /mcp. Save to apply to new requests; requests already running may finish.', '預設開啟。於 POST /mcp 提供 ask_gemini、gemini_search 與 gemini_quota 工具，共用 Bearer API 金鑰、Origin 白名單及多帳戶路由池；HTTP /mcp 會封鎖本機圖片檔案路徑。儲存後套用至新請求；已執行的請求可能繼續完成。'))),
     el('div', { class: 'capability-fact', id: 'setting-continuation' }, el('strong', {}, L('Opaque continuation: unsupported', '不透明對話續接：不支援')), el('p', { class: 'help' }, L('Read-only capability. Clients replay full history; the gateway does not summarize it. Session limits control local routing, not stored conversations.', '唯讀能力說明。客戶端重播完整歷史，閘道唔會另做摘要。工作階段限制只控制本機路由，並非對話儲存。'))),
     el('p', { class: 'help', id: 'draft-state', role: 'status' }, settingsDirty() ? L('Unsaved draft retained when changing pages.', '未儲存草稿會在切換頁面時保留。') : L('No unsaved changes.', '沒有未儲存變更。')),
     el('div', { class: 'actions' }, el('button', { type: 'submit', id: 'save-settings', class: 'primary', disabled: S.settingsBusy || !settingsDirty() }, S.settingsBusy ? L('Saving…', '儲存中…') : L('Save changes', '儲存變更')), btn(L('Discard draft', '捨棄草稿'), () => { S.draft = null; S.settingsError = ''; S.settingsSaved = false; updateContent(); }, { id: 'discard-settings', disabled: S.settingsBusy || !S.draft })),
@@ -1567,7 +1599,7 @@ function settingsPage() {
     el('p', { class: 'help', id: 'diagnostics-snapshot' }, S.diagnosticsAt ? L('Read at: ', '讀取時間：') + date(S.diagnosticsAt) : L('Not loaded. No background diagnostic request.', '尚未讀取，不會在背景請求診斷。')),
     el('div', { class: 'actions' }, btn(S.diagnostics ? L('Refresh diagnostics', '重新讀取診斷') : L('Load diagnostics', '讀取診斷資料'), loadDiagnostics, { id: 'load-diagnostics', disabled: Boolean(S.diagnosticsBusy) }), btn([icon('download'), L('Export diagnostics', '匯出診斷資料')], () => download('diagnostics', { demo: DEMO, snapshotAt: S.diagnosticsAt, diagnostics: S.diagnostics }), { id: 'export-diagnostics', disabled: !S.diagnostics })),
     S.diagnostics && fold('diagnostics-details', L('Sanitized diagnostic JSON', '已清理的診斷 JSON'), el('pre', { id: 'diagnostics-output', tabindex: '0' }, JSON.stringify(S.diagnostics, null, 2)), S.diagnosticsOpen), S.diagnosticsError && notice(S.diagnosticsError, 'rose', { role: 'alert' }))));
-  return [panel(L('Resource limits', '資源限制'), L('Changes apply only when saved.', '儲存後才會套用變更。'), body(form)), fold('advanced', L('Advanced', '進階'), el('div', { class: 'stack' }, el('div', { class: 'advanced-links' }, ['models', 'requests', 'sessions', 'playground', 'overview'].map(navLink)), btn(L('Reload saved admin data', '重新載入已儲存管理資料'), () => refresh(), { id: 'refresh' }), el('p', { class: 'help' }, L('Reloads local records only; use Refresh all on Accounts to read Google usage.', '只重新載入本機紀錄；請在帳戶頁按「全部更新」查詢 Google 用量。')), panel(L('Runtime facts', '執行環境資料'), null, body(definition([[L('Version', '版本'), S.overview.version], [L('Transport', '傳輸'), mono(S.overview.mode)], [L('Tool protocol', '工具協議'), mono(S.overview.toolProtocol)], [L('Bind host', '綁定位址'), mono(settings.host)], [L('Port', '連接埠'), mono(settings.port)], [L('Maximum body size', '請求內容大小上限'), finite(settings.maxBodyBytes) ? `${num(settings.maxBodyBytes)} bytes` : L('Not supplied', '未提供')]]))), diagnostics), false, { class: 'panel advanced-area' })];
+  return [panel(L('Resource limits', '資源限制'), L('Changes apply only when saved.', '儲存後才會套用變更。'), body(form)), fold('advanced', L('Advanced', '進階'), el('div', { class: 'stack' }, el('div', { class: 'advanced-links' }, ['models', 'requests', 'sessions', 'playground', 'overview'].map(navLink)), btn(L('Reload saved admin data', '重新載入已儲存管理資料'), () => refresh(), { id: 'refresh' }), el('p', { class: 'help' }, L('Reloads local records only; use Refresh all on Accounts to read Google usage.', '只重新載入本機紀錄；請在帳戶頁按「全部更新」查詢 Google 用量。')), panel(L('Runtime facts', '執行環境資料'), null, body(definition([[L('Version', '版本'), S.overview.version], [L('Transport', '傳輸'), mono(S.overview.mode)], [L('Tool protocol', '工具協議'), mono(S.overview.toolProtocol)], [L('MCP endpoint', 'MCP 端點'), settings.mcpEnabled === false ? L('Disabled', '已停用') : mono(gatewayMcpUrl())], [L('Bind host', '綁定位址'), mono(settings.host)], [L('Port', '連接埠'), mono(settings.port)], [L('Maximum body size', '請求內容大小上限'), finite(settings.maxBodyBytes) ? `${num(settings.maxBodyBytes)} bytes` : L('Not supplied', '未提供')]]))), diagnostics), false, { class: 'panel advanced-area' })];
 }
 function settingsDirty() { return S.draft && editableSettings.some(key => S.draft[key] !== S.settings?.[key]); }
 async function saveSettings() {
@@ -1902,7 +1934,7 @@ function makeDemo() {
   ];
   const requests = Array.from({ length: 64 }, (_, i) => ({ id: `req_demo_${String(6400 - i).padStart(5, '0')}`, at: ago(i * 22 + 12), path: i % 4 ? '/v1/chat/completions' : '/v1/responses', model: ['gemini-hydrogen', 'gemini-neon', 'gemini-flash-lite'][i % 3], accountId: i % 5 === 0 ? 'acct_reserve' : i % 2 ? 'acct_primary' : 'acct_secondary', status: i % 17 === 5 ? 429 : i % 23 === 12 ? 502 : 200, durationMs: 360 + ((i * 237 + 103) % 1850) + (i % 9 === 0 ? 900 : 0), errorCode: i % 17 === 5 ? 'RATE_LIMITED' : i % 23 === 12 ? 'UPSTREAM_UNAVAILABLE' : null, toolCalls: i % 6 === 0 ? 1 : 0, continued: false }));
   const sessions = Array.from({ length: 8 }, (_, i) => ({ id: `sess_demo_${String(i + 1).padStart(3, '0')}`, accountId: i % 2 ? 'acct_secondary' : 'acct_primary', turns: [12, 6, 3, 8, 2, 17, 4, 1][i], lastUsedAt: ago(i * 58 + 12), inFlight: i < 3 ? 1 : 0 }));
-  const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, sessionTtlMs: 1800000, maxSessions: 256 };
+  const settings = { host: '127.0.0.1', port: 18989, timeoutMs: 120000, maxConcurrent: 6, maxBodyBytes: 4194304, continuation: false, allowRemoteImages: false, mcpEnabled: true, sessionTtlMs: 1800000, maxSessions: 256 };
   return syncDemoState({
     version: 'demo', uptimeSeconds: 31384, mode: 'native-direct', toolProtocol: 'prompt', ready: true,
     metrics: { requests: 3132, errors: 20, active: 3, successRate: 99.36, p50Ms: 1248, p95Ms: 2840 },

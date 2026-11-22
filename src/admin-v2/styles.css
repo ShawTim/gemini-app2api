@@ -1721,6 +1721,13 @@ button.terms-help {
   gap: 12px 24px;
   flex-wrap: wrap;
 }
+.endpoint-strip-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px 28px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
 .endpoint-strip-copy {
   display: grid;
   gap: 4px;
@@ -1996,6 +2003,19 @@ td .subline { display: block; color: var(--muted); font-size: 11px; margin-top: 
   grid-template-columns: minmax(0, 1.4fr) auto minmax(0,1fr);
   gap: 12px;
   align-items: end;
+}
+.connection-mcp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+.mcp-status-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 36px;
 }
 .segmented {
   display: inline-flex;
@@ -2274,8 +2294,8 @@ dialog details > summary { cursor: pointer; min-height: 36px; display: list-item
 /* Responsive Breakpoints */
 @media (max-width: 1180px) {
   .endpoint-pill, .version-pill { display: none; }
-  .connection-facts { grid-template-columns: minmax(0,1fr) auto; }
-  .connection-facts > label:last-child { grid-column: 1 / -1; }
+  .connection-facts, .connection-mcp-row { grid-template-columns: minmax(0,1fr) auto; }
+  .connection-facts > label:last-child, .connection-mcp-row > .mcp-status-cell { grid-column: 1 / -1; }
   .topbar-shortcut { display: none; }
 }
 
@@ -2302,11 +2322,11 @@ dialog details > summary { cursor: pointer; min-height: 36px; display: list-item
   .main { padding: 16px 16px 32px; }
   .demo-banner { padding: 8px 16px; }
   .demo-banner > span:not(.badge) { display: none; }
-  .evidence-grid, .form-grid, .connection-facts, .daily-filters { grid-template-columns: minmax(0,1fr); }
+  .evidence-grid, .form-grid, .connection-facts, .connection-mcp-row, .daily-filters { grid-template-columns: minmax(0,1fr); }
   .filter-pills { width: 100%; justify-content: space-between; }
   .filter-pill { flex: 1; }
-  .connection-facts > label:last-child { grid-column: auto; }
-  .connection-facts > button { justify-self: start; }
+  .connection-facts > label:last-child, .connection-mcp-row > .mcp-status-cell { grid-column: auto; }
+  .connection-facts > button, .connection-mcp-row > button { justify-self: start; }
   .journey-main { padding: 16px; flex-wrap: wrap; }
   .attention-grid { grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; }
   .attention-tile { padding: 12px; display: grid; gap: 4px; font-size: 12px; }

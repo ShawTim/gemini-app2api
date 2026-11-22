@@ -873,3 +873,15 @@ test('versionTag reads overview.version dynamically without stale hardcoded fall
   assert.equal(f.versionTag(), 'v2.0.0');
   assert.doesNotMatch(source, /1\.5\.3/);
 });
+
+test('admin-v2 supports /mcp path metadata, mcpEnabled editable setting, and MCP_DISABLED error copy', () => {
+  const f = fixture(true);
+  assert.equal(f.requestMetadata({ path: '/mcp' }).path, '/mcp');
+  assert.equal(f.requestMetadata({ path: '/mcp?token=secret' }).path, '[other endpoint]');
+  assert.ok(f.editableSettings.includes('mcpEnabled'));
+  assert.equal(f.makeDemo().settings.mcpEnabled, true);
+  f.S.lang = 'en';
+  assert.match(f.safeError({ code: 'MCP_DISABLED', status: 403 }), /MCP endpoint.*disabled.*MCP_DISABLED.*HTTP 403/i);
+  f.S.lang = 'zh-HK';
+  assert.match(f.safeError({ code: 'MCP_DISABLED', status: 403 }), /MCP 端點.*停用.*MCP_DISABLED.*HTTP 403/);
+});

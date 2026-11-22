@@ -418,7 +418,7 @@ export function createGateway({
     req,
     res,
     body,
-    { owner, route, playground = false, accountTestId = null } = {},
+    { owner, route, playground = false, mcp = false, accountTestId = null } = {},
   ) {
     if (req.aborted || res.destroyed) return;
     const canonical =
@@ -626,6 +626,7 @@ export function createGateway({
         at,
         path: accountTestId ? "/admin/api/accounts/test" : playground
           ? "/admin/api/playground"
+          : mcp ? "/mcp"
           : `/v1/${route === "responses" ? "responses" : "chat/completions"}`,
         model: canonical.model ?? "gemini-neon",
         accountId,
@@ -1057,6 +1058,9 @@ export function createGateway({
           throw fault("ORIGIN_REJECTED", 403);
         }
         const owner = security.apiOwner(req);
+        if (store.settings().mcpEnabled === false) {
+          throw fault("MCP_DISABLED", 403);
+        }
         if (url.search) throw fault("UNSUPPORTED_QUERY_PARAMETER");
         if (req.method !== "POST") {
           res.setHeader("Allow", "POST");
@@ -1098,7 +1102,7 @@ export function createGateway({
             configurable: true,
           });
           try {
-            await execute(req, capture, payloadWithChars, { owner, route: "chat" });
+            await execute(req, capture, payloadWithChars, { owner, route: "chat", mcp: true });
           } finally {
             signal?.removeEventListener("abort", onAbort);
           }
