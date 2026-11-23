@@ -139,20 +139,23 @@ const WIN32_PAUSE_BUF = typeof SharedArrayBuffer === "function" ? new Int32Array
 function pauseSync(ms) {
   if (WIN32_PAUSE_BUF && ms > 0) Atomics.wait(WIN32_PAUSE_BUF, 0, 0, ms);
 }
-export function restrictWin32DirectoryAcl(directory, { spawn = spawnSync } = {}) {
+export function restrictWin32DirectoryAcl(directory, { spawn = spawnSync, env = process.env } = {}) {
   try {
-    const whoami = spawn("whoami", ["/user", "/fo", "csv", "/nh"], {
+    const sysRoot = env?.SystemRoot || env?.WINDIR || "C:\\Windows";
+    const whoamiExe = path.win32.join(sysRoot, "System32", "whoami.exe");
+    const icaclsExe = path.win32.join(sysRoot, "System32", "icacls.exe");
+    const whoami = spawn(whoamiExe, ["/user", "/fo", "csv", "/nh"], {
       encoding: "utf8",
       timeout: 5000,
       windowsHide: true,
     });
     if (whoami.error || whoami.status !== 0) return { applied: false };
     const line = (whoami.stdout ?? "").trim().split(/\r?\n/)[0] ?? "";
-    const match = line.match(/,(?:"?)(S-1-5-[0-9-]+)(?:"?)\s*$/);
+    const match = line.match(/,(?:"?)(S-1-[0-9]+(?:-[0-9]+)+)(?:"?)\s*$/);
     if (!match) return { applied: false };
     const sid = match[1];
     const icacls = spawn(
-      "icacls",
+      icaclsExe,
       [
         directory,
         "/inheritance:r",
@@ -178,9 +181,8 @@ export function tryAcquireWin32KernelLock(directory, { fsImpl = fs } = {}) {
   } catch (error) {
     if (error?.code === "UNSAFE_STATE_PERMISSIONS") throw error;
     if (error?.code !== "ENOENT") {
-      if (["EBUSY", "EACCES", "EPERM", "EAGAIN"].includes(error?.code)) {
-        return { status: "contended" };
-      }
+      if (error?.code === "EBUSY") return { status: "contended" };
+      if (error?.code === "EACCES" || error?.code === "EPERM") return { status: "denied" };
       return { status: "failed" };
     }
   }
@@ -193,9 +195,8 @@ export function tryAcquireWin32KernelLock(directory, { fsImpl = fs } = {}) {
   try {
     fd = fsImpl.openSync(lockFile, openFlags, 0o600);
   } catch (error) {
-    if (["EBUSY", "EACCES", "EPERM", "EAGAIN"].includes(error?.code)) {
-      return { status: "contended" };
-    }
+    if (error?.code === "EBUSY") return { status: "contended" };
+    if (error?.code === "EACCES" || error?.code === "EPERM") return { status: "denied" };
     return { status: "failed" };
   }
   try {
@@ -204,13 +205,14 @@ export function tryAcquireWin32KernelLock(directory, { fsImpl = fs } = {}) {
       throw fault("UNSAFE_STATE_PERMISSIONS", 503);
     }
     // Fail-closed self-probe: verify OS kernel exclusivity (CreateFileW dwShareMode = 0)
-    // is genuinely enforced by confirming a second open fails with EBUSY/EACCES/EPERM.
+    // is genuinely enforced by confirming a second open fails specifically with EBUSY
+    // (ERROR_SHARING_VIOLATION). Never certify on EACCES/EPERM/EAGAIN.
     let probeFd;
     let probeBlocked = false;
     try {
       probeFd = fsImpl.openSync(lockFile, fsImpl.constants?.O_RDONLY ?? fs.constants.O_RDONLY);
     } catch (error) {
-      if (["EBUSY", "EACCES", "EPERM", "EAGAIN"].includes(error?.code)) {
+      if (error?.code === "EBUSY") {
         probeBlocked = true;
       }
     } finally {
@@ -444,11 +446,17 @@ export class StateStore {
     this.file = path.join(this.directory, "state.json");
     // Reject symlink ancestors rather than following an untrusted state path.
     let ancestor = this.directory;
-    while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
-    for (let p = ancestor; ; p = path.dirname(p)) {
-      if (fs.lstatSync(p).isSymbolicLink())
-        throw fault("UNSAFE_STATE_PATH", 503);
-      if (path.dirname(p) === p) break;
+    while (!fs.existsSync(ancestor)) {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) break;
+      ancestor = parent;
+    }
+    if (fs.existsSync(ancestor)) {
+      for (let p = ancestor; ; p = path.dirname(p)) {
+        if (fs.lstatSync(p).isSymbolicLink())
+          throw fault("UNSAFE_STATE_PATH", 503);
+        if (path.dirname(p) === p) break;
+      }
     }
     const existedBefore = fs.existsSync(this.directory);
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
@@ -501,32 +509,49 @@ export class StateStore {
       checkFile(this.directory, true);
       const acquired = tryAcquireWin32KernelLock(this.directory);
       if (acquired.status === "contended") throw fault("STATE_IN_USE", 503);
+      if (acquired.status === "denied") throw fault("UNSAFE_STATE_PERMISSIONS", 503);
       if (acquired.status !== "acquired") throw fault("STATE_LOCK_UNAVAILABLE", 503);
       let lockFd = acquired.fd;
       try {
         const pidFile = path.join(this.directory, "runtime.lock");
+        // Validate any stale diagnostic PID marker under the held kernel lock before
+        // reclaiming it; never O_TRUNC an unknown, malformed, symlinked, or hardlinked file.
         try {
           const existingPid = fs.lstatSync(pidFile);
-          if (existingPid.isSymbolicLink() || !existingPid.isFile() || existingPid.nlink !== 1) {
+          if (
+            existingPid.isSymbolicLink() ||
+            !existingPid.isFile() ||
+            existingPid.nlink !== 1 ||
+            existingPid.size === 0 ||
+            existingPid.size > 64
+          ) {
             throw fault("STATE_IN_USE", 503);
           }
+          const raw = fs.readFileSync(pidFile, "utf8").trim();
+          if (!/^[1-9][0-9]{0,9}$/.test(raw)) throw fault("STATE_IN_USE", 503);
+          fs.unlinkSync(pidFile);
         } catch (error) {
           if (error?.code === "STATE_IN_USE") throw error;
           if (error?.code !== "ENOENT") throw fault("STATE_IN_USE", 503);
         }
         let pidFd;
         let identity;
+        let createdPidFile = false;
         try {
           pidFd = fs.openSync(
             pidFile,
-            fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
+            fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
             0o600,
           );
+          createdPidFile = true;
           fs.writeFileSync(pidFd, String(process.pid));
           fs.fsyncSync(pidFd);
           const pidStat = fs.fstatSync(pidFd);
           identity = { dev: pidStat.dev, ino: pidStat.ino };
         } catch {
+          if (createdPidFile) {
+            try { fs.unlinkSync(pidFile); } catch {}
+          }
           throw fault("STATE_IN_USE", 503);
         } finally {
           if (pidFd !== undefined) {
@@ -643,7 +668,7 @@ export class StateStore {
         !cur.isSymbolicLink() &&
         cur.isFile() &&
         expected &&
-        cur.dev === expected.dev &&
+        (cur.dev === expected.dev || (IS_WIN32 && (cur.dev === 0 || expected.dev === 0))) &&
         cur.ino === expected.ino
       ) {
         try {
@@ -685,8 +710,12 @@ export class StateStore {
         }
       }
     } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-      if (fs.existsSync(temp)) fs.unlinkSync(temp);
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch {}
+      }
+      try {
+        if (fs.existsSync(temp)) fs.unlinkSync(temp);
+      } catch {}
     }
   }
   verifyRuntimePassword(value) {
