@@ -1,6 +1,6 @@
 {
   "name": "gemini-app2api",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Zero-dependency native Gemini HTTP/2 gateway & in-process Pi extension (pi-gemini-app) with OpenAI compatibility, caller-validated tools, multi-account pooling, and operations console.",
   "private": true,
   "repository": {
