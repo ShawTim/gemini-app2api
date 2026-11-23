@@ -183,7 +183,7 @@ function callerResultPreviewCut(str) {
  * `[Caller tool result]` continuation and everything after it is suppressed so
  * the caller receives only the real tool calls. */
 export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBytes(12).toString('hex'), policy = compileToolPolicy([]) } = {}) {
-  let pending = '', scanned = 0, seen = 0, closed = false, suppressed = false, bytes = 0;
+  let pending = '', scanned = 0, seen = 0, closed = false, suppressed = false, bytes = 0, consumedChars = 0;
   let mode = 'text', marker = '`', fenceLength = 3, toolBody = '', toolBytes = 0, headerBytes = 0, inlineTicks = 0;
   const ids = new Set();
   const malformed = reason => {
@@ -243,7 +243,7 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     }
     events.push({ type: 'content', text: raw });
   };
-  const line = (raw, final, events) => {
+  const line = (raw, final, events, lineStartOffset = consumedChars) => {
     if (suppressed) return;
     const eol = /\r?\n$/.exec(raw)?.[0] ?? '';
     const text = eol ? raw.slice(0, -eol.length) : raw;
@@ -254,7 +254,13 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
       if (run?.[0] === '`' && run.length >= fenceLength) {
         // JSON/name/schema validation, not incidental Markdown suffix layout,
         // authorizes the call. Never scan the suffix again as another request.
-        emitCall(events); mode = 'text'; toolBody = ''; toolBytes = 0; inlineTicks = 0;
+        try {
+          emitCall(events);
+        } catch (err) {
+          if (err && typeof err === 'object') err.postFenceOffset = lineStartOffset + opening[0].length;
+          throw err;
+        }
+        mode = 'text'; toolBody = ''; toolBytes = 0; inlineTicks = 0;
         if (info.trim()) {
           const markerIdx = info.indexOf(CALLER_RESULT_MARKER);
           if (markerIdx >= 0) {
@@ -292,17 +298,29 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
   };
   const drain = final => {
     const events = []; let consumed = 0, from = scanned;
+    const runLine = (raw, isFinal, lineStartOffset) => {
+      try { line(raw, isFinal, events, lineStartOffset); }
+      catch (err) {
+        if (err && typeof err === 'object' && err.postFenceOffset === undefined) {
+          err.postFenceOffset = lineStartOffset + raw.length;
+        }
+        throw err;
+      }
+    };
     for (;;) {
       const end = pending.indexOf('\n', from);
       if (end < 0) break;
-      line(pending.slice(consumed, end + 1), false, events);
+      const lineStartOffset = consumedChars + consumed;
+      runLine(pending.slice(consumed, end + 1), false, lineStartOffset);
       consumed = end + 1; from = consumed;
-      if (suppressed) { pending = ''; scanned = 0; return events; }
+      if (suppressed) { consumedChars += consumed; pending = ''; scanned = 0; return events; }
     }
-    if (consumed) pending = pending.slice(consumed);
+    if (consumed) { consumedChars += consumed; pending = pending.slice(consumed); }
     scanned = pending.length;
     if (final && pending) {
-      line(pending, true, events);
+      const lineStartOffset = consumedChars;
+      runLine(pending, true, lineStartOffset);
+      consumedChars += pending.length;
       pending = ''; scanned = 0;
       if (suppressed) return events;
     }

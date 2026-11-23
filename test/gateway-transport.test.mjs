@@ -444,6 +444,121 @@ test("native HTTP/2 transport sends periodic PING keepalive frames during silent
   assert.ok(pingsReceived >= 2, `Expected >= 2 HTTP/2 PING keepalives during silent turn, got ${pingsReceived}`);
 });
 
+test("native HTTP/2 PING ACK watchdog fails unresponsive peers, ignores local ping()=false, and respects active inbound data", async () => {
+  const { EventEmitter } = await import("node:events");
+  const makeFakeClient = (pingImpl) => {
+    const client = new EventEmitter();
+    client.closed = false;
+    client.destroyed = false;
+    client.ping = pingImpl;
+    client.close = () => { client.closed = true; client.emit("close"); };
+    client.destroy = () => { client.destroyed = true; };
+    let reqStream = null;
+    client.request = () => {
+      reqStream = new EventEmitter();
+      reqStream.end = () => {};
+      reqStream.close = () => {};
+      setTimeout(() => reqStream.emit("response", { ":status": 200, "content-type": "application/grpc" }), 5);
+      return reqStream;
+    };
+    return { client, getReq: () => reqStream };
+  };
+
+  // 1. Unacked PING with zero inbound traffic fails quickly with NATIVE_CONNECTION_FAILED.
+  const dead = makeFakeClient(() => true); // queues ping, never invokes ACK callback
+  const deadTurn = openDirectTurn(
+    "synthetic-token",
+    { messages: [{ role: "user", content: "hi" }], pingIntervalMs: 25, pingTimeoutMs: 50, timeoutMs: 3000 },
+    { connect: () => dead.client },
+  );
+  const t0 = Date.now();
+  const loopHold = setTimeout(() => {}, 3000);
+  try {
+    await assert.rejects(async () => {
+      for await (const _ev of deadTurn.events) {}
+    }, err => err.code === "NATIVE_CONNECTION_FAILED");
+  } finally {
+    clearTimeout(loopHold);
+  }
+  assert.ok(Date.now() - t0 < 1000, "unresponsive peer must fail well before 3s timeoutMs");
+
+  // 2. client.connecting=true skips PING (zero calls while connecting) and a late callback
+  //    from an unqueued ping()=false arriving AFTER a subsequent queued PING must NOT disarm the new watchdog.
+  let pingsWhileConnecting = 0;
+  let bpCallCount = 0;
+  let staleCallbackRanAfterPing2 = false;
+  const localBackpressure = makeFakeClient((cb) => {
+    if (localBackpressure.client.connecting) pingsWhileConnecting++;
+    bpCallCount++;
+    if (bpCallCount === 1) {
+      // Unqueued ping()=false whose callback arrives AFTER ping #2 has already been queued.
+      setTimeout(() => {
+        if (bpCallCount >= 2) staleCallbackRanAfterPing2 = true;
+        cb(Object.assign(new Error('ping cancel'), { code: 'ERR_HTTP2_PING_CANCEL' }));
+      }, 35);
+      return false;
+    }
+    // Ping #2 IS queued and never ACKed -> must still trip ping #2's watchdog despite ping #1's late callback!
+    return true;
+  });
+  localBackpressure.client.connecting = true;
+  setTimeout(() => { localBackpressure.client.connecting = false; }, 45);
+  const bpTurn = openDirectTurn(
+    "synthetic-token",
+    { messages: [{ role: "user", content: "hi" }], pingIntervalMs: 20, pingTimeoutMs: 60, timeoutMs: 2000 },
+    { connect: () => localBackpressure.client },
+  );
+  const loopHold2 = setTimeout(() => {}, 2000);
+  try {
+    await assert.rejects(async () => {
+      for await (const _ev of bpTurn.events) {}
+    }, err => err.code === "NATIVE_CONNECTION_FAILED");
+  } finally {
+    clearTimeout(loopHold2);
+  }
+  assert.equal(pingsWhileConnecting, 0, "must never call client.ping() while client.connecting is true");
+  assert.equal(staleCallbackRanAfterPing2, true, "stale callback from ping #1 must fire after ping #2 is queued");
+  assert.equal(bpCallCount, 2, "ping #2's own watchdog must fire without being disarmed to allow a 3rd PING");
+
+  // 2b. ERR_HTTP2_PING_CANCEL on a queued or unqueued PING must NOT false-fail a healthy turn.
+  const cancelledPing = makeFakeClient((cb) => {
+    setTimeout(() => cb(Object.assign(new Error('ping cancel'), { code: 'ERR_HTTP2_PING_CANCEL' })), 5);
+    return true;
+  });
+  const cancelledPingTurn = openDirectTurn(
+    "synthetic-token",
+    { messages: [{ role: "user", content: "hi" }], pingIntervalMs: 20, pingTimeoutMs: 50, timeoutMs: 2000 },
+    { connect: () => cancelledPing.client },
+  );
+  setTimeout(() => {
+    const req = cancelledPing.getReq();
+    req.emit("trailers", { "grpc-status": "0" });
+    req.emit("end");
+  }, 80);
+  const cancelledPingEvents = [];
+  for await (const ev of cancelledPingTurn.events) cancelledPingEvents.push(ev);
+  assert.equal(cancelledPingEvents.at(-1).type, "end");
+
+  // 3. Active inbound DATA resets watchdog even while a PING ACK is delayed.
+  const busy = makeFakeClient(() => true);
+  const busyTurn = openDirectTurn(
+    "synthetic-token",
+    { messages: [{ role: "user", content: "hi" }], pingIntervalMs: 25, pingTimeoutMs: 60, timeoutMs: 2000 },
+    { connect: () => busy.client },
+  );
+  const frame = frameGrpcMessage(m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from("Alive")))), v(9, 1), m(30, Buffer.from("Used 4 Neon High model")), v(41, 3), v(42, 2)]))));
+  const feeder = setInterval(() => { busy.getReq()?.emit("data", frame); }, 30);
+  setTimeout(() => {
+    clearInterval(feeder);
+    const req = busy.getReq();
+    req.emit("trailers", { "grpc-status": "0" });
+    req.emit("end");
+  }, 150);
+  const busyEvents = [];
+  for await (const ev of busyTurn.events) busyEvents.push(ev);
+  assert.equal(busyEvents.at(-1).type, "end");
+});
+
 test("outbound proxy resolver honors HTTPS_PROXY, HTTP_PROXY, ALL_PROXY, and NO_PROXY rules", () => {
   assert.equal(resolveOutboundProxy("https://robinfrontend-pa.googleapis.com", {}), null);
   assert.equal(

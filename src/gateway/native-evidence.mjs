@@ -91,6 +91,7 @@ export function safeNativeEvidence(value) {
     ...(bounded(value.outputToolCalls, 0, 32) !== null ? { outputToolCalls: value.outputToolCalls } : {}),
     ...(nativeCompletenessState !== null ? { nativeCompletenessState } : {}),
     ...(toolProtocolReason ? { toolProtocolReason } : {}),
+    ...(value.toolErrorEarlyStop === true ? { toolErrorEarlyStop: true } : {}),
     ...(emptyResponseReason ? { emptyResponseReason } : {}),
     ...(nativeTextBytes !== null ? { nativeTextBytes } : {}),
     ...(nativeShareableTextBytes !== null ? { nativeShareableTextBytes } : {}),

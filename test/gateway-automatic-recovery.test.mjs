@@ -753,12 +753,17 @@ test('deferred comment-only SSE keepalive headers prevent client header-timeout 
   assert.equal(JSON.parse(retryArgs).key.length, 30000);
   assert.equal(retryAttempt, 2);
 
-  // 3. Chat SSE & Responses SSE: terminal error after keepalive headers closes SSE cleanly with explicit error code.
+  // 3. Chat SSE: terminal zero-output errors after keepalive headers include request-known headers and stop_turn terminal metadata;
+  //    Responses SSE keeps deferring headers so Codex preserves its non-retryable HTTP 400 GENERATION_FAILED contract.
   const fTerm = await fixture({ ...options, accountCount: 3, keepaliveHeadersDelayMs: 50 });
   t.after(fTerm.close);
+  let termMode = 'invalid_tool';
   fTerm.app.provider.openTurn = () => ({
     events: (async function* () {
       await new Promise(r => setTimeout(r, 100));
+      if (termMode === 'timeout') {
+        throw Object.assign(new Error('Synthetic transport timeout'), { code: 'NATIVE_TRANSPORT_TIMEOUT', status: 504 });
+      }
       yield { type: 'frame', bytes: textFrame(badLine) };
       yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
     })(),
@@ -775,14 +780,580 @@ test('deferred comment-only SSE keepalive headers prevent client header-timeout 
     for await (const _chunk of s) {}
   }, err => /INVALID_TOOL_JSON/.test(err.message));
 
+  // Verify request-known headers survive early keepalive flush and zero-output timeout carries terminal stop_turn semantics.
+  termMode = 'timeout';
+  const rawTimeoutRes = await fTerm.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Timeout after keepalive' }], max_tokens: 128, reasoning_effort: 'high', stream: true },
+  });
+  assert.equal(rawTimeoutRes.status, 200);
+  assert.equal(rawTimeoutRes.headers.get('x-gemini-keepalive-headers'), '1');
+  assert.equal(rawTimeoutRes.headers.get('x-gemini-provider-attempts'), null);
+  assert.equal(rawTimeoutRes.headers.get('x-gemini-failover-count'), null);
+  assert.equal(rawTimeoutRes.headers.get('x-gemini-token-limit'), 'not-enforced');
+  assert.equal(rawTimeoutRes.headers.get('x-gemini-ignored-parameters'), 'max_tokens');
+  assert.equal(rawTimeoutRes.headers.get('x-reasoning-effort'), 'high');
+  const rawTimeoutWire = await rawTimeoutRes.text();
+  assert.match(rawTimeoutWire, /: keepalive/);
+  const errLine = rawTimeoutWire.split('\n').find(l => l.startsWith('data: {'));
+  assert.ok(errLine);
+  const errPayload = JSON.parse(errLine.slice(6)).error;
+  assert.equal(errPayload.code, 'GENERATION_FAILED');
+  assert.equal(errPayload.terminal, true);
+  assert.equal(errPayload.retryable, false);
+  assert.equal(errPayload.client_action, 'stop_turn');
+  assert.equal(errPayload.upstream_code, 'NATIVE_TURN_TIMEOUT');
+
+  // Responses route does NOT flush keepalive headers early, preserving HTTP 400 + X-Should-Retry: false for Codex.
   const responseTools = tools.map(item => ({ type: 'function', ...item.function }));
   const respRes = await fTerm.api('/v1/responses', {
     method: 'POST',
-    body: { model: 'gemini-argon', input: 'Always invalid tool JSON', tools: responseTools, stream: true },
+    body: { model: 'gemini-argon', input: 'Timeout on responses', tools: responseTools, stream: true },
   });
-  assert.equal(respRes.status, 200);
-  const respWire = await respRes.text();
-  assert.match(respWire, /: keepalive/);
-  assert.match(respWire, /response\.incomplete/);
-  assert.match(respWire, /INVALID_TOOL_JSON/);
+  assert.equal(respRes.status, 400);
+  assert.equal(respRes.headers.get('x-should-retry'), 'false');
+  const respBody = await respRes.json();
+  assert.equal(respBody.error.code, 'GENERATION_FAILED');
+  assert.equal(respBody.error.client_action, 'stop_turn');
+});
+
+test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-frame hallucination, call+bad-call precedence, and shortOutput cap', async t => {
+  const badLine = '```tool_call\nnot json\n```\n';
+  const incompleteFrame = text => m(1003, m(1, Buffer.concat([
+    m(1, m(2, m(1, Buffer.from(text)))),
+    m(30, Buffer.from('Used 4 Neon High model')),
+    v(9, 0), v(41, 3), v(42, 2),
+  ])));
+
+  // 1. Real HTTP/2 server keeps stream open after bad tool frame (transport.getSafeStatus().ended === false):
+  //    post_tool_error early-stop must set toolErrorEarlyStop: true and STILL trigger tool_protocol recovery on attempt 2.
+  let h2Attempt = 0;
+  const openStreams = [];
+  const h2Server = http2.createServer();
+  h2Server.on('stream', stream => {
+    stream.on('error', () => {});
+    stream.resume();
+    stream.on('end', () => {
+      const n = ++h2Attempt;
+      stream.respond({ ':status': 200, 'content-type': 'application/grpc' }, { waitForTrailers: true });
+      if (n === 1) {
+        openStreams.push(stream);
+        stream.write(frameGrpcMessage(incompleteFrame(badLine)));
+        // Keep stream open without trailers/end so real transport.getSafeStatus().ended stays false.
+        return;
+      }
+      stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '0' }));
+      stream.end(frameGrpcMessage(textFrame(toolBlock + '\n')));
+    });
+  });
+  await new Promise(r => h2Server.listen(0, '127.0.0.1', r));
+  t.after(async () => {
+    for (const s of openStreams) try { s.close(); } catch {}
+    await new Promise(r => h2Server.close(r));
+  });
+  const connect = () => http2.connect(`http://127.0.0.1:${h2Server.address().port}`);
+  const fH2 = await fixture({ ...options, accountCount: 2 });
+  t.after(fH2.close);
+  fH2.app.provider.postToolIdleMs = 60;
+  fH2.app.provider.openTurn = (token, opts) => openDirectTurn(token, opts, { connect });
+  const h2Res = await fH2.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(h2Res.status, 200);
+  assert.match(await h2Res.text(), /fixture_lookup/);
+  assert.equal(h2Attempt, 2);
+  const h2Row = fH2.app.overview().requests[0];
+  assert.equal(h2Row.providerAttempts, 2);
+  assert.equal(h2Row.providerFailures[0].code, 'INVALID_TOOL_JSON');
+  assert.equal(h2Row.providerFailures[0].nativeEvidence.wireEnded, false);
+  assert.equal(h2Row.providerFailures[0].nativeEvidence.toolErrorEarlyStop, true);
+
+  // 2. Same-frame [Caller tool result] right after broken tool_call cancels immediately without waiting for postToolIdleMs.
+  const fSameFrame = await fixture({ ...options, accountCount: 2 }); t.after(fSameFrame.close);
+  fSameFrame.app.provider.postToolIdleMs = 5000;
+  let sameAttempts = 0, sameCancelled = false;
+  fSameFrame.app.provider.openTurn = () => {
+    sameAttempts++;
+    if (sameAttempts === 1) {
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: incompleteFrame(badLine + '[Caller tool result]\n{"fake":true}') };
+          await new Promise(() => {});
+        })(),
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false, receivedBytes: 120 }),
+        cancel() { sameCancelled = true; },
+      };
+    }
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame(toolBlock + '\n') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const t0 = Date.now();
+  const sameRes = await fSameFrame.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(sameRes.status, 200);
+  assert.match(await sameRes.text(), /fixture_lookup/);
+  assert.equal(sameAttempts, 2);
+  assert.equal(sameCancelled, true);
+  assert.ok(Date.now() - t0 < 2000, 'same-frame hallucination must cancel immediately without waiting 5s');
+
+  // 3. Valid call #1 committed in frame 1 + bad call #2 in frame 2 + stall must surface INVALID_TOOL_JSON (not NATIVE_TURN_TIMEOUT) with call #1 preserved.
+  const fMixed = await fixture({ ...options, accountCount: 2 }); t.after(fMixed.close);
+  fMixed.app.provider.postToolIdleMs = 60;
+  let mixedAttempts = 0;
+  fMixed.app.provider.openTurn = () => {
+    mixedAttempts++;
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: incompleteFrame(toolBlock + '\n') };
+        yield { type: 'frame', bytes: incompleteFrame(toolBlock + '\n' + badLine) };
+        await new Promise(() => {});
+      })(),
+      getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false, receivedBytes: 180 }),
+      cancel() {},
+    };
+  };
+  const mixedRes = await fMixed.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(mixedRes.status, 200);
+  const mixedWire = await mixedRes.text();
+  assert.match(mixedWire, /fixture_lookup/);
+  assert.match(mixedWire, /INVALID_TOOL_JSON/);
+  assert.doesNotMatch(mixedWire, /NATIVE_TURN_TIMEOUT/);
+  assert.equal(mixedAttempts, 1);
+
+  // 4. Held <2KB prefix in frame 1 + bad tool call in frame 2 + HTTP 200 end without grpc-status on attempt 2
+  //    (exercising shortOutput=true when automaticRecoveryKind returns null) must still stop at 2 attempts.
+  const fCap = await fixture({ ...options, accountCount: 4 });
+  t.after(fCap.close);
+  let capAttempts = 0;
+  fCap.app.provider.openTurn = () => {
+    capAttempts++;
+    if (capAttempts === 1) {
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: textFrame(badLine) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    }
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: incompleteFrame('Short prefix\n') };
+        yield { type: 'frame', bytes: textFrame('Short prefix\n' + badLine) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: null };
+      })(),
+      cancel() {},
+    };
+  };
+  const capRes = await fCap.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(capRes.status, 200);
+  const capWire = await capRes.text();
+  assert.match(capWire, /INVALID_TOOL_JSON/);
+  assert.equal(capAttempts, 2);
+  assert.equal(fCap.app.overview().requests[0].providerAttempts, 2);
+
+  // 5. Real HTTP/2 completed=true bad tool call with NO trailers/END_STREAM still recovers on attempt 2 with wireEnded=false.
+  let h2CompAttempt = 0;
+  const openCompStreams = [];
+  const h2CompServer = http2.createServer();
+  h2CompServer.on('stream', stream => {
+    stream.on('error', () => {});
+    stream.resume();
+    stream.on('end', () => {
+      const n = ++h2CompAttempt;
+      stream.respond({ ':status': 200, 'content-type': 'application/grpc' }, { waitForTrailers: true });
+      if (n === 1) {
+        openCompStreams.push(stream);
+        stream.write(frameGrpcMessage(textFrame(badLine))); // completed=true, stream kept open
+        return;
+      }
+      stream.on('wantTrailers', () => stream.sendTrailers({ 'grpc-status': '0' }));
+      stream.end(frameGrpcMessage(textFrame(toolBlock + '\n')));
+    });
+  });
+  await new Promise(r => h2CompServer.listen(0, '127.0.0.1', r));
+  t.after(async () => {
+    for (const s of openCompStreams) try { s.close(); } catch {}
+    await new Promise(r => h2CompServer.close(r));
+  });
+  const fH2Comp = await fixture({ ...options, accountCount: 2 });
+  t.after(fH2Comp.close);
+  fH2Comp.app.provider.postCompleteGraceMs = 40;
+  fH2Comp.app.provider.postToolIdleMs = 60;
+  fH2Comp.app.provider.openTurn = (token, opts) => openDirectTurn(token, opts, { connect: () => http2.connect(`http://127.0.0.1:${h2CompServer.address().port}`) });
+  const h2CompRes = await fH2Comp.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(h2CompRes.status, 200);
+  assert.match(await h2CompRes.text(), /fixture_lookup/);
+  assert.equal(h2CompAttempt, 2);
+  const h2CompFail = fH2Comp.app.overview().requests[0].providerFailures[0];
+  assert.equal(h2CompFail.code, 'INVALID_TOOL_JSON');
+  assert.equal(h2CompFail.nativeEvidence.wireEnded, false);
+  assert.equal(h2CompFail.nativeEvidence.modelCompleted, true);
+  assert.equal(h2CompFail.nativeEvidence.toolErrorEarlyStop, true);
+
+  // 6. Closed bad tool block WITHOUT trailing LF recovers via post_tool_error, while still-streaming (unclosed) valid tool call is NOT falsely killed.
+  const badNoLf = '```tool_call\nnot json\n```';
+  const fNoLf = await fixture({ ...options, accountCount: 2 }); t.after(fNoLf.close);
+  fNoLf.app.provider.postToolIdleMs = 60;
+  let noLfAttempts = 0;
+  fNoLf.app.provider.openTurn = () => {
+    noLfAttempts++;
+    if (noLfAttempts === 1) {
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: incompleteFrame(badNoLf) };
+          await new Promise(() => {});
+        })(),
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false, receivedBytes: 80 }),
+        cancel() {},
+      };
+    }
+    return {
+      events: (async function* () {
+        const part1 = '```tool_call\n{"name":"fixture_lookup","arguments":';
+        yield { type: 'frame', bytes: incompleteFrame(part1) };
+        await new Promise(r => setTimeout(r, 120)); // > postToolIdleMs (60ms): must NOT be killed while still open
+        yield { type: 'frame', bytes: textFrame(part1 + '{"key":"slow_ok"}}\n```\n') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const noLfRes = await fNoLf.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(noLfRes.status, 200);
+  assert.match(await noLfRes.text(), /slow_ok/);
+  assert.equal(noLfAttempts, 2);
+
+  // 7. Same-frame [Caller tool result] followed by a fenced code block still triggers immediate early-stop via exact postFenceOffset.
+  const fFenceTail = await fixture({ ...options, accountCount: 2 }); t.after(fFenceTail.close);
+  fFenceTail.app.provider.postToolIdleMs = null; // no idle timer; must cancel via postFenceOffset marker check
+  let fenceAttempts = 0, fenceCancelled = false;
+  fFenceTail.app.provider.openTurn = () => {
+    fenceAttempts++;
+    if (fenceAttempts === 1) {
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: incompleteFrame(badLine + '[Caller tool result]\n```js\nconst x = 1;\n```\n') };
+          await new Promise(() => {});
+        })(),
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false, receivedBytes: 150 }),
+        cancel() { fenceCancelled = true; },
+      };
+    }
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame(toolBlock + '\n') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const fenceRes = await fFenceTail.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(fenceRes.status, 200);
+  assert.match(await fenceRes.text(), /fixture_lookup/);
+  assert.equal(fenceAttempts, 2);
+  assert.equal(fenceCancelled, true);
+
+  // 8. SERVER_SHUTDOWN after keepalive headers preserves retryable: true (never marked stop_turn).
+  const fShut = await fixture({ ...options, accountCount: 2, keepaliveHeadersDelayMs: 40 });
+  let releaseShut;
+  fShut.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      await new Promise((resolve, reject) => {
+        releaseShut = resolve;
+        const onAbort = () => reject(Object.assign(new Error('fixture'), { code: 'REQUEST_CANCELLED', status: 499 }));
+        if (opts?.signal?.aborted) return onAbort();
+        opts?.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    })(),
+    cancel() { releaseShut?.(); },
+  });
+  let shutClosing;
+  try {
+    const shutRes = await fShut.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Shutdown during keepalive' }], stream: true },
+    });
+    assert.equal(shutRes.status, 200);
+    shutClosing = fShut.close();
+    const shutWire = await shutRes.text();
+    assert.match(shutWire, /: keepalive/);
+    const shutErrLine = shutWire.split('\n').find(l => l.startsWith('data: {'));
+    assert.ok(shutErrLine);
+    const shutErr = JSON.parse(shutErrLine.slice(6)).error;
+    assert.equal(shutErr.code, 'SERVER_SHUTDOWN');
+    assert.equal(shutErr.retryable, true);
+    assert.equal(shutErr.terminal, undefined);
+    assert.equal(shutErr.client_action, undefined);
+    assert.match(shutErr.message, /SERVER_SHUTDOWN/);
+  } finally {
+    releaseShut?.();
+    await (shutClosing ?? fShut.close());
+  }
+
+  // 9. Repeated no-op / duplicate-text frames after output stops must NOT reset post_output or post_tool idle timers.
+  const fNoop = await fixture({ ...options, accountCount: 2 }); t.after(fNoop.close);
+  fNoop.app.provider.postOutputIdleMs = 90;
+  let noopCancelled = false;
+  fNoop.app.provider.openTurn = () => ({
+    events: (async function* () {
+      const doneText = 'Finished answer ready to deliver.';
+      yield { type: 'frame', bytes: incompleteFrame(doneText) };
+      // Emit duplicate/metadata frames every 30ms (< 90ms idle) that previously reset postOutputIdleMs forever.
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 30));
+        yield { type: 'frame', bytes: incompleteFrame(doneText) };
+      }
+    })(),
+    cancel() { noopCancelled = true; },
+  });
+  const tNoop = Date.now();
+  const noopRes = await fNoop.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Answer cleanly' }], stream: true },
+    headers,
+  });
+  assert.equal(noopRes.status, 200);
+  const noopWire = await noopRes.text();
+  assert.match(noopWire, /Finished answer ready to deliver/);
+  assert.match(noopWire, /data: \[DONE\]/);
+  assert.equal(noopCancelled, true);
+  assert.ok(Date.now() - tNoop < 600, `no-op frames must not extend 90ms postOutputIdleMs (took ${Date.now() - tNoop}ms)`);
+
+  // 10. tool_choice: 'required' (and named function) with a preamble that pauses > postToolIdleMs
+  //     before emitting a valid tool_call MUST NOT be falsely classified as closed_tool_error.
+  for (const tc of ['required', { type: 'function', function: { name: 'fixture_lookup' } }]) {
+    const fReq = await fixture({ ...options, accountCount: 2 }); t.after(fReq.close);
+    fReq.app.provider.postToolIdleMs = 60;
+    fReq.app.provider.postOutputIdleMs = 60;
+    let reqAttempts = 0, reqEnded = false, reqCancelledEarly = false;
+    fReq.app.provider.openTurn = () => {
+      reqAttempts++;
+      return {
+        events: (async function* () {
+          const preamble = 'Let me check that for you first.\n';
+          yield { type: 'frame', bytes: incompleteFrame(preamble) };
+          await new Promise(r => setTimeout(r, 160));
+          yield { type: 'frame', bytes: textFrame(preamble + toolBlock + '\n') };
+          reqEnded = true;
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() { if (!reqEnded) reqCancelledEarly = true; },
+      };
+    };
+    const reqRes = await fReq.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { ...input, tool_choice: tc, stream: true },
+      headers,
+    });
+    assert.equal(reqRes.status, 200);
+    assert.match(await reqRes.text(), /fixture_lookup/);
+    assert.equal(reqAttempts, 1, 'valid preamble before required tool_choice must succeed on attempt 1');
+    assert.equal(reqCancelledEarly, false);
+  }
+
+  // 11. 1st valid tool call followed by a 2nd closed bad tool block WITHOUT trailing LF (no END_STREAM)
+  //     reports INVALID_TOOL_JSON (not NATIVE_TURN_TIMEOUT) promptly via post_tool_error.
+  const fSecondBad = await fixture({ ...options, accountCount: 2 }); t.after(fSecondBad.close);
+  fSecondBad.app.provider.postToolIdleMs = 70;
+  let secondBadAttempts = 0;
+  fSecondBad.app.provider.openTurn = () => {
+    secondBadAttempts++;
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: incompleteFrame(toolBlock + '\n') };
+        await new Promise(r => setTimeout(r, 15));
+        yield { type: 'frame', bytes: incompleteFrame(toolBlock + '\n```tool_call\n{"name":"fixture_lookup","arguments":bad}\n```') };
+        await new Promise(() => {});
+      })(),
+      getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false, receivedBytes: 180 }),
+      cancel() {},
+    };
+  };
+  const secondBadRes = await fSecondBad.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { ...input, stream: false },
+    headers,
+  });
+  // 1st valid call already arrived (committed); 2nd bad block without trailing LF surfaces INVALID_TOOL_JSON
+  // (never NATIVE_TURN_TIMEOUT) and preserves committed-output no-retry (1 attempt).
+  assert.equal(secondBadRes.status, 200);
+  const secondBadBody = await secondBadRes.json();
+  assert.equal(secondBadBody.status, 'incomplete');
+  assert.equal(secondBadBody.incomplete_details?.code, 'INVALID_TOOL_JSON');
+  assert.equal(secondBadBody.error?.code, 'INVALID_TOOL_JSON');
+  assert.equal(secondBadBody.choices?.[0]?.message?.tool_calls?.[0]?.function?.name, 'fixture_lookup');
+  assert.equal(secondBadAttempts, 1);
+
+  // 12. postToolIdleMs: null + postCompleteGraceMs > 0 with completed=true bad tool call (no END_STREAM)
+  //     still uses postCompleteGraceMs (shortest enabled deadline) and recovers via tool_protocol.
+  const fNullToolIdle = await fixture({ ...options, accountCount: 2 }); t.after(fNullToolIdle.close);
+  fNullToolIdle.app.provider.postToolIdleMs = null;
+  fNullToolIdle.app.provider.postCompleteGraceMs = 70;
+  let nullToolAttempts = 0;
+  fNullToolIdle.app.provider.openTurn = () => {
+    const n = ++nullToolAttempts;
+    return {
+      events: (async function* () {
+        if (n === 1) {
+          yield { type: 'frame', bytes: textFrame(badLine) };
+          await new Promise(() => {});
+        }
+        yield { type: 'frame', bytes: textFrame(toolBlock + '\n') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false, receivedBytes: 120 }),
+      cancel() {},
+    };
+  };
+  const tNullIdle = Date.now();
+  const nullIdleRes = await fNullToolIdle.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { ...input, stream: true },
+    headers,
+  });
+  assert.equal(nullIdleRes.status, 200);
+  assert.match(await nullIdleRes.text(), /fixture_lookup/);
+  assert.equal(nullToolAttempts, 2);
+  assert.ok(Date.now() - tNullIdle < 1000);
+
+  // 13. Reverse order tool-error cap: Attempt 1 uses shortOutputRetry (bad tool JSON + short prefix + missing grpc-status);
+  //     Attempt 2 has full trailers + bad tool JSON -> MUST NOT trigger a 3rd attempt via tool_protocol.
+  const fRevCap = await fixture({ ...options, accountCount: 4 }); t.after(fRevCap.close);
+  fRevCap.app.provider.postToolIdleMs = 60;
+  let revCapAttempts = 0;
+  fRevCap.app.provider.openTurn = () => {
+    const n = ++revCapAttempts;
+    return {
+      events: (async function* () {
+        // Frame 1 delivers a held <2KB prefix so delivery.retryableShortfall is true.
+        yield { type: 'frame', bytes: incompleteFrame('Short prefix\n') };
+        // Frame 2 appends the bad tool block with completed=true; Attempt 1 omits grpc-status
+        // so automaticRecoveryKind() is null and shortOutputRetry runs (consuming the shared tool-error cap).
+        yield { type: 'frame', bytes: textFrame('Short prefix\n' + badLine) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: n === 1 ? null : 0 };
+      })(),
+      getSafeStatus: () => ({ httpStatus: 200, grpcStatus: n === 1 ? null : 0, ended: true, receivedBytes: 100 }),
+      cancel() {},
+    };
+  };
+  const revCapRes = await fRevCap.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { ...input, stream: true },
+    headers,
+  });
+  assert.equal(revCapRes.status, 200);
+  assert.match(await revCapRes.text(), /INVALID_TOOL_JSON/);
+  assert.equal(revCapAttempts, 2, 'shortOutputRetry on attempt 1 tool error must share the 1-retry cap with tool_protocol');
+
+  // 14. Keepalive + NATIVE_QUOTA_INSUFFICIENT and Keepalive + short unreleased prefix + SERVER_SHUTDOWN both emit retryable: true.
+  const fQuotaInsuff = await fixture({ ...options, accountCount: 1, keepaliveHeadersDelayMs: 40 });
+  t.after(fQuotaInsuff.close);
+  const quotaDowngradeFrame = m(1003, m(1, Buffer.concat([m(1, m(2, m(1, Buffer.from('Do not release')))), v(9, 1), v(11, 1), v(31, 8), v(41, 6), v(42, 1)])));
+  fQuotaInsuff.app.provider.openTurn = () => ({
+    events: (async function* () {
+      await new Promise(r => setTimeout(r, 90));
+      yield { type: 'frame', bytes: quotaDowngradeFrame };
+    })(),
+    cancel() {},
+  });
+  const qInsuffRes = await fQuotaInsuff.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Quota insufficient after keepalive' }], stream: true },
+  });
+  assert.equal(qInsuffRes.status, 200);
+  const qInsuffWire = await qInsuffRes.text();
+  const qInsuffErr = JSON.parse(qInsuffWire.split('\n').find(l => l.startsWith('data: {')).slice(6)).error;
+  assert.equal(qInsuffErr.code, 'NATIVE_QUOTA_INSUFFICIENT');
+  assert.equal(qInsuffErr.retryable, true);
+  assert.equal(qInsuffErr.terminal, undefined);
+
+  const fShutPrefix = await fixture({ ...options, accountCount: 2, keepaliveHeadersDelayMs: 40 });
+  let releaseShutPrefix, markPrefixYielded;
+  const prefixYielded = new Promise(r => { markPrefixYielded = r; });
+  fShutPrefix.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      await new Promise(r => setTimeout(r, 55));
+      yield { type: 'frame', bytes: incompleteFrame('Tiny held prefix') };
+      await new Promise(r => setImmediate(r));
+      markPrefixYielded();
+      await new Promise((resolve, reject) => {
+        releaseShutPrefix = resolve;
+        const onAbort = () => reject(Object.assign(new Error('fixture'), { code: 'REQUEST_CANCELLED', status: 499 }));
+        if (opts?.signal?.aborted) return onAbort();
+        opts?.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    })(),
+    cancel() { releaseShutPrefix?.(); },
+  });
+  let shutPrefixClosing;
+  try {
+    const spRes = await fShutPrefix.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { model: 'gemini-argon', messages: [{ role: 'user', content: 'Shutdown with held prefix' }], stream: true },
+    });
+    assert.equal(spRes.status, 200);
+    await prefixYielded;
+    shutPrefixClosing = fShutPrefix.close();
+    const spWire = await spRes.text();
+    assert.match(spWire, /Tiny held prefix/, 'SSE must include the held prefix to prove non-zero-output branch');
+    const spErrLine = spWire.split('\n').filter(l => l.startsWith('data: {')).find(l => l.includes('SERVER_SHUTDOWN'));
+    assert.ok(spErrLine);
+    const spErr = JSON.parse(spErrLine.slice(6)).error;
+    assert.equal(spErr.code, 'SERVER_SHUTDOWN');
+    assert.equal(spErr.retryable, true);
+    assert.equal(spErr.terminal, undefined);
+  } finally {
+    releaseShutPrefix?.();
+    await (shutPrefixClosing ?? fShutPrefix.close());
+  }
+
+  // 15. 1st valid tool call followed by a 2nd still-streaming open tool block (TRUNCATED_TOOL_CALL)
+  //     pausing > postToolIdleMs MUST NOT trip post_tool timeout; both calls succeed on attempt 1.
+  const fSecondStreaming = await fixture({ ...options, accountCount: 2 }); t.after(fSecondStreaming.close);
+  fSecondStreaming.app.provider.postToolIdleMs = 60;
+  let secondStreamAttempts = 0, secondStreamEnded = false, secondStreamCancelledEarly = false;
+  const secondToolBlock = '```tool_call\n{"name":"fixture_lookup","arguments":{"key":"second_sample"}}\n```';
+  fSecondStreaming.app.provider.openTurn = () => {
+    secondStreamAttempts++;
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: incompleteFrame(toolBlock + '\n```tool_call\n{"name":"fixture_lookup","arguments":{"key":"sec') };
+        await new Promise(r => setTimeout(r, 160));
+        yield { type: 'frame', bytes: textFrame(toolBlock + '\n' + secondToolBlock + '\n') };
+        secondStreamEnded = true;
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() { if (!secondStreamEnded) secondStreamCancelledEarly = true; },
+    };
+  };
+  const secondStreamRes = await fSecondStreaming.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { ...input, stream: true },
+    headers,
+  });
+  assert.equal(secondStreamRes.status, 200);
+  const secondStreamWire = await secondStreamRes.text();
+  const streamedCalls = new Map();
+  for (const line of secondStreamWire.split('\n')) {
+    if (!line.startsWith('data: {')) continue;
+    for (const tc of JSON.parse(line.slice(6)).choices?.[0]?.delta?.tool_calls ?? []) {
+      const entry = streamedCalls.get(tc.index) ?? { name: '', args: '' };
+      if (tc.function?.name) entry.name += tc.function.name;
+      if (tc.function?.arguments) entry.args += tc.function.arguments;
+      streamedCalls.set(tc.index, entry);
+    }
+  }
+  const deliveredCalls = [...streamedCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => ({
+    name: v.name,
+    key: JSON.parse(v.args).key,
+  }));
+  assert.deepEqual(deliveredCalls, [
+    { name: 'fixture_lookup', key: 'sample' },
+    { name: 'fixture_lookup', key: 'second_sample' },
+  ]);
+  assert.equal(secondStreamAttempts, 1, 'slow 2nd streaming tool call must succeed on attempt 1');
+  assert.equal(secondStreamCancelledEarly, false);
 });

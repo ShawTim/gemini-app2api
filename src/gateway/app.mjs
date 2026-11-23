@@ -466,11 +466,12 @@ export function createGateway({
     const { imageCount, imageUrlChars } = measurePromptImagePayload(body);
     const delivery = createResponseDelivery(res, { route, stream: outputStreaming, model: canonical.model,
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
+      ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => canonical[key] !== undefined),
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
       promptChars: Math.max(0, (body.__promptChars ?? 0) - imageUrlChars), imageCount,
       deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
       signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000),
-      keepaliveHeadersDelayMs });
+      keepaliveHeadersDelayMs: route === 'chat' ? keepaliveHeadersDelayMs : 0 });
     let resolveInFlight;
     const inFlightPromise = new Promise((r) => { resolveInFlight = r; });
     inFlightTasks.add(inFlightPromise);
@@ -590,7 +591,7 @@ export function createGateway({
       if (!playground && !accountTestId && !canonical.native_search && providerAttempts > 0 &&
           NO_OUTPUT_FAILURES.has(error.code) && !delivery.hasContent &&
           !error.partialResult?.content?.length && !error.partialResult?.calls?.length &&
-          !res.headersSent && !res.destroyed && !res.writableEnded &&
+          !res.destroyed && !res.writableEnded &&
           controller.signal.reason?.code !== 'CLIENT_DISCONNECTED') {
         // Codex treats HTTP422 as a reconnectable Responses stream failure;
         // its terminal HTTP400 path is required. Keep server_error + upstream cause.
@@ -598,9 +599,15 @@ export function createGateway({
         const terminal = Object.assign(fault('GENERATION_FAILED', terminalStatus), {
           terminalNoOutput: true, upstreamCode: errorCode, upstreamStatus: status, nativeEvidence,
         });
-        status = terminalStatus; errorCode = terminal.code; outputIncomplete = true; res.incomplete = true;
-        res.setHeader('X-Should-Retry', 'false');
-        throw terminal;
+        if (!res.headersSent) {
+          status = terminalStatus; errorCode = terminal.code; outputIncomplete = true; res.incomplete = true;
+          res.setHeader('X-Should-Retry', 'false');
+          throw terminal;
+        }
+        if (delivery.keepaliveOnlyHeaders) {
+          error = terminal;
+          errorCode = terminal.code;
+        }
       }
       let interrupted = false;
       try {

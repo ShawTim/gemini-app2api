@@ -61,9 +61,11 @@ async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
     else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000 } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, ignoredTokenParameters = [], parallelToolCalls = true, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000 } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
-    requestedThinkingLevel: thinkingLevel, ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }) };
+    requestedThinkingLevel: thinkingLevel,
+    ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }),
+    ...(Array.isArray(ignoredTokenParameters) && ignoredTokenParameters.length ? { ignoredTokenParameters: [...ignoredTokenParameters] } : {}) };
   let started = false, keepaliveHeadersSent = false, settled = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
   let publishedLength = 0, publishedBytes = 0;
   let keepaliveTimer = null, deferredHeaderTimer = null;
@@ -108,6 +110,8 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
         'X-Accel-Buffering': 'no',
         'X-Gemini-Usage': 'estimated',
         'X-Requested-Thinking-Level': String(meta.requestedThinkingLevel ?? ''),
+        ...(meta.requestedReasoningEffort === undefined ? {} : { 'X-Reasoning-Effort': meta.requestedReasoningEffort }),
+        ...(meta.ignoredTokenParameters?.length ? { 'X-Gemini-Token-Limit': 'not-enforced', 'X-Gemini-Ignored-Parameters': meta.ignoredTokenParameters.join(', ') } : {}),
         ...extraHeaders,
       });
       res.flushHeaders?.();
@@ -120,7 +124,13 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       // Flush SSE 200 headers + comment-only keepalive before client fetch/headersTimeout
       // (300s in OpenAI SDK / Node undici) expires while Gemini is thinking or generating a
       // large buffered tool_call. No SSE data events are emitted, so uncommitted retries remain safe.
-      writeSseHeaders();
+      // Remove tentative attempt/failover headers before flushing early keepalive headers,
+      // because retries/failovers may still happen before the turn settles.
+      res.removeHeader?.('X-Gemini-Provider-Attempts');
+      res.removeHeader?.('X-Gemini-Failover-Count');
+      res.removeHeader?.('X-Gemini-Failover-Reason');
+      res.removeHeader?.('X-Gemini-Recovery-Errors');
+      writeSseHeaders({ 'X-Gemini-Keepalive-Headers': '1' });
       keepaliveHeadersSent = true;
       if (!res.writableNeedDrain) {
         if (typeof res.writeKeepalive === 'function') res.writeKeepalive(': keepalive\n\n');
@@ -151,7 +161,8 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   const chatBase = () => ({ id: meta.id, object: 'chat.completion.chunk', created: meta.created, model: meta.model,
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning_effort: meta.requestedReasoningEffort }) });
   const response = (status, error = null) => ({ id: responseId(), object: 'response', created_at: meta.created, status,
-    error, ...(error ? { incomplete: true } : {}), incomplete_details: error ? { reason: 'upstream_interrupted', code: error.code } : null, model: meta.model,
+    error, ...(error && status !== 'failed' ? { incomplete: true } : {}),
+    incomplete_details: error && status !== 'failed' ? { reason: 'upstream_interrupted', code: error.code } : null, model: meta.model,
     output: output.map(item => ({ ...item, status: status === 'completed' ? 'completed' : 'incomplete' })),
     usage: status === 'in_progress' ? null : toResponsesUsage(estimateUsage()),
     parallel_tool_calls: parallelToolCalls, ...(meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
@@ -330,14 +341,41 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     }
     if (!started && !keepaliveHeadersSent && error?.code === 'RESPONSE_TOO_LARGE') { discard(); stopKeepalive(); return false; }
     if (!started && !keepaliveHeadersSent && !partial.content?.length && !partialCalls.length) { stopKeepalive(); return false; }
-    const detail = { code: safeCode(error), type: error.status === 429 ? 'rate_limit_error' : error.status === 401 ? 'authentication_error' : error.status < 500 ? 'invalid_request_error' : 'server_error', message: safeCode(error) };
+    const keepaliveUncommitted = keepaliveHeadersSent && !started && publishedBytes === 0 && !partialCalls.length;
+    const keepaliveZeroOutput = keepaliveUncommitted && !partial.content?.length;
+    const isTerminalNoOutput = error?.terminalNoOutput === true;
+    const code = safeCode(error);
+    const isRetryableAfterKeepalive = [
+      'SERVER_SHUTDOWN',
+      'NATIVE_UPSTREAM_UNAVAILABLE',
+      'NATIVE_RATE_LIMITED',
+      'NATIVE_QUOTA_EXHAUSTED',
+      'NATIVE_QUOTA_INSUFFICIENT',
+      'GATEWAY_BUSY',
+      'NO_AVAILABLE_ACCOUNTS',
+    ].includes(code);
+    const detail = {
+      code,
+      type: isTerminalNoOutput ? 'server_error' : error.status === 429 ? 'rate_limit_error' : error.status === 401 ? 'authentication_error' : error.status < 500 ? 'invalid_request_error' : 'server_error',
+      message: isTerminalNoOutput
+        ? 'Generation ended without output. Gateway recovery is exhausted; this turn has failed.'
+        : code === 'SERVER_SHUTDOWN'
+          ? 'SERVER_SHUTDOWN: gateway is restarting; retry the request'
+          : code,
+      ...(isTerminalNoOutput || (keepaliveZeroOutput && !isRetryableAfterKeepalive)
+        ? { terminal: true, retryable: false, client_action: 'stop_turn' }
+        : keepaliveUncommitted && isRetryableAfterKeepalive
+          ? { retryable: true }
+          : {}),
+      ...(isTerminalNoOutput && error.upstreamCode ? { upstream_code: error.upstreamCode, upstream_status: error.upstreamStatus } : {}),
+    };
     res.incomplete = true;
     if (!stream) {
       settled = true;
       (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...partial, calls: partialCalls, parallelToolCalls, incomplete: true, incompleteDetails: { reason: 'upstream_interrupted', code: detail.code }, outputError: detail });
       return true;
     }
-    if (!started && (route !== 'chat' || !keepaliveHeadersSent || partial.content?.length || partialCalls.length)) await start(partial);
+    if (!started && (route !== 'chat' || !keepaliveZeroOutput)) await start(partial);
     // Decide from what the caller has actually seen, before the held prefix flushes.
     // Verified post-output upstream silence (HTTP 200, no reset/EOF, clean text) also
     // finishes cleanly with incomplete metadata instead of trapping callers in retries.
@@ -368,6 +406,19 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       // and res.incomplete. This is not proof of full upstream generation completion.
       await finishResponseItems();
       await sendResponse('response.completed', { incomplete: true, response: response('completed', detail) });
+    } else if (keepaliveZeroOutput) {
+      const failedError = {
+        code: 'server_error',
+        message: detail.message,
+        gateway_code: detail.code,
+        ...(detail.upstream_code ? { upstream_code: detail.upstream_code, upstream_status: detail.upstream_status } : {}),
+        ...(detail.terminal
+          ? { terminal: true, retryable: false, client_action: 'stop_turn' }
+          : detail.retryable
+            ? { retryable: true }
+            : {}),
+      };
+      await sendResponse('response.failed', { response: response('failed', failedError) });
     } else await sendResponse('response.incomplete', { response: response('incomplete', detail) });
     settled = true; stopKeepalive(); res.end(); return true;
   }

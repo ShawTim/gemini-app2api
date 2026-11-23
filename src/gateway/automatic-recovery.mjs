@@ -52,9 +52,13 @@ export function automaticRecoveryKind(error, model, { allowAutoModel = false } =
       (e.upstreamHttpStatus === null || e.upstreamHttpStatus === 200) && (e.grpcStatus === null || e.grpcStatus === 0)) return 'transport';
   const completed = e.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 && e.wireEnded === true &&
     e.modelCompleted === true && modeOk(e.observedMode) && e.nativeRefusalPresent === false && e.http2ResetCode === undefined;
+  const earlyStoppedToolError = e.phase === 'validate' && e.toolErrorEarlyStop === true &&
+    (e.upstreamHttpStatus === null || e.upstreamHttpStatus === 200) &&
+    (e.grpcStatus === null || e.grpcStatus === 0) &&
+    modeOk(e.observedMode) && e.nativeRefusalPresent === false && e.http2ResetCode === undefined;
   if (completed && error.code === 'NATIVE_SOFT_ERROR_RESPONSE' && e.outputFailureReason === 'generic_error_offer' &&
       e.outputFailureSource === 'exact_text_signature' && e.outputToolCalls === 0 && e.nativeStructuredOutputPresent === false) return 'provider_soft_error';
-  if (completed && TOOL_ERRORS.has(error.code)) return 'tool_protocol';
+  if ((completed || earlyStoppedToolError) && TOOL_ERRORS.has(error.code)) return 'tool_protocol';
   if (completed && STRUCTURED_OUTPUT_ERRORS.has(error.code)) return 'structured_output';
   // A clean but incomplete turn may be regenerated; never treat it as success.
   if (error.code === 'INCOMPLETE_NATIVE_RESPONSE' && e.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 &&

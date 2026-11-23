@@ -340,30 +340,44 @@ test('Gateway POST /mcp enforces API key auth, Streamable HTTP lifecycle, LFI bl
   });
   let cancelStdout = '';
   cancelChild.stdout.on('data', (c) => { cancelStdout += c.toString('utf8'); });
-  cancelChild.stdin.write(JSON.stringify({
-    jsonrpc: '2.0',
-    id: 201,
-    method: 'tools/call',
-    params: { name: 'ask_gemini', arguments: { prompt: 'WAIT_FOR_BRIDGE_CANCEL' } },
-  }) + '\n');
-  await turnEntered;
-  cancelChild.stdin.write(JSON.stringify({
-    jsonrpc: '2.0',
-    method: 'notifications/cancelled',
-    params: { requestId: 201 },
-  }) + '\n');
-  cancelChild.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 202, method: 'ping' }) + '\n');
-  cancelChild.stdin.end();
-  const [cancelExit] = await Promise.all([
-    new Promise((resolve) => cancelChild.on('close', resolve)),
-    Promise.race([cancelObservedPromise, new Promise((r) => setTimeout(r, 5000))]),
-  ]);
+  const waitWithTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${label}`)), ms);
+    timer.unref?.();
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+  let cancelExit = null;
+  try {
+    cancelChild.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 201,
+      method: 'tools/call',
+      params: { name: 'ask_gemini', arguments: { prompt: 'WAIT_FOR_BRIDGE_CANCEL' } },
+    }) + '\n');
+    await waitWithTimeout(turnEntered, 5000, 'turnEntered');
+    cancelChild.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'notifications/cancelled',
+      params: { requestId: 201 },
+    }) + '\n');
+    cancelChild.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 202, method: 'ping' }) + '\n');
+    cancelChild.stdin.end();
+    [cancelExit] = await Promise.all([
+      waitWithTimeout(new Promise((resolve) => cancelChild.on('close', resolve)), 5000, 'cancelChild close'),
+      waitWithTimeout(cancelObservedPromise, 5000, 'cancelObserved'),
+    ]);
+  } finally {
+    if (!cancelChild.stdin.destroyed && !cancelChild.stdin.writableEnded) cancelChild.stdin.end();
+    if (cancelChild.exitCode === null) cancelChild.kill('SIGTERM');
+    f.app.provider.runTurn = origTurn;
+  }
   assert.equal(cancelExit, 0);
   assert.equal(cancelObserved, true);
   const cancelOutLines = cancelStdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.equal(cancelOutLines.some((x) => x.id === 202), true);
   assert.equal(cancelOutLines.some((x) => x.id === 201), false);
-  f.app.provider.runTurn = origTurn;
 
   // 14. JSON-RPC error contract: valid JSON array [] and empty object {} both return -32600 (not -32700 or 202)
   const arrRes = await f.api('/mcp', { method: 'POST', body: [] });

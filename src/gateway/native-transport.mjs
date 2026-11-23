@@ -22,6 +22,7 @@ import { NATIVE_RESPONSE_LIMITS as RESPONSE_LIMITS } from './native-response-lim
 import { observeNative } from './native-diagnostic.mjs';
 import { connectHttp2 } from './outbound-proxy.mjs';
 export const DEFAULT_HTTP2_PING_INTERVAL_MS = 15_000;
+export const DEFAULT_HTTP2_PING_TIMEOUT_MS = 30_000;
 export const MIN_CONNECT_ATTEMPT_TIMEOUT_MS = 5000;
 // Node v22 defaults Happy Eyeballs per-family attempt timeout to 250ms, which aborts
 // IPv4 connects over high-RTT VPN tunnels when IPv6 returns immediate EHOSTUNREACH.
@@ -53,6 +54,7 @@ export function openDirectTurn(
     continuation,
     timeoutMs = 180000,
     pingIntervalMs = DEFAULT_HTTP2_PING_INTERVAL_MS,
+    pingTimeoutMs = DEFAULT_HTTP2_PING_TIMEOUT_MS,
     signal,
     allowNativeTools = false,
     emitHeaders = false,
@@ -116,7 +118,9 @@ export function openDirectTurn(
     request,
     timer,
     pingTimer = null,
+    pingAckTimer = null,
     pingInFlight = false,
+    lastInboundAt = Date.now(),
     closed = false,
     ended = false,
     error = null,
@@ -151,6 +155,10 @@ export function openDirectTurn(
     if (pingTimer) {
       clearInterval(pingTimer);
       pingTimer = null;
+    }
+    if (pingAckTimer) {
+      clearTimeout(pingAckTimer);
+      pingAckTimer = null;
     }
     pingInFlight = false;
   };
@@ -288,13 +296,60 @@ export function openDirectTurn(
     client.on("error", () => fail("NATIVE_CONNECTION_FAILED"));
     if (diagnostic) client.on('goaway', code => note('peer_goaway', { goawayCode: code }));
     if (Number.isInteger(pingIntervalMs) && pingIntervalMs > 0 && typeof client.ping === "function") {
+      let pingSeq = 0, activePingSeq = 0;
       pingTimer = setInterval(() => {
-        if (closed || ended || client.closed || client.destroyed || pingInFlight) return;
+        if (closed || ended || client.closed || client.destroyed || client.connecting || pingInFlight) return;
+        const seq = ++pingSeq;
+        activePingSeq = seq;
+        const pingStartedAt = Date.now();
         pingInFlight = true;
+        let pingQueued = true;
+        let sent = false;
         try {
-          client.ping(() => { pingInFlight = false; });
+          sent = client.ping((err) => {
+            if (!pingQueued || seq !== activePingSeq) return;
+            if (pingAckTimer) {
+              clearTimeout(pingAckTimer);
+              pingAckTimer = null;
+            }
+            pingInFlight = false;
+            if (closed || ended) return;
+            if (err) {
+              if (err.code === 'ERR_HTTP2_PING_CANCEL') return;
+              note('transport_ping_timeout');
+              fail('NATIVE_CONNECTION_FAILED');
+              return;
+            }
+            lastInboundAt = Date.now();
+          });
         } catch {
+          pingQueued = false;
+          if (activePingSeq === seq) activePingSeq = 0;
           pingInFlight = false;
+          return;
+        }
+        if (sent === false) {
+          pingQueued = false;
+          if (activePingSeq === seq) activePingSeq = 0;
+          pingInFlight = false;
+          return;
+        }
+        if (Number.isInteger(pingTimeoutMs) && pingTimeoutMs > 0 && !closed && !ended && pingInFlight && activePingSeq === seq) {
+          const armAckWatchdog = (delayMs) => {
+            pingAckTimer = setTimeout(() => {
+              pingAckTimer = null;
+              if (closed || ended || !pingInFlight || activePingSeq !== seq) return;
+              const idleSinceInbound = Date.now() - lastInboundAt;
+              if (lastInboundAt >= pingStartedAt && idleSinceInbound < pingTimeoutMs) {
+                armAckWatchdog(Math.max(1, pingTimeoutMs - idleSinceInbound));
+                return;
+              }
+              note('transport_ping_timeout');
+              fail('NATIVE_CONNECTION_FAILED');
+            }, delayMs);
+            pingAckTimer.unref();
+          };
+          armAckWatchdog(pingTimeoutMs);
         }
       }, pingIntervalMs);
       pingTimer.unref();
@@ -309,11 +364,12 @@ export function openDirectTurn(
       "user-agent": GATEWAY_USER_AGENT,
     });
     request.on("response", headers => {
+      lastInboundAt = Date.now();
       note('peer_headers', { httpStatus: Number(headers[':status']), grpcStatus: Number(headers['grpc-status']) });
       status(headers);
       if (emitHeaders && !closed && httpStatus === 200) push({ type: 'headers', httpStatus });
     });
-    request.on("trailers", headers => { note('peer_trailers', { grpcStatus: Number(headers['grpc-status']) }); status(headers); });
+    request.on("trailers", headers => { lastInboundAt = Date.now(); note('peer_trailers', { grpcStatus: Number(headers['grpc-status']) }); status(headers); });
     request.on("error", () => {
       note('stream_error', { rstCode: request?.rstCode });
       if (!rejectPeerReset()) fail("NATIVE_STREAM_FAILED");
@@ -325,6 +381,7 @@ export function openDirectTurn(
     });
     request.on("data", (chunk) => {
       if (closed) return;
+      lastInboundAt = Date.now();
       note('peer_data', { bytes: chunk.length });
       try {
         received += chunk.length;
@@ -338,6 +395,7 @@ export function openDirectTurn(
       }
     });
     request.on("end", () => {
+      lastInboundAt = Date.now();
       note('stream_end', { rstCode: request?.rstCode });
       if (closed) return;
       // Node may emit readable 'end' for RST_STREAM(CANCEL). That is not a successful end.

@@ -3,7 +3,7 @@ import { fault } from "./state.mjs";
 import { normalizeRoutingAccountIds } from './routing-policy.mjs';
 import { isExplicitQuotaFailure } from './quota-failover.mjs';
 import { isVerifiedEmptyResponse } from './output-recovery.mjs';
-import { automaticRecoveryKind } from './automatic-recovery.mjs';
+import { TOOL_ERRORS, automaticRecoveryKind } from './automatic-recovery.mjs';
 import { ACCOUNT_MODELS, isProviderRejection } from "./provider-state.mjs";
 import { canonicalModel } from "../openai-contract.mjs";
 import { ModelTelemetry } from "./model-telemetry.mjs";
@@ -221,7 +221,9 @@ export class AccountPool {
           const kind = classifyFailure(error);
           if (kind === "auth") this.accounts.invalidate?.(account.id);
           const rawAutomaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
-          const automaticKind = rawAutomaticKind === 'tool_protocol' && toolProtocolRecoveries >= 1 ? null : rawAutomaticKind;
+          const isToolError = TOOL_ERRORS.has(error?.code);
+          const toolProtocolCapped = isToolError && toolProtocolRecoveries >= 1;
+          const automaticKind = toolProtocolCapped && rawAutomaticKind === 'tool_protocol' ? null : rawAutomaticKind;
           const quotaRetry = (this.allowQuotaFailover || this.allowAutomaticRecovery) && isExplicitQuotaFailure(error);
           const verifiedEmpty = isVerifiedEmptyResponse(error, model);
           const emptyRetry = this.allowEmptyResponseFailover && verifiedEmpty && emptyRecoveries === 0;
@@ -232,13 +234,13 @@ export class AccountPool {
           if (error.responseStarted === true) throw error;
           // A turn that was interrupted before showing the caller anything usable
           // may be replaced once. This is not a splice: no output was committed.
-          const shortOutputRetry = error.shortOutput === true && error.code !== "NATIVE_RESPONSE_REFUSED" && shortOutputRecoveries === 0;
+          const shortOutputRetry = !toolProtocolCapped && error.shortOutput === true && error.code !== "NATIVE_RESPONSE_REFUSED" && shortOutputRecoveries === 0;
           const generalRetry = this.allowFailover && ['quota', 'transient'].includes(kind) && attempt + 1 < 3;
           if (quotaRetry) quotaFailures++;
           if (!(automaticKind || quotaRetry || emptyRetry || generalRetry || shortOutputRetry) || attempt + 1 >= maxAttempts + quotaFailures) throw error;
           if (emptyRetry) emptyRecoveries++;
           if (shortOutputRetry) shortOutputRecoveries++;
-          if (automaticKind === 'tool_protocol') toolProtocolRecoveries++;
+          if (automaticKind === 'tool_protocol' || (isToolError && shortOutputRetry)) toolProtocolRecoveries++;
           if (automaticKind === 'tool_protocol' || automaticKind === 'structured_output') formatRecoveryCode = error.code;
           previous = { id: account.id, reason: automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind), quotaFailover: quotaRetry,
             emptyRecovery: emptyRetry, shortOutputRecovery: shortOutputRetry, automaticRecovery: !!automaticKind };
