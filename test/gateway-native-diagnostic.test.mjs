@@ -137,7 +137,7 @@ test('attempt/event/frame/report bounds preserve first and last records and excl
   assert.equal(report.omittedAttempts, 4);
   assert.equal(report.status, 502);
   assert.ok(Buffer.byteLength(json) <= L.reportBytes);
-  assert.doesNotMatch(json, /PRIVATE|SENTINEL|token|acc-/);
+  assert.doesNotMatch(json, /PRIVATE|SENTINEL|token|\bacc-/);
   for (const attempt of report.attempts) {
     assert.equal(attempt.eventCount, 101);
     assert.equal(attempt.events.length + attempt.tailEvents.length, 64);

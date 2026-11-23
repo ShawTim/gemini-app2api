@@ -119,20 +119,49 @@ async function main() {
     historicalResearchExecuted: false, passed: false, node: process.version, startedAt: new Date().toISOString(), checks: [] };
   try {
     report.staged = stageProduct(stage);
-    for (const [index, file] of tests.entries()) {
-      const temporary = path.join(directory, `case-${index + 1}`);
-      fs.mkdirSync(temporary, { mode: 0o700 });
-      const env = childEnvironment(temporary);
-      // Inherit the preload in ordinary Node subprocesses, not just the test worker.
-      env.NODE_OPTIONS = `--import=${pathToFileURL(path.join(stage, 'scripts/offline-contract-network-guard.mjs')).href}`;
-      const start = Date.now();
-      const result = await execute(process.execPath, ['--test', '--test-concurrency=1', file], { cwd: stage, env });
-      fs.writeFileSync(path.join(directory, `${index + 1}.log`), result.output, { mode: 0o600 });
-      const { output, ...verdict } = result;
-      report.checks.push({ file, ...verdict, durationMs: Date.now() - start });
-      console.log(`${result.passed ? 'PASS' : 'FAIL'} ${file}`);
-      if (!result.passed) { console.error(output.slice(-6000)); break; }
-    }
+    const parsedConcurrency = Number.parseInt(process.env.OFFLINE_TEST_CONCURRENCY || '', 10);
+    const defaultConcurrency = Math.max(1, Math.min(6, (typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length) || 4));
+    const concurrency = Math.max(1, Math.min(tests.length, Number.isSafeInteger(parsedConcurrency) && parsedConcurrency > 0 ? parsedConcurrency : defaultConcurrency));
+    // Schedule the slowest standalone test files first so the pool does not wait on a late 15s tail.
+    const heavyFirst = new Set([
+      'test/gateway-startup.test.mjs',
+      'test/gateway-internal-controller.test.mjs',
+      'test/gateway-automatic-recovery.test.mjs',
+      'test/gateway-request-resumption.test.mjs',
+      'test/gateway-native-diagnostic.test.mjs',
+      'test/admin-v2-static.test.mjs',
+    ]);
+    const queue = tests
+      .map((file, index) => ({ file, index }))
+      .sort((a, b) => Number(heavyFirst.has(b.file)) - Number(heavyFirst.has(a.file)) || a.index - b.index);
+    const results = new Array(tests.length);
+    let cursor = 0, failed = false;
+    const worker = async () => {
+      while (!failed) {
+        const job = queue[cursor++];
+        if (!job) return;
+        const { file, index } = job;
+        const temporary = path.join(directory, `case-${index + 1}`);
+        fs.mkdirSync(temporary, { mode: 0o700 });
+        const env = childEnvironment(temporary);
+        // Inherit the preload in ordinary Node subprocesses, not just the test worker.
+        env.NODE_OPTIONS = `--import=${pathToFileURL(path.join(stage, 'scripts/offline-contract-network-guard.mjs')).href}`;
+        const start = Date.now();
+        const result = await execute(process.execPath, ['--test', '--test-concurrency=1', file], { cwd: stage, env });
+        fs.writeFileSync(path.join(directory, `${index + 1}.log`), result.output, { mode: 0o600 });
+        const { output, ...verdict } = result;
+        results[index] = { file, ...verdict, durationMs: Date.now() - start };
+        console.log(`${result.passed ? 'PASS' : 'FAIL'} ${file}`);
+        if (!result.passed) {
+          failed = true;
+          console.error(output.slice(-6000));
+          return;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    report.concurrency = concurrency;
+    report.checks = results.filter(Boolean);
     report.passed = report.checks.length === tests.length && report.checks.every(check => check.passed);
   } catch (error) {
     report.error = error.message; console.error(error.message);
