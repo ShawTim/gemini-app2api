@@ -1115,6 +1115,35 @@ test('single automatic recovery retries transport/tool_protocol once and refuses
   assert.equal(quotaAttempts, 1);
   assert.equal(quotaResult.stopReason, 'error');
   assert.match(quotaResult.errorMessage, /quota/i);
+
+  // Mid-stream INVALID_TOOL_JSON (with trailing newline) must defer to validate and recover once via tool_protocol
+  let toolAttempts = 0;
+  const toolContext = {
+    messages: [{ role: 'user', content: 'Look up sample', timestamp: 1 }],
+    tools: [{ name: 'lookup', description: 'Lookup key', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }],
+  };
+  const handlerToolRecover = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    openTurn: () => {
+      toolAttempts++;
+      const text = toolAttempts === 1
+        ? '```tool_call\n{"name":"lookup","arguments":{"key":bad}}\n```\n'
+        : '```tool_call\n{"name":"lookup","arguments":{"key":"ok"}}\n```\n';
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame(text, { complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    },
+  });
+  const toolRecovered = await handlerToolRecover.streamSimple(model, toolContext, { apiKey: 'fixture-token' }).result();
+  assert.equal(toolAttempts, 2);
+  assert.equal(toolRecovered.stopReason, 'toolUse');
+  assert.equal(toolRecovered.content.find(c => c.type === 'toolCall')?.name, 'lookup');
+  assert.deepEqual(toolRecovered.content.find(c => c.type === 'toolCall')?.arguments, { key: 'ok' });
 });
 
 test('/gemini-quota command fetches token via modelRegistry and formats usage rows', async () => {

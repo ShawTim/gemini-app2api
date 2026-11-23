@@ -15,7 +15,7 @@ import { uploadNativeImages, createImageBlobCache } from './gateway/image-upload
 import { downloadRemoteImages } from './gateway/image-download.mjs';
 import { quotaDowngradeCode } from './gateway/quota-failover.mjs';
 import { inspectNativeOutput } from './gateway/output-recovery.mjs';
-import { toolRecoveryInstruction } from './gateway/automatic-recovery.mjs';
+import { TOOL_ERRORS, toolRecoveryInstruction } from './gateway/automatic-recovery.mjs';
 import { validateStructuredOutputText } from './gateway/structured-output.mjs';
 import { mapNativeSearchAnnotations, extractNativeSearchSources } from './gateway/native-search-citations.mjs';
 import { softErrorReason } from './gateway/soft-error.mjs';
@@ -293,7 +293,7 @@ export class NativeDirectProvider {
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
       ...((body.reasoning_effort ?? body.reasoning?.effort) === undefined ? {} : { requestedReasoningEffort: body.reasoning_effort ?? body.reasoning?.effort }) };
-    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, sinkFailed = false;
+    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, sinkFailed = false;
     const deliver = async event => {
       try { await onDelta(event); }
       catch (error) { sinkFailed = true; throw error; }
@@ -498,7 +498,7 @@ export class NativeDirectProvider {
                   snapshotPriorBytes: Buffer.byteLength(rawText), snapshotNextBytes: Buffer.byteLength(info.text),
                   snapshotCommonPrefixBytes: commonPrefixBytes(rawText, info.text), ...committed });
                 if (liveSyncedLength > 0) await deliver({ reset: true, sameResponseIdentity: true, response: identity });
-                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0;
+                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0; liveToolError = null;
               }
             }
             if (id) snapshotId = id;
@@ -508,14 +508,25 @@ export class NativeDirectProvider {
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
           }
-          if (incremental && modeMatches(observedMode) && attributionVerified() && liveSyncedLength < rawText.length) {
+          if (incremental && !liveToolError && modeMatches(observedMode) && attributionVerified() && liveSyncedLength < rawText.length) {
             const delta = rawText.slice(liveSyncedLength);
             liveSyncedLength = rawText.length;
-            await publish(liveSplitter.push(delta));
+            try {
+              await publish(liveSplitter.push(delta));
+            } catch (splitError) {
+              // Defer recoverable tool-protocol errors until stream completion so
+              // upstream completion/downgrade/refusal evidence is fully verified and
+              // automatic tool_protocol recovery (or same-ID revision) can run cleanly.
+              if (!sinkFailed && TOOL_ERRORS.has(splitError?.code)) {
+                liveToolError = splitError;
+              } else {
+                throw splitError;
+              }
+            }
             // Once valid tool_call(s) have been parsed and the model begins hallucinating
             // a fake [Caller tool result], stop upstream immediately instead of waiting
             // minutes for the model to finish generating discarded text.
-            if (liveSplitter.suppressed && liveCalls.length > 0 && !downgrade && !outputShape.nativeRefusalPresent) {
+            if (!liveToolError && liveSplitter.suppressed && liveCalls.length > 0 && !downgrade && !outputShape.nativeRefusalPresent) {
               note('early_stop_post_tool_hallucination', { calls: liveCalls.length });
               try { turn?.cancel(); } catch {}
               ended = true;
@@ -577,6 +588,7 @@ export class NativeDirectProvider {
       }
       let items;
       if (incremental) {
+        if (liveToolError) throw liveToolError;
         if (liveSyncedLength < rawText.length) {
           const delta = rawText.slice(liveSyncedLength);
           liveSyncedLength = rawText.length;
@@ -621,7 +633,7 @@ export class NativeDirectProvider {
       return result;
     } catch (error) {
       const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
-      if (incremental && modeVerified && !sinkFailed) {
+      if (incremental && !liveToolError && modeVerified && !sinkFailed) {
         try { await publish(liveSplitter.flush()); }
         catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }
       }

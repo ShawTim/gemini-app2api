@@ -2,7 +2,7 @@
 import { MODEL_MODES, canonicalModel } from '../openai-contract.mjs';
 import { isVerifiedEmptyResponse } from './output-recovery.mjs';
 import { isExplicitQuotaFailure } from './quota-failover.mjs';
-const TOOL_ERRORS = new Set(['MALFORMED_TOOL_CALL', 'INVALID_TOOL_JSON', 'TRUNCATED_TOOL_CALL', 'INVALID_TOOL_CALL',
+export const TOOL_ERRORS = new Set(['MALFORMED_TOOL_CALL', 'INVALID_TOOL_JSON', 'TRUNCATED_TOOL_CALL', 'INVALID_TOOL_CALL',
   'INVALID_TOOL_ARGUMENTS', 'UNDECLARED_TOOL', 'TOOL_ARGUMENT_SCHEMA_MISMATCH', 'TOOL_CHOICE_NOT_SATISFIED',
   'TOOL_CHOICE_MISMATCH', 'TOOL_CALL_NOT_ALLOWED', 'PARALLEL_TOOL_CALLS_DISABLED']);
 const STRUCTURED_OUTPUT_ERRORS = new Set(['INVALID_STRUCTURED_OUTPUT_JSON', 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH']);
@@ -10,7 +10,7 @@ const TRANSPORT_ERRORS = new Set(['NATIVE_STREAM_RESET', 'NATIVE_CONNECTION_FAIL
 export function toolRecoveryInstruction(code) {
   if (TOOL_ERRORS.has(code)) {
     return '[Gateway automatic recovery: regenerate this turn; the previous response was not delivered and no caller tool was executed.]\n' +
-      'Answer the latest user request using the complete history. If a tool is needed and permitted, emit a complete tool_call block with exactly the keys "name" and "arguments" as valid JSON. Use only declared names and actual JSON-object arguments matching the original schema. Respect the selected tool choice and parallel-call restriction. Put both fences on separate lines. Do not invent tool results, duplicate already completed work, or discuss this recovery instruction. If tools are prohibited, answer normally without tool_call blocks.';
+      'Answer the latest user request using the complete history. If a tool is needed and permitted, emit a complete tool_call block with exactly the keys "name" and "arguments" as valid JSON. Emit one strict JSON object per tool_call block with properly escaped strings (no raw newlines, invalid escapes, or trailing commas). Use only declared names and actual JSON-object arguments matching the original schema. Respect the selected tool choice and parallel-call restriction. Put both fences on separate lines. Do not invent tool results, duplicate already completed work, or discuss this recovery instruction. If tools are prohibited, answer normally without tool_call blocks.';
   }
   if (STRUCTURED_OUTPUT_ERRORS.has(code)) {
     return '[Gateway automatic recovery: regenerate this turn; the previous response was not delivered because it did not satisfy the required JSON output format.]\n' +

@@ -130,7 +130,7 @@ export function buildToolInstruction(tools = [], choice = 'auto') {
     '```tool_call',
     '{"name":"declared_name","arguments":{}}',
     '```',
-    'Arguments must be a JSON object matching the declared schema. Never invent tools or results.',
+    'Arguments must be a JSON object matching the declared schema. Emit one strict UTF-8 JSON object per tool_call block with properly escaped strings (for multiple calls, use separate tool_call blocks; no trailing commas or raw newlines in strings). Never invent tools or results.',
     'Only the caller executes tools. Wait for linked caller tool results before using results.',
     'After emitting your tool_call block(s), STOP your response immediately. Never emit, simulate, or echo [Caller tool result], [User], [Assistant], or any transcript role markers.',
     'A standalone top-level tool_call fence is reserved for actual requests; use json fences for literal examples. Inline references are text.',

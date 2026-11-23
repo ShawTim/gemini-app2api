@@ -510,3 +510,104 @@ test('pre-commit 502 OAUTH_REFRESH_FAILED fails over to a healthy account under 
     assert.equal(fAuth.seen.length, 0);
   }
 });
+
+test('mid-stream tool_protocol errors with trailing newline/multi-frame defer to validate so automatic recovery succeeds across Chat/Responses and JSON/SSE', async t => {
+  const responseTools = tools.map(item => ({ type: 'function', ...item.function }));
+  const badWithNewline = '```tool_call\n{"name":"fixture_lookup","arguments":{"key":bad}}\n```\n';
+  const badWithPrefix = 'Checking file...\n' + badWithNewline;
+  for (const route of ['chat/completions', 'responses']) {
+    for (const stream of [false, true]) {
+      const f = await fixture({ ...options, accountCount: 3, turns: [badWithPrefix, toolBlock + '\n'] });
+      t.after(f.close);
+      const body = route === 'responses'
+        ? { model: input.model, input: 'Continue the synthetic lookup task.', tools: responseTools, stream }
+        : { ...input, stream };
+      const res = await f.api('/v1/' + route, { method: 'POST', body, headers });
+      assert.equal(res.status, 200, `${route} stream=${stream}`);
+      const wire = await res.text();
+      assert.match(wire, /fixture_lookup/);
+      assert.doesNotMatch(wire, /Checking file\.\.\./);
+      const row = f.app.overview().requests[0];
+      assert.equal(row.providerAttempts, 2, `${route} stream=${stream}`);
+      assert.equal(row.providerFailures.length, 1);
+      assert.equal(row.providerFailures[0].code, 'INVALID_TOOL_JSON');
+      assert.equal(row.providerFailures[0].nativeEvidence.phase, 'validate');
+      assert.equal(row.providerFailures[0].nativeEvidence.wireEnded, true);
+      assert.equal(row.providerFailures[0].nativeEvidence.grpcStatus, 0);
+      assert.ok(f.seen[1].messages[0].content.includes('[Gateway automatic recovery:'));
+    }
+  }
+});
+
+test('mid-stream bad tool JSON still honors committed-output no-retry, same-ID snapshot revision, and real upstream downgrade precedence', async t => {
+  const badLine = '```tool_call\nnot json\n```\n';
+  const snapshotFrame = (text, { id = 'rev-id-1', complete = false, mode = 3 } = {}) => ({
+    type: 'frame',
+    bytes: m(1003, m(1, Buffer.concat([
+      m(1, Buffer.concat([m(1, Buffer.from(id)), m(2, m(1, Buffer.from(text)))])),
+      m(30, Buffer.from(mode === 3 ? 'Used 4 Neon High model' : 'Used 4 Flash model')),
+      v(9, Number(complete)), v(41, mode), v(42, 2),
+    ]))),
+  });
+
+  // 1. Committed prose (>= 2048B) before mid-stream INVALID_TOOL_JSON must NOT retry; completes as incomplete SSE.
+  const fCommitted = await fixture({ ...options, accountCount: 3 }); t.after(fCommitted.close);
+  let committedAttempts = 0;
+  fCommitted.app.provider.openTurn = () => {
+    committedAttempts++;
+    const prefix = 'Committed prose prefix. ' + 'x'.repeat(2100) + '\n';
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame(prefix) };
+        yield { type: 'frame', bytes: textFrame(prefix + badLine) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const committedRes = await fCommitted.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(committedRes.status, 200);
+  const committedWire = await committedRes.text();
+  assert.match(committedWire, /Committed prose prefix/);
+  assert.match(committedWire, /INVALID_TOOL_JSON/);
+  assert.equal(committedAttempts, 1);
+
+  // 2. Uncommitted same-ID snapshot revision replacing a trailing-newline bad tool_call draft recovers in 1 attempt.
+  const fRevised = await fixture({ ...options, accountCount: 2 }); t.after(fRevised.close);
+  let revisedAttempts = 0;
+  fRevised.app.provider.openTurn = () => {
+    revisedAttempts++;
+    return {
+      events: (async function* () {
+        yield snapshotFrame(badLine, { complete: false });
+        yield snapshotFrame(toolBlock + '\n', { complete: true });
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const revisedRes = await fRevised.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(revisedRes.status, 200);
+  const revisedWire = await revisedRes.text();
+  assert.match(revisedWire, /fixture_lookup/);
+  assert.equal(revisedAttempts, 1);
+
+  // 3. Real upstream downgrade arriving after a mid-stream bad tool_call surfaces MODEL_DOWNGRADE_REJECTED (no retry).
+  const fDowngrade = await fixture({ ...options, accountCount: 2 }); t.after(fDowngrade.close);
+  let downgradeAttempts = 0;
+  fDowngrade.app.provider.openTurn = () => {
+    downgradeAttempts++;
+    return {
+      events: (async function* () {
+        yield snapshotFrame(badLine, { complete: false, mode: 3 });
+        yield snapshotFrame(badLine + 'done', { complete: true, mode: 6 });
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const downgradeRes = await fDowngrade.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: false }, headers });
+  assert.equal(downgradeRes.status, 502);
+  assert.equal((await downgradeRes.json()).error.code, 'MODEL_DOWNGRADE_REJECTED');
+  assert.equal(downgradeAttempts, 1);
+});
