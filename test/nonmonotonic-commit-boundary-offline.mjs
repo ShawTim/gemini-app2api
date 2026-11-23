@@ -54,7 +54,7 @@ function parsed(raw, route, stream) {
   const events = raw.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
   return { events, text: route === 'chat' ? events.flatMap(e => e.choices ?? []).map(c => c.delta?.content ?? '').join('') : events.filter(e => e.type === 'response.output_text.delta').map(e => e.delta).join(''),
     calls: route === 'chat' ? events.flatMap(e => e.choices ?? []).flatMap(c => c.delta?.tool_calls ?? []) : events.filter(e => e.type === 'response.output_item.added' && e.item.type === 'function_call').map(e => e.item),
-    incomplete: events.some(e => e.incomplete || e.type === 'response.incomplete'), code: events.find(e => e.error)?.error?.code ?? events.find(e => e.incomplete_details)?.incomplete_details?.code ?? events.at(-1)?.response?.error?.code };
+    incomplete: events.some(e => e.incomplete || e.type === 'response.incomplete'), code: events.find(e => e.error)?.error?.code ?? events.find(e => e.incomplete_details)?.incomplete_details?.code ?? events.at(-1)?.response?.error?.code ?? events.at(-1)?.response?.incomplete_details?.code };
 }
 class Sink extends EventEmitter {
   chunks=[]; destroyed=false; writableEnded=false;

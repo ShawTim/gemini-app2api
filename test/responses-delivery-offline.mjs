@@ -53,8 +53,10 @@ for (const size of [2047, 2048, 3615]) {
   assert.equal(last.type, usable ? 'response.completed' : 'response.incomplete');
   assert.equal(last.response.status, usable ? 'completed' : 'incomplete');
   assert.equal(last.response.incomplete, true);
-  assert.equal(last.response.error.code, 'NATIVE_STREAM_CLOSED_EARLY');
+  if (usable) assert.equal(last.response.error, null, 'qualified response.completed must keep response.error null');
+  else assert.equal(last.response.error.code, 'NATIVE_STREAM_CLOSED_EARLY');
   assert.equal(last.response.incomplete_details.reason, 'upstream_interrupted');
+  assert.equal(last.response.incomplete_details.code, 'NATIVE_STREAM_CLOSED_EARLY');
   assert.equal(last.response.usage.input_tokens, 10);
   assert.equal(last.response.usage.estimated, true);
   assert.equal(last.response.output[0].content[0].text, 'x'.repeat(size));
@@ -77,9 +79,61 @@ await toolDelivery.accept({ call: { id: 'call_synthetic', type: 'function', func
 await toolDelivery.interrupt({ code: 'NATIVE_STREAM_CLOSED_EARLY', status: 502 });
 const final = toolSink.events().at(-1);
 assert.equal(final.type, 'response.completed'); assert.equal(final.response.incomplete, true);
+assert.equal(final.response.error, null);
+assert.equal(final.response.incomplete_details.code, 'NATIVE_STREAM_CLOSED_EARLY');
 assert.equal(final.response.output[0].namespace, 'synthetic'); assert.equal(final.response.output[0].name, 'echo');
 assert.equal(toolSink.events().filter(e => e.type === 'response.output_item.done').length, 1);
 cases++;
+// Issue #6 regression: short verified postOutputIdleStall (<2048B) emits qualified response.completed with
+// response.error: null while ordinary short NATIVE_TURN_TIMEOUT (without postOutputIdleStall) stays response.incomplete.
+for (const postOutputIdleStall of [true, false]) {
+  const shortSink = new Sink();
+  const shortDelivery = createResponseDelivery(shortSink, { route: 'responses', stream: true, model: result.model, promptChars: 35 });
+  const shortReply = 'Verified 78-byte answer text delivered before upstream stopped closing stream.';
+  await shortDelivery.accept({ content: shortReply });
+  assert.equal(shortDelivery.publishedBytes, 0);
+  const err = Object.assign(new Error('timeout'), { code: 'NATIVE_TURN_TIMEOUT', status: 504, ...(postOutputIdleStall ? { postOutputIdleStall: true } : {}) });
+  assert.equal(await shortDelivery.interrupt(err), true);
+  const evs = shortSink.events(), terminal = evs.at(-1);
+  assert.equal(shortSink.incomplete, true, 'resumption must not retain interrupted turn');
+  assert.equal(evs.filter(e => e.type === 'response.completed' || e.type === 'response.incomplete' || e.type === 'response.failed').length, 1);
+  assert.equal(terminal.response.incomplete, true);
+  assert.equal(terminal.response.incomplete_details.reason, 'upstream_interrupted');
+  assert.equal(terminal.response.incomplete_details.code, 'NATIVE_TURN_TIMEOUT');
+  if (postOutputIdleStall) {
+    assert.equal(terminal.type, 'response.completed');
+    assert.equal(terminal.incomplete, true);
+    assert.equal(terminal.response.status, 'completed');
+    assert.equal(terminal.response.error, null);
+    assert.equal(evs.filter(e => e.type === 'response.output_text.done').length, 1);
+    assert.equal(evs.filter(e => e.type === 'response.output_item.done').length, 1);
+    const doneIdx = evs.findIndex(e => e.type === 'response.output_item.done');
+    assert.ok(doneIdx > 0 && doneIdx < evs.length - 1, 'output_item.done must precede response.completed');
+  } else {
+    assert.equal(terminal.type, 'response.incomplete');
+    assert.equal(terminal.response.status, 'incomplete');
+    assert.equal(terminal.response.error.code, 'NATIVE_TURN_TIMEOUT');
+    assert.equal(evs.filter(e => e.type === 'response.output_item.done').length, 0);
+  }
+  cases++;
+}
+// Delivered valid tool call followed by rejected second call (INVALID_TOOL_JSON): completes with error: null and 1 call only.
+{
+  const partialCallSink = new Sink();
+  const partialCallDelivery = createResponseDelivery(partialCallSink, { route: 'responses', stream: true, model: result.model });
+  await partialCallDelivery.accept({ call: { id: 'call_ok_1', type: 'function', function: { name: 'echo', arguments: '{"k":"v"}' } } });
+  assert.equal(await partialCallDelivery.interrupt({ code: 'INVALID_TOOL_JSON', status: 502 }), true);
+  const evs = partialCallSink.events(), terminal = evs.at(-1);
+  assert.equal(partialCallSink.incomplete, true);
+  assert.equal(terminal.type, 'response.completed');
+  assert.equal(terminal.incomplete, true);
+  assert.equal(terminal.response.status, 'completed');
+  assert.equal(terminal.response.error, null);
+  assert.equal(terminal.response.incomplete_details.code, 'INVALID_TOOL_JSON');
+  assert.equal(terminal.response.output.filter(i => i.type === 'function_call').length, 1);
+  assert.equal(evs.filter(e => e.type === 'response.function_call_arguments.done').length, 1);
+  cases++;
+}
 for (const parallelToolCalls of [undefined, true, false]) for (const stream of [false, true]) for (const incomplete of [false, true]) {
   const content = 'x'.repeat(2048), sink = new Sink();
   const delivery = createResponseDelivery(sink, { route: 'responses', stream, model: result.model,

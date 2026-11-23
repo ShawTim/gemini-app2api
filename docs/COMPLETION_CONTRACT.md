@@ -23,7 +23,7 @@
 - 在實務 Agent 工具鏈（如 PI-Desktop、Codex CLI、Cursor、Cline）中，若將「上游中斷但已傳送大段可用回覆」一律以錯誤事件或裸斷線收尾，常見客戶端會丟棄已顯示的內容並自動重送整份長歷史，導致重複消耗額度與反覆失敗。
 - 因此，當已向下游交付可用內容（至少 `2,048 bytes` 文字或已通過驗證的工具呼叫）後發生上游中斷：
   - **Chat SSE** 以 `finish_reason: "stop"`（或 `"tool_calls"`）搭配擴展欄位 `incomplete: true`、`incomplete_details` 及 `[DONE]` 結束本輪交付。
-  - **Responses SSE** 先補齊已交付項目的 `done` 事件，再送出帶 `incomplete: true`、原始 `error` 與 `incomplete_details` 的 qualified `response.completed`。
+  - **Responses SSE** 先補齊已交付項目的 `done` 事件，再送出帶 `incomplete: true` 與 `incomplete_details`（且 `response.error` 保持 `null`，以符合 OpenAI Responses schema 並避免嚴格 proxy 誤判重連）的 qualified `response.completed`。
 - **結束本輪下游交付，不等於認證上游生成已完整完成。** `incomplete` 屬於閘道相容擴展欄位；忽略擴展欄位的客戶端會按一般完成收尾並保留文字，而支援該欄位的客戶端可同時標示回覆未完整。
 
 ### 必須維持的不變條件
@@ -99,7 +99,7 @@ Ordinary public requests defer downstream HTTP headers until text, a validated t
 | Chat | yes | yes | at/above `2,048`-byte gate, or any validated calls | Delta-less chunk with `finish_reason: "stop"` (or `"tool_calls"`), `incomplete: true`, `incomplete_details`, then `[DONE]` |
 | Responses | either | no | none | Allowlisted exhausted generation: HTTP `400` `GENERATION_FAILED` JSON; otherwise applicable error status |
 | Responses | no | — | partial | **HTTP 200** + response `status: "incomplete"`, `incomplete_details`, `error` |
-| Responses | yes | yes | usable text or validated calls | Delivered item `done` events, then `response.completed` qualified with `incomplete: true` on both event and response plus original `error` / `incomplete_details` |
+| Responses | yes | yes | usable text or validated calls | Delivered item `done` events, then `response.completed` qualified with `incomplete: true` on both event and response plus `incomplete_details` (`response.error: null` so strict Responses proxies do not misclassify delivered output as a transport failure) |
 | Responses | yes | yes | below usable gate, no calls | `response.incomplete` event with original failure details |
 | any | any | yes | any | Socket write impossible: stream closes without a terminal event (caller must treat missing terminal signal as `unknown` / interrupted, never verified completion) |
 

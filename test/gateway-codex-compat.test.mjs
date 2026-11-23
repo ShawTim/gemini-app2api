@@ -188,7 +188,8 @@ test("real gateway releases at most one call with parallel_tool_calls false and 
           assert.equal(final.type, "response.completed");
           assert.equal(final.incomplete, true);
           assert.equal(final.response.incomplete, true);
-          assert.equal(final.response.error.code, "PARALLEL_TOOL_CALLS_DISABLED");
+          assert.equal(final.response.error, null);
+          assert.equal(final.response.incomplete_details.code, "PARALLEL_TOOL_CALLS_DISABLED");
           assert.equal(final.response.parallel_tool_calls, false);
           assert.equal(final.response.output.filter((item) => item.type === "function_call").length, 1);
           assert.equal(events.filter((e) => e.type === "response.function_call_arguments.done").length, 1);

@@ -132,7 +132,7 @@ for (const incrementalOutput of [false, true]) for (const incomplete of [false, 
   const final = incrementalOutput ? target.events().at(-1).response : JSON.parse(target.text());
   assert.deepEqual(identities(final.output), expected);
   assert.equal(final.status, 'completed');
-  if (incomplete) { assert.equal(final.incomplete, true); assert.equal(final.error.code, 'NATIVE_STREAM_CLOSED_EARLY'); assert.equal(target.incomplete, true); }
+  if (incomplete) { assert.equal(final.incomplete, true); assert.equal(final.error, null); assert.equal(final.incomplete_details.code, 'NATIVE_STREAM_CLOSED_EARLY'); assert.equal(target.incomplete, true); }
 }
 assert.equal(upstream, 3);
 console.log('PASS: offline namespace collision, history, choice, invalid inputs, provider JSON/SSE/incomplete roundtrips (3 synthetic turns)');

@@ -122,7 +122,8 @@ for (const route of ['chat/completions', 'responses']) test(`${route}: a committ
   if (route === 'responses') {
     const terminal = events.find(e => e.type === 'response.completed');
     assert.equal(terminal.incomplete, true); assert.equal(terminal.response.incomplete, true); assert.equal(terminal.response.status, 'completed');
-    assert.equal(terminal.response.error.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
+    assert.equal(terminal.response.error, null);
+    assert.equal(terminal.response.incomplete_details.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
     const calls = terminal.response.output.filter(x => x.type === 'function_call'); assert.equal(calls.length, 1);
     assert.equal(calls[0].arguments, '{"key":"already delivered"}');
     assert.ok(events.some(e => e.type === 'response.function_call_arguments.done'));

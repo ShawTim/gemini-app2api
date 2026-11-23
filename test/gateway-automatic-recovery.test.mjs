@@ -240,7 +240,7 @@ for (const route of ['chat/completions', 'responses']) for (const kind of ['text
   if (route === 'responses') {
     const terminal = events.find(e => e.type === 'response.completed');
     assert.equal(terminal.incomplete, true); assert.equal(terminal.response.incomplete, true);
-    assert.equal(terminal.response.status, 'completed'); assert.equal(terminal.response.error.code, 'NATIVE_STREAM_RESET');
+    assert.equal(terminal.response.status, 'completed'); assert.equal(terminal.response.error, null);
     assert.equal(terminal.response.incomplete_details.code, 'NATIVE_STREAM_RESET');
     assert.ok(events.some(e => e.type === (kind === 'tool' ? 'response.function_call_arguments.done' : 'response.output_text.done')));
     assert.ok(!events.some(e => e.type === 'response.failed' || e.type === 'response.incomplete'));

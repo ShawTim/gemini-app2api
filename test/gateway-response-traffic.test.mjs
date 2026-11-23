@@ -47,7 +47,8 @@ test('repeated snapshot traffic is counted once for output; JSON may revise but 
       if (route === 'responses') {
         const terminal = events.find(e => e.type === 'response.completed');
         assert.equal(terminal.incomplete, true); assert.equal(terminal.response.incomplete, true);
-        assert.equal(terminal.response.status, 'completed'); assert.equal(terminal.response.error.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
+        assert.equal(terminal.response.status, 'completed'); assert.equal(terminal.response.error, null);
+        assert.equal(terminal.response.incomplete_details.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
       } else {
         const terminal = events.find(e => e.incomplete);
         assert.equal(terminal.choices[0].finish_reason, 'stop'); assert.match(text, /\[DONE\]/);

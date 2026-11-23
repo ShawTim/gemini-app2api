@@ -669,3 +669,66 @@ test('verified post_tool and post_output idle stalls keep sticky session pinned 
   assert.equal(f.app.pool.failovers.length, 0);
   assert.equal(f.app.pool.stats(acc1).failures, 0);
 });
+
+test('Issue #6: Responses SSE short verified postOutputIdleStall completes with response.error: null and next turn in same conversation succeeds', async t => {
+  const f = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: true });
+  t.after(f.close);
+  f.app.provider.postOutputIdleMs = 50;
+  let turn = 0;
+  f.app.provider.openTurn = () => {
+    const idx = turn++;
+    return {
+      events: (async function* () {
+        yield { type: 'headers', status: 200 };
+        if (idx === 0) {
+          yield { type: 'frame', bytes: makeNativeFrame('Hello! I am ready to help with your workspace task.', { complete: false }) };
+          await new Promise(() => {}); // deliberate post_output idle stall
+        }
+        yield { type: 'frame', bytes: makeNativeFrame('Follow-up turn succeeded cleanly.', { complete: true }) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+
+  const sid = { 'X-Session-ID': 'issue6_responses_proxy_compat' };
+  const r1 = await f.api('/v1/responses', {
+    method: 'POST',
+    headers: sid,
+    body: { model: 'gemini-argon', input: 'hi', stream: true },
+  });
+  assert.equal(r1.status, 200);
+  const w1 = await r1.text();
+  const evs1 = w1.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
+  const completed1 = evs1.find(e => e.type === 'response.completed');
+  assert.ok(completed1, 'must emit response.completed');
+  assert.equal(completed1.incomplete, true);
+  assert.equal(completed1.response.status, 'completed');
+  assert.equal(completed1.response.error, null, 'qualified response.completed must keep response.error null for strict Responses proxies');
+  assert.equal(completed1.response.incomplete, true);
+  assert.deepEqual(completed1.response.incomplete_details, { reason: 'upstream_interrupted', code: 'NATIVE_TURN_TIMEOUT' });
+  assert.equal(evs1.filter(e => e.type === 'response.output_text.done').length, 1);
+  assert.equal(evs1.filter(e => e.type === 'response.output_item.done').length, 1);
+  assert.equal(evs1.some(e => e.type === 'response.failed' || e.type === 'response.incomplete'), false);
+  const acc1 = f.app.overview().requests[0].accountId;
+
+  // Next turn in the same conversation succeeds cleanly on the same sticky account.
+  const r2 = await f.api('/v1/responses', {
+    method: 'POST',
+    headers: sid,
+    body: {
+      model: 'gemini-argon',
+      input: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'Hello! I am ready to help with your workspace task.' },
+        { role: 'user', content: 'Now confirm next turn works.' },
+      ],
+      stream: true,
+    },
+  });
+  assert.equal(r2.status, 200);
+  const w2 = await r2.text();
+  assert.match(w2, /Follow-up turn succeeded cleanly\./);
+  assert.equal(f.app.overview().requests[0].accountId, acc1);
+  assert.equal(r2.headers.get('x-gemini-failover-reason'), null);
+});

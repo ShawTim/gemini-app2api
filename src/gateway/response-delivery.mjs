@@ -198,9 +198,9 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   const responseId = () => meta.id.startsWith('resp_') ? meta.id : 'resp_' + meta.id.replace(/^chatcmpl-/, '');
   const chatBase = () => ({ id: meta.id, object: 'chat.completion.chunk', created: meta.created, model: meta.model,
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning_effort: meta.requestedReasoningEffort }) });
-  const response = (status, error = null) => ({ id: responseId(), object: 'response', created_at: meta.created, status,
-    error, ...(error && status !== 'failed' ? { incomplete: true } : {}),
-    incomplete_details: error && status !== 'failed' ? { reason: 'upstream_interrupted', code: error.code } : null, model: meta.model,
+  const response = (status, error = null, incompleteDetails = null) => ({ id: responseId(), object: 'response', created_at: meta.created, status,
+    error, ...(incompleteDetails ? { incomplete: true } : {}),
+    incomplete_details: incompleteDetails, model: meta.model,
     output: output.map(item => ({ ...item, status: status === 'completed' ? 'completed' : 'incomplete' })),
     usage: status === 'in_progress' ? null : toResponsesUsage(estimateUsage()),
     parallel_tool_calls: parallelToolCalls, ...(meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
@@ -421,11 +421,16 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
         await sendWire('data: ' + JSON.stringify({ error: detail, incomplete: true }) + '\n\n');
     } else if (usable) {
       // Deliberate delivery-completion compatibility, matching Chat's stop branch.
-      // Codex retries response.incomplete even after receiving usable text. Finish
-      // only the delivered items/turn; keep the interruption explicit in extensions
-      // and res.incomplete. This is not proof of full upstream generation completion.
+      // Codex retries response.incomplete even after receiving usable text, and strict
+      // Responses proxies treat non-null response.error on response.completed as a
+      // transport failure (triggering reconnect loops). Keep response.error null while
+      // preserving interruption visibility via incomplete: true, incomplete_details, and
+      // res.incomplete. This is not proof of full upstream generation completion.
       await finishResponseItems();
-      await sendResponse('response.completed', { incomplete: true, response: response('completed', detail) });
+      await sendResponse('response.completed', {
+        incomplete: true,
+        response: response('completed', null, { reason: 'upstream_interrupted', code: detail.code }),
+      });
     } else if (keepaliveZeroOutput) {
       const failedError = {
         code: 'server_error',
@@ -439,7 +444,9 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
             : {}),
       };
       await sendResponse('response.failed', { response: response('failed', failedError) });
-    } else await sendResponse('response.incomplete', { response: response('incomplete', detail) });
+    } else await sendResponse('response.incomplete', {
+      response: response('incomplete', detail, { reason: 'upstream_interrupted', code: detail.code }),
+    });
     wirePhase = 'settled'; stopKeepalive(); res.end(); return true;
   }
   // A retried attempt must not inherit a discarded fragment; wirePhase never rewinds.
