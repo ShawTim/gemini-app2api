@@ -1361,3 +1361,165 @@ test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-
   assert.equal(secondStreamAttempts, 1, 'slow 2nd streaming tool call must succeed on attempt 1');
   assert.equal(secondStreamCancelledEarly, false);
 });
+
+test('pure refactored units: selectIdleDeadline, planRetry, wirePhase/attemptDisposition/classifyInterruptEnding, and targeted toolRecoveryInstruction', async () => {
+  const { selectIdleDeadline } = await import('../src/native-provider.mjs');
+  const { planRetry } = await import('../src/gateway/pool.mjs');
+  const { createResponseDelivery, classifyInterruptEnding } = await import('../src/gateway/response-delivery.mjs');
+
+  // 1. selectIdleDeadline: strict priority & null non-fallthrough
+  const now = 10_000;
+  assert.deepEqual(selectIdleDeadline({ verified: false, cleanOutput: true, postOutputIdleMs: 100 }, now), { kind: null, ms: null });
+  // Higher-priority modelComplete + hasText with postCompleteGraceMs: null MUST NOT fall through to post_tool or post_output
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: true,
+    modelCompleteAt: 9_900,
+    postCompleteGraceMs: null,
+    hasText: true,
+    hasLiveCalls: true,
+    streamingTool: false,
+    postToolIdleMs: 50,
+    cleanOutput: true,
+    postOutputIdleMs: 50,
+    lastTextProgressAt: 9_900,
+  }, now), { kind: 'post_complete', ms: null });
+  // streamingTool blocks post_tool even when hasLiveCalls is true
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: false,
+    modelCompleteAt: null,
+    postCompleteGraceMs: 100,
+    hasText: true,
+    hasLiveCalls: true,
+    streamingTool: true,
+    postToolIdleMs: 50,
+    cleanOutput: false,
+    postOutputIdleMs: 100,
+    lastTextProgressAt: 9_990,
+  }, now), { kind: null, ms: null });
+  // post_tool_error picks min(toolErrorRemaining, completeRemaining)
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: true,
+    hasClosedToolError: false,
+    liveToolErrorDeadline: 10_400,
+    modelComplete: true,
+    modelCompleteAt: 9_950,
+    postCompleteGraceMs: 100,
+    postToolIdleMs: 500,
+    hasText: true,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: false,
+    postOutputIdleMs: 100,
+    lastTextProgressAt: 9_900,
+  }, now), { kind: 'post_tool_error', ms: 50 });
+
+  // 2. planRetry: shortOutputRetry blocks auth/precondition/downgrade/unpermitted-quota while keeping 1-time short-fragment replacement
+  const shortOutAuth = {
+    error: Object.assign(new Error('auth'), { code: 'NATIVE_PERMISSION_OR_AUTH', status: 403, shortOutput: true }),
+    kind: 'auth',
+    rawAutomaticKind: null,
+    verifiedEmpty: false,
+    explicitQuota: false,
+  };
+  const shortOutQuota = {
+    error: Object.assign(new Error('quota'), { code: 'NATIVE_QUOTA_EXHAUSTED', status: 429, shortOutput: true }),
+    kind: 'quota',
+    rawAutomaticKind: null,
+    verifiedEmpty: false,
+    explicitQuota: true,
+  };
+  const shortOutReset = {
+    error: Object.assign(new Error('drop'), { code: 'NATIVE_STREAM_RESET', shortOutput: true }),
+    kind: 'other',
+    rawAutomaticKind: null,
+    verifiedEmpty: false,
+    explicitQuota: false,
+  };
+  const freshLedger = { attempt: 0, maxAttempts: 4, quotaFailures: 0, emptyRecoveries: 0, shortOutputRecoveries: 0, toolProtocolRecoveries: 0, triedCount: 1, sameAccountRetries: 0 };
+  const allOff = { allowFailover: false, allowQuotaFailover: false, allowEmptyResponseFailover: false, allowAutomaticRecovery: false, sameAccountRetryDelayMs: 0 };
+  assert.equal(planRetry(shortOutAuth, freshLedger, { ...allOff, allowAutomaticRecovery: true }, { hasAlternative: true }).action, 'stop');
+  assert.equal(planRetry(shortOutQuota, freshLedger, allOff, { hasAlternative: true }).action, 'stop');
+  assert.equal(planRetry(shortOutReset, freshLedger, allOff, { hasAlternative: true }).action, 'try_alternative');
+  assert.equal(planRetry(shortOutReset, { ...freshLedger, shortOutputRecoveries: 1 }, allOff, { hasAlternative: true }).action, 'stop');
+  // Tool-error shortOutputRetry shares the 2-retry toolProtocolRecoveries cap and forwards toolProtocolReason
+  const toolFailure = {
+    error: Object.assign(new Error('bad json'), { code: 'INVALID_TOOL_JSON', toolProtocolReason: 'raw_newline_in_string', shortOutput: true }),
+    kind: 'other',
+    rawAutomaticKind: 'tool_protocol',
+    verifiedEmpty: false,
+    explicitQuota: false,
+  };
+  const plannedTool = planRetry(toolFailure, freshLedger, { ...allOff, allowAutomaticRecovery: true }, { hasAlternative: true });
+  assert.equal(plannedTool.action, 'try_alternative');
+  assert.equal(plannedTool.budgetDelta.toolProtocolRecoveries, 1);
+  assert.equal(plannedTool.budgetDelta.shortOutputRecoveries, 1);
+  assert.equal(plannedTool.nextRecoveryCode, 'INVALID_TOOL_JSON');
+  assert.equal(plannedTool.nextRecoveryReason, 'raw_newline_in_string');
+  assert.equal(
+    planRetry(toolFailure, { ...freshLedger, toolProtocolRecoveries: 2 }, { ...allOff, allowAutomaticRecovery: true }, { hasAlternative: true }).action,
+    'stop',
+  );
+
+  // 3. Monotonic wirePhase, attemptDisposition(), and classifyInterruptEnding()
+  const chunks = [];
+  const fakeRes = {
+    headersSent: false,
+    destroyed: false,
+    writableEnded: false,
+    writableNeedDrain: false,
+    writeHead() { this.headersSent = true; },
+    write(c) { chunks.push(c); return true; },
+    end(c) { if (c) chunks.push(c); this.writableEnded = true; },
+    on() {},
+    once() {},
+    off() {},
+  };
+  const delivery = createResponseDelivery(fakeRes, {
+    route: 'chat',
+    stream: true,
+    model: 'gemini-argon',
+    thinkingLevel: 2,
+    promptChars: 10,
+    deferEmptyStart: true,
+    keepaliveMs: 0,
+    keepaliveHeadersDelayMs: 0,
+  });
+  assert.equal(delivery.wirePhase, 'pending');
+  await delivery.accept({ content: 'tiny prefix' });
+  assert.equal(delivery.wirePhase, 'pending');
+  assert.deepEqual(delivery.attemptDisposition(new Error('drop')), { replayBlocked: false, shortOutput: true });
+  delivery.discard();
+  assert.equal(delivery.wirePhase, 'pending');
+  await delivery.accept({ content: 'x'.repeat(2100) });
+  assert.equal(delivery.wirePhase, 'events_started');
+  assert.deepEqual(delivery.attemptDisposition(new Error('drop')), { replayBlocked: true, shortOutput: false });
+  const interrupt = classifyInterruptEnding({
+    route: 'chat',
+    wirePhase: 'comments_only',
+    publishedBytes: 0,
+    callCount: 0,
+    content: '',
+    partialContent: '',
+    partialCalls: [],
+    error: Object.assign(new Error('down'), { code: 'SERVER_SHUTDOWN', status: 503 }),
+  });
+  assert.equal(interrupt.keepaliveZeroOutput, true);
+  assert.equal(interrupt.detail.retryable, true);
+  assert.equal(interrupt.needsStart, false);
+
+  // 4. Targeted toolRecoveryInstruction(code, reason)
+  const genericHint = toolRecoveryInstruction('INVALID_TOOL_JSON');
+  const newlineHint = toolRecoveryInstruction('INVALID_TOOL_JSON', 'raw_newline_in_string');
+  const multiHint = toolRecoveryInstruction('INVALID_TOOL_JSON', 'multiple_root_values');
+  assert.match(newlineHint, /encode all newlines.*\\n/i);
+  assert.match(multiHint, /open a separate ```tool_call block for each call/i);
+  assert.notEqual(newlineHint, genericHint);
+  assert.equal(toolRecoveryInstruction('INVALID_TOOL_JSON', 'untrusted_reason'), genericHint);
+});

@@ -40,6 +40,73 @@ export function classifyFailure(error) {
   if (["NATIVE_CONNECTION_FAILED", "NATIVE_STREAM_FAILED", "NATIVE_TRANSPORT_TIMEOUT", "NATIVE_IMAGE_UPLOAD_RESET", "NATIVE_IMAGE_UPLOAD_TIMEOUT", "OAUTH_REFRESH_FAILED", "UPSTREAM_UNAVAILABLE", "NATIVE_UPSTREAM_UNAVAILABLE"].includes(code)) return "transient";
   return "other";
 }
+
+/** Pure gateway retry planner. Separates account/session bookkeeping in AccountPool
+ * from budget/policy decisions while preserving overlapping retry counters. */
+export function planRetry(failure, ledger, policy, availability) {
+  const { error, kind, rawAutomaticKind, verifiedEmpty, explicitQuota } = failure;
+  if (error?.responseStarted === true) return { action: 'stop' };
+  const isToolError = TOOL_ERRORS.has(error?.code);
+  const toolProtocolCapped = isToolError && ledger.toolProtocolRecoveries >= 2;
+  const automaticKind = policy.allowAutomaticRecovery && !(toolProtocolCapped && rawAutomaticKind === 'tool_protocol')
+    ? rawAutomaticKind
+    : null;
+  const quotaRetry = (policy.allowQuotaFailover || policy.allowAutomaticRecovery) && explicitQuota;
+  const emptyRetry = policy.allowEmptyResponseFailover && verifiedEmpty && ledger.emptyRecoveries === 0;
+  // A turn interrupted before showing usable output may be replaced once without splicing,
+  // except on terminal refusal/auth/precondition/downgrade or unpermitted quota failures.
+  const quotaAllowed = policy.allowFailover || policy.allowQuotaFailover || policy.allowAutomaticRecovery;
+  const shortOutputRetry =
+    !toolProtocolCapped &&
+    error?.shortOutput === true &&
+    error?.code !== 'NATIVE_RESPONSE_REFUSED' &&
+    error?.code !== 'MODEL_DOWNGRADE_REJECTED' &&
+    kind !== 'auth' &&
+    kind !== 'precondition' &&
+    (kind !== 'quota' || quotaAllowed) &&
+    ledger.shortOutputRecoveries === 0;
+  const generalRetry = policy.allowFailover && ['quota', 'transient'].includes(kind) && ledger.attempt + 1 < 3;
+  const quotaFailuresDelta = quotaRetry ? 1 : 0;
+  if (
+    !(automaticKind || quotaRetry || emptyRetry || generalRetry || shortOutputRetry) ||
+    ledger.attempt + 1 >= ledger.maxAttempts + ledger.quotaFailures + quotaFailuresDelta
+  ) {
+    return { action: 'stop', quotaFailuresDelta };
+  }
+  const budgetDelta = {
+    quotaFailures: quotaFailuresDelta,
+    emptyRecoveries: emptyRetry ? 1 : 0,
+    shortOutputRecoveries: shortOutputRetry ? 1 : 0,
+    toolProtocolRecoveries: (automaticKind === 'tool_protocol' || (isToolError && shortOutputRetry)) ? 1 : 0,
+  };
+  const reason = automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind);
+  const nextRecoveryCode = (automaticKind === 'tool_protocol' || automaticKind === 'structured_output') ? error.code : undefined;
+  const nextRecoveryReason = (automaticKind === 'tool_protocol' || automaticKind === 'structured_output')
+    ? (error.toolProtocolReason ?? error.nativeEvidence?.toolProtocolReason ?? null)
+    : undefined;
+  const metadata = {
+    reason,
+    quotaFailover: quotaRetry,
+    emptyRecovery: emptyRetry,
+    shortOutputRecovery: shortOutputRetry,
+    automaticRecovery: Boolean(automaticKind),
+  };
+  if (availability.hasAlternative) {
+    return { action: 'try_alternative', budgetDelta, metadata, nextRecoveryCode, nextRecoveryReason, delayMs: 0 };
+  }
+  const canRetrySameAccount =
+    policy.allowAutomaticRecovery &&
+    ledger.triedCount === 1 &&
+    ledger.sameAccountRetries < 1 &&
+    (SAME_ACCOUNT_RECOVERY_KINDS.has(automaticKind) || shortOutputRetry);
+  if (!canRetrySameAccount) {
+    return { action: 'stop', quotaFailuresDelta };
+  }
+  const delayMs = automaticKind === 'transport' && policy.sameAccountRetryDelayMs > 0
+    ? policy.sameAccountRetryDelayMs
+    : 0;
+  return { action: 'retry_same', budgetDelta, metadata, nextRecoveryCode, nextRecoveryReason, delayMs };
+}
 export class AccountPool {
   #routingAccountIds;
   #telemetry;
@@ -174,7 +241,7 @@ export class AccountPool {
     // each other's route or require a single request to own the session.
     const preferredId = session.accountId, previousModel = session.model, remembered = session.lastFailure;
     const tried = new Set();
-    let previous = null, emptyRecoveries = 0, shortOutputRecoveries = 0, toolProtocolRecoveries = 0, sameAccountRetries = 0, sameAccountRetryId = null, retryDelayMs = 0, formatRecoveryCode = null, quotaFailures = 0, outcome = null;
+    let previous = null, emptyRecoveries = 0, shortOutputRecoveries = 0, toolProtocolRecoveries = 0, sameAccountRetries = 0, sameAccountRetryId = null, retryDelayMs = 0, formatRecoveryCode = null, formatRecoveryReason = null, quotaFailures = 0, outcome = null;
     const maxAttempts = this.allowAutomaticRecovery || this.allowQuotaFailover || this.allowEmptyResponseFailover ? 4 : 3;
     try {
       if (signal?.aborted) throw fault('REQUEST_CANCELLED', 499);
@@ -210,7 +277,7 @@ export class AccountPool {
         }
         try {
           const result = await execute(account.id, { owner, sessionId: sessionId ?? null, responseSessionId: id, signal,
-            failover: previous !== null, failoverReason: previous?.reason ?? null, recoveryCode: formatRecoveryCode });
+            failover: previous !== null, failoverReason: previous?.reason ?? null, recoveryCode: formatRecoveryCode, recoveryReason: formatRecoveryReason });
           this.#telemetry.succeed(account.id, model, result);
           outcome = { accountId: account.id, model, lastFailure: null };
           session.turns++;
@@ -221,44 +288,38 @@ export class AccountPool {
           const kind = classifyFailure(error);
           if (kind === "auth") this.accounts.invalidate?.(account.id);
           const rawAutomaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
-          const isToolError = TOOL_ERRORS.has(error?.code);
-          const toolProtocolCapped = isToolError && toolProtocolRecoveries >= 2;
-          const automaticKind = toolProtocolCapped && rawAutomaticKind === 'tool_protocol' ? null : rawAutomaticKind;
-          const quotaRetry = (this.allowQuotaFailover || this.allowAutomaticRecovery) && isExplicitQuotaFailure(error);
-          const verifiedEmpty = isVerifiedEmptyResponse(error, model);
-          const emptyRetry = this.allowEmptyResponseFailover && verifiedEmpty && emptyRecoveries === 0;
           const recoveryKind = rawAutomaticKind ?? kind;
           outcome = { accountId: account.id, model, lastFailure: recoveryKind ? { accountId: account.id, model, kind: recoveryKind } : null };
-          // Once output has been committed, another attempt would splice a new
-          // answer/tool set into an existing response. Preserve this interruption.
-          if (error.responseStarted === true) throw error;
-          // A turn that was interrupted before showing the caller anything usable
-          // may be replaced once. This is not a splice: no output was committed.
-          const shortOutputRetry = !toolProtocolCapped && error.shortOutput === true && error.code !== "NATIVE_RESPONSE_REFUSED" && shortOutputRecoveries === 0;
-          const generalRetry = this.allowFailover && ['quota', 'transient'].includes(kind) && attempt + 1 < 3;
-          if (quotaRetry) quotaFailures++;
-          if (!(automaticKind || quotaRetry || emptyRetry || generalRetry || shortOutputRetry) || attempt + 1 >= maxAttempts + quotaFailures) throw error;
-          if (emptyRetry) emptyRecoveries++;
-          if (shortOutputRetry) shortOutputRecoveries++;
-          if (automaticKind === 'tool_protocol' || (isToolError && shortOutputRetry)) toolProtocolRecoveries++;
-          if (automaticKind === 'tool_protocol' || automaticKind === 'structured_output') formatRecoveryCode = error.code;
-          previous = { id: account.id, reason: automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind), quotaFailover: quotaRetry,
-            emptyRecovery: emptyRetry, shortOutputRecovery: shortOutputRetry, automaticRecovery: !!automaticKind };
           const hasAlternative = this.available(model).some(a => !tried.has(a.id));
-          if (!hasAlternative) {
-            // A 1-account pool still deserves 1 bounded same-account recovery attempt
-            // for transient/empty/format errors; multi-account pools already tried >= 2 distinct accounts.
-            const canRetrySameAccount =
-              this.allowAutomaticRecovery &&
-              tried.size === 1 &&
-              sameAccountRetries < 1 &&
-              (SAME_ACCOUNT_RECOVERY_KINDS.has(automaticKind) || shortOutputRetry);
-            if (!canRetrySameAccount) throw error;
+          const decision = planRetry(
+            { error, kind, rawAutomaticKind, verifiedEmpty: isVerifiedEmptyResponse(error, model), explicitQuota: isExplicitQuotaFailure(error) },
+            { attempt, maxAttempts, quotaFailures, emptyRecoveries, shortOutputRecoveries, toolProtocolRecoveries, sameAccountRetries, triedCount: tried.size },
+            {
+              allowFailover: this.allowFailover,
+              allowQuotaFailover: this.allowQuotaFailover,
+              allowEmptyResponseFailover: this.allowEmptyResponseFailover,
+              allowAutomaticRecovery: this.allowAutomaticRecovery,
+              sameAccountRetryDelayMs: this.sameAccountRetryDelayMs,
+            },
+            { hasAlternative },
+          );
+          if (decision.action === 'stop') {
+            quotaFailures += decision.quotaFailuresDelta ?? 0;
+            throw error;
+          }
+          quotaFailures += decision.budgetDelta.quotaFailures;
+          emptyRecoveries += decision.budgetDelta.emptyRecoveries;
+          shortOutputRecoveries += decision.budgetDelta.shortOutputRecoveries;
+          toolProtocolRecoveries += decision.budgetDelta.toolProtocolRecoveries;
+          if (decision.nextRecoveryCode !== undefined) {
+            formatRecoveryCode = decision.nextRecoveryCode;
+            formatRecoveryReason = decision.nextRecoveryReason ?? null;
+          }
+          previous = { id: account.id, ...decision.metadata };
+          if (decision.action === 'retry_same') {
             sameAccountRetries++;
             sameAccountRetryId = account.id;
-            if (automaticKind === 'transport' && this.sameAccountRetryDelayMs > 0) {
-              retryDelayMs = this.sameAccountRetryDelayMs;
-            }
+            if (decision.delayMs > 0) retryDelayMs = decision.delayMs;
           }
         } finally { this.#releaseAccount(account.id, stat); }
       }

@@ -1918,3 +1918,63 @@ test('pi-gemini-app suppresses hallucinated [Caller tool result] after streamed 
   assert.equal(textOut.includes('[Caller tool result]'), false);
   assert.equal(textOut.includes('hallucinated'), false);
 });
+
+test('pi-gemini-app salvages valid Call #1 on Call #2 INVALID_TOOL_JSON and allows 2 uncommitted tool_protocol retries with targeted hints', async () => {
+  const model = { id: 'gemini-argon', provider: 'gemini-app', api: 'gemini-app-api' };
+  const toolContext = {
+    messages: [{ role: 'user', content: 'Look up sample', timestamp: 1 }],
+    tools: [{ name: 'lookup', description: 'Lookup key', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }],
+  };
+  const validCall = '```tool_call\n{"name":"lookup","arguments":{"key":"ok"}}\n```\n';
+  const badCall = '```tool_call\n{"name":"lookup","arguments":{"key":"line1\nline2"}}\n```\n';
+
+  // 1. Multi-call tail salvage: Frame 1 commits valid Call #1, Frame 2 appends broken Call #2 (INVALID_TOOL_JSON);
+  //    delivers Call #1 cleanly as toolUse without crashing or retrying.
+  let salvageAttempts = 0;
+  const salvageHandler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    openTurn: () => {
+      salvageAttempts++;
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame(validCall, { complete: false }) };
+          yield { type: 'frame', bytes: buildNativeFrame(validCall + badCall, { complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    },
+  });
+  const salvaged = await salvageHandler.streamSimple(model, toolContext, { apiKey: 'fixture-token' }).result();
+  assert.equal(salvageAttempts, 1);
+  assert.equal(salvaged.stopReason, 'toolUse');
+  const calls = salvaged.content.filter((b) => b.type === 'toolCall');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].arguments, { key: 'ok' });
+
+  // 2. Uncommitted INVALID_TOOL_JSON retries twice (3 attempts total) with targeted subcode hint.
+  let retryAttempts = 0;
+  const seenPrompts = [];
+  const retryHandler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    openTurn: (_tok, opts) => {
+      retryAttempts++;
+      seenPrompts.push(opts.messages.map((m) => m.content).join('\n'));
+      const reply = retryAttempts < 3 ? badCall : validCall;
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame(reply, { complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    },
+  });
+  const recovered = await retryHandler.streamSimple(model, toolContext, { apiKey: 'fixture-token' }).result();
+  assert.equal(retryAttempts, 3);
+  assert.equal(recovered.stopReason, 'toolUse');
+  assert.match(seenPrompts[1], /encode all newlines.*\\n/i);
+  assert.deepEqual(recovered.content.find((b) => b.type === 'toolCall')?.arguments, { key: 'ok' });
+});

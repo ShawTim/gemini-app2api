@@ -527,10 +527,11 @@ export function createGateway({
           getOutputCommitState: delivery.outputCommitState,
           ...(attemptDiagnostic ? { nativeDiagnostic: attemptDiagnostic } : {}) }); }
         catch (error) {
-          // Only content the caller actually received commits this turn. A held
-          // tiny prefix or comment-only SSE keepalive header is still replaceable without splicing output.
-          error.responseStarted = (res.headersSent === true && !delivery.keepaliveOnlyHeaders) || delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
-          if (!error.responseStarted && !error.unverifiedOutput && !error.postOutputIdleStall && delivery.retryableShortfall) error.shortOutput = true;
+          // Delivery owns the cross-attempt commit boundary: a held tiny prefix
+          // or comment-only SSE keepalive header is still replaceable without splicing output.
+          const disposition = delivery.attemptDisposition(error);
+          error.responseStarted = disposition.replayBlocked;
+          if (disposition.shortOutput) error.shortOutput = true;
           const evidence = safeNativeEvidence(error.nativeEvidence);
           const failure = { accountId: acc, status: Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502,
             code: errorPayload(error).error.code, ...(evidence ? { nativeEvidence: evidence } : {}) };

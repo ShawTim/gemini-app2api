@@ -3,6 +3,22 @@ import { NATIVE_RESPONSE_LIMITS } from './native-response-limits.mjs';
 import { NATIVE_MODELS } from '../openai-contract.mjs';
 const bounded = (value, min, max) =>
   Number.isSafeInteger(value) && value >= min && value <= max ? value : null;
+const TOOL_PROTOCOL_REASONS = new Set([
+  'opening_fence',
+  'closing_fence',
+  'multiple_root_values',
+  'raw_newline_in_string',
+  'control_char_in_string',
+  'invalid_escape',
+  'unexpected_token_after_string',
+  'trailing_comma',
+  'unterminated_json',
+  'duplicate_key',
+  'nonfinite_number',
+  'invalid_surrogate',
+  'limit_exceeded',
+  'invalid_syntax',
+]);
 const phases = new Set([
   "auth",
   "upload",
@@ -67,7 +83,7 @@ export function safeNativeEvidence(value) {
   const streamCloseCode = bounded(value.streamCloseCode, 1, 0xffffffff);
   const fallback = bounded(value.fallback, 0, 1);
   const downgradeReason = bounded(value.downgradeReason, 0, 0x7fffffff);
-  const toolProtocolReason = ['opening_fence', 'closing_fence'].includes(value.toolProtocolReason) ? value.toolProtocolReason : null;
+  const toolProtocolReason = TOOL_PROTOCOL_REASONS.has(value.toolProtocolReason) ? value.toolProtocolReason : null;
   const emptyResponseReason = ['no_text', 'whitespace_only', 'thoughts_only', 'post_parse_empty'].includes(value.emptyResponseReason) ? value.emptyResponseReason : null;
   const nativeTextBytes = bounded(value.nativeTextBytes, 0, 8 * 1024 * 1024);
   const nativeShareableTextBytes = bounded(value.nativeShareableTextBytes, 0, 8 * 1024 * 1024);

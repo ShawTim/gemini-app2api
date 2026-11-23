@@ -450,3 +450,107 @@ test('OpenCode auth handles account switch and logout cleanly without stale toke
   assert.equal((await retryRes.json()).error.code, 'OAUTH_ACCOUNT_CHANGED');
   assert.deepEqual(retrySeenTokens, ['retry-A-tok']);
 });
+
+test('OpenCode fetch: post_tool stall delivers validated tool_calls cleanly, salvages valid Call #1 on Call #2 INVALID_TOOL_JSON, and caps uncommitted tool_protocol recovery at 2 retries', async () => {
+  const toolDef = [{
+    type: 'function',
+    function: {
+      name: 'lookup',
+      description: 'Lookup key',
+      parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+    },
+  }];
+  const validCall = '```tool_call\n{"name":"lookup","arguments":{"key":"ok"}}\n```\n';
+  const badCall = '```tool_call\n{"name":"lookup","arguments":{"key":"line1\nline2"}}\n```\n';
+  const validAuth = async () => ({
+    type: 'oauth',
+    refresh: 'r-tool',
+    access: 'a-tool',
+    expires: Date.now() + 600_000,
+  });
+
+  // 1. post_tool stall (NATIVE_TURN_TIMEOUT after valid toolCallCount > 0, postOutputIdleStall not set)
+  //    MUST finish cleanly with finish_reason: 'tool_calls' and NOT drop the validated call.
+  const stallPlugin = createGeminiAppOpenCodePlugin({
+    refreshNativeCredential: async () => ({ accessToken: 'a-tool', expiresInSeconds: 3600 }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        yield { type: 'frame', bytes: makeFrame(validCall) };
+        throw Object.assign(new Error('post_tool timeout'), { code: 'NATIVE_TURN_TIMEOUT', status: 504 });
+      })(),
+    }),
+  });
+  const stallLoaded = await (await stallPlugin({})).auth.loader(validAuth);
+  const stallRes = await stallLoaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, tools: toolDef, messages: [{ role: 'user', content: 'Run lookup' }] }),
+  });
+  assert.equal(stallRes.status, 200);
+  const stallWire = await stallRes.text();
+  assert.match(stallWire, /"name":"lookup"/);
+  assert.match(stallWire, /"finish_reason":"tool_calls"/);
+  assert.doesNotMatch(stallWire, /NATIVE_TURN_TIMEOUT/);
+
+  // 2. Multi-call tail salvage: Frame 1 commits valid Call #1, Frame 2 appends broken Call #2 (INVALID_TOOL_JSON);
+  //    must finish cleanly with Call #1 delivered rather than crashing the turn.
+  const salvagePlugin = createGeminiAppOpenCodePlugin({
+    refreshNativeCredential: async () => ({ accessToken: 'a-tool', expiresInSeconds: 3600 }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        yield { type: 'frame', bytes: makeFrame(validCall) };
+        yield { type: 'frame', bytes: makeFrame(validCall + badCall) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+  const salvageLoaded = await (await salvagePlugin({})).auth.loader(validAuth);
+  const salvageRes = await salvageLoaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, tools: toolDef, messages: [{ role: 'user', content: 'Run two lookups' }] }),
+  });
+  assert.equal(salvageRes.status, 200);
+  const salvageWire = await salvageRes.text();
+  assert.match(salvageWire, /"name":"lookup"/);
+  assert.match(salvageWire, /"finish_reason":"tool_calls"/);
+  assert.doesNotMatch(salvageWire, /INVALID_TOOL_JSON/);
+
+  // 3. Uncommitted INVALID_TOOL_JSON retries up to 2 times (3 attempts total) and injects targeted reason hint at prompt tail.
+  let attempts = 0;
+  const seenPrompts = [];
+  const recoverPlugin = createGeminiAppOpenCodePlugin({
+    refreshNativeCredential: async () => ({ accessToken: 'a-tool', expiresInSeconds: 3600 }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    openTurn: (_tok, opts) => {
+      attempts++;
+      seenPrompts.push(opts.messages.map((m) => m.content).join('\n'));
+      const reply = attempts < 3 ? badCall : validCall;
+      return {
+        cancel() {},
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeFrame(reply) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+  });
+  const recoverLoaded = await (await recoverPlugin({})).auth.loader(validAuth);
+  const recoverRes = await recoverLoaded.fetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: false, tools: toolDef, messages: [{ role: 'user', content: 'Run lookup' }] }),
+  });
+  assert.equal(recoverRes.status, 200);
+  assert.equal(attempts, 3);
+  assert.match(seenPrompts[1], /encode all newlines.*\\n/i);
+  const recoverJson = await recoverRes.json();
+  assert.equal(recoverJson.choices[0].message.tool_calls[0].function.name, 'lookup');
+});

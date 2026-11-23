@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { NativeDirectProvider } from '../../src/native-provider.mjs';
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
-import { automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
+import { TOOL_ERRORS, automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
 import { measurePromptImagePayload, estimateUsage } from '../../src/openai-usage.mjs';
 import { toChatAnnotations } from '../../src/openai-contract.mjs';
 import { normalizeOpenCodeModelId } from './models.js';
@@ -105,6 +105,7 @@ export function createOpenCodeFetch({
   async function runWithRetry({ rawBody, requestedModel, signal, onDelta, getOutputCommitState, onModelResolved }) {
     let attempts = 0;
     let recoveryCode;
+    let recoveryReason;
     let authRefreshed = false;
     let pinnedAccountEpoch;
 
@@ -173,6 +174,7 @@ export function createOpenCodeFetch({
           incrementalOutput: Boolean(payload.stream),
           signal,
           recoveryCode,
+          recoveryReason,
           getOutputCommitState,
           timeoutMs,
         });
@@ -185,9 +187,11 @@ export function createOpenCodeFetch({
             continue;
           }
           const kind = automaticRecoveryKind(err, payload.model, { allowAutoModel: isAuto });
-          if (kind && kind !== 'quota' && attempts < 1) {
+          const maxRetries = kind === 'tool_protocol' || kind === 'structured_output' ? 2 : 1;
+          if (kind && kind !== 'quota' && attempts < maxRetries) {
             attempts++;
             recoveryCode = err.code;
+            recoveryReason = err.toolProtocolReason ?? err.nativeEvidence?.toolProtocolReason ?? null;
             continue;
           }
         }
@@ -421,13 +425,11 @@ export function createOpenCodeFetch({
           streamClosed = true;
           return;
         }
-        if (
-          !streamAbort.signal.aborted &&
+        const usableStall =
           err?.code === 'NATIVE_TURN_TIMEOUT' &&
-          err?.unverifiedOutput !== true &&
-          err?.postOutputIdleStall === true &&
-          (publishedBytes > 0 || toolCallCount > 0)
-        ) {
+          (toolCallCount > 0 || (err?.postOutputIdleStall === true && publishedBytes > 0));
+        const salvageValidatedCalls = toolCallCount > 0 && TOOL_ERRORS.has(err?.code);
+        if (!streamAbort.signal.aborted && err?.unverifiedOutput !== true && (usableStall || salvageValidatedCalls)) {
           sendDeltaChunk({}, toolCallCount > 0 ? 'tool_calls' : 'stop', { incomplete: true });
           if (includeUsage) {
             const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });

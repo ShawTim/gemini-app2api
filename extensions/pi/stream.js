@@ -1,7 +1,7 @@
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { NativeDirectProvider as DefaultNativeDirectProvider } from '../../src/native-provider.mjs';
-import { automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
+import { TOOL_ERRORS, automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
 import { buildChatPayload as defaultBuildChatPayload } from './transcript.js';
 import { estimateUsage as defaultEstimateUsage, measurePromptImagePayload } from '../../src/openai-usage.mjs';
 
@@ -365,6 +365,7 @@ export function createGeminiStreamHandler({
 
         let attempts = 0;
         let recoveryCode;
+        let recoveryReason;
 
         while (true) {
           try {
@@ -439,6 +440,7 @@ export function createGeminiStreamHandler({
               incrementalOutput: true,
               signal: options?.signal,
               recoveryCode,
+              recoveryReason,
               getOutputCommitState,
             });
             if (turnResult?.thinkingLevel !== undefined && turnResult.thinkingLevel !== null) {
@@ -449,25 +451,25 @@ export function createGeminiStreamHandler({
             }
             break;
           } catch (turnError) {
-            if (
-              !options?.signal?.aborted &&
+            const usableTimeout =
               turnError?.code === 'NATIVE_TURN_TIMEOUT' &&
-              turnError?.unverifiedOutput !== true &&
-              (hasToolCalls || turnError?.postOutputIdleStall === true || publishedBytes >= PREFIX_BYTES)
-            ) {
+              (hasToolCalls || turnError?.postOutputIdleStall === true || publishedBytes >= PREFIX_BYTES);
+            const salvageValidatedCalls = hasToolCalls && TOOL_ERRORS.has(turnError?.code);
+            if (!options?.signal?.aborted && turnError?.unverifiedOutput !== true && (usableTimeout || salvageValidatedCalls)) {
               break;
             }
             if (
               !started &&
-              attempts === 0 &&
               !options?.signal?.aborted &&
               turnError?.code !== 'NATIVE_TURN_ABORTED' &&
               turnError?.code !== 'REQUEST_CANCELLED'
             ) {
               const kind = automaticRecoveryKind(turnError, model.id, { allowAutoModel: true });
-              if (ALLOWED_RECOVERY_KINDS.has(kind)) {
+              const maxRetries = kind === 'tool_protocol' || kind === 'structured_output' ? 2 : 1;
+              if (ALLOWED_RECOVERY_KINDS.has(kind) && attempts < maxRetries) {
                 attempts++;
                 recoveryCode = turnError.code;
+                recoveryReason = turnError.toolProtocolReason ?? turnError.nativeEvidence?.toolProtocolReason ?? null;
                 textBuffer = '';
                 pendingSurrogate = '';
                 observedThinking = null;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildToolInstruction, flattenMessages, createToolCallSplitter, compileToolPolicy, parseBoundedJson, validateToolCompletion } from '../../src/tool-protocol.mjs';
+import { buildToolInstruction, flattenMessages, createToolCallSplitter, compileToolPolicy, parseBoundedJson, validateToolCompletion, TOOL_JSON_REASONS } from '../../src/tool-protocol.mjs';
 
 const tools = [{ type: 'function', function: { name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } } }];
 const fence = args => '```tool_call\n' + JSON.stringify({ name: 'exec_command', arguments: args }) + '\n```';
@@ -175,4 +175,48 @@ test('hallucinated [Caller tool result] after real tool_calls is suppressed clea
   // 5. Zero false positives when seen === 0 (normal prose explaining [Caller tool result])
   const ordinary = 'The protocol uses [Caller tool result] {"tool_call_id":"..."} for caller outputs.';
   assert.equal(run(ordinary).map(e => e.text).join(''), ordinary);
+});
+
+test('parseBoundedJson attaches privacy-safe toolProtocolReason subcodes while staying strictly fail-closed', () => {
+  const cases = [
+    ['{"a":1}{"b":2}', 'multiple_root_values'],
+    ['{"a":"line1\nline2"}', 'raw_newline_in_string'],
+    ['{"a":"bad\x01ctrl"}', 'control_char_in_string'],
+    ['{"a":"\\q"}', 'invalid_escape'],
+    ['{"a":"hello" "world"}', 'unexpected_token_after_string'],
+    ['{"a":1,}', 'trailing_comma'],
+    ['[1,2,]', 'trailing_comma'],
+    ['{"a":1', 'unterminated_json'],
+    ['{"a":"unterminated', 'unterminated_json'],
+    ['{"a":1,"a":2}', 'duplicate_key'],
+    ['1e9999', 'nonfinite_number'],
+    ['"\\ud800"', 'invalid_surrogate'],
+    ['['.repeat(18) + '0' + ']'.repeat(18), 'limit_exceeded'],
+    ['{"a":bad}', 'invalid_syntax'],
+  ];
+  for (const [source, expectedReason] of cases) {
+    assert.ok(TOOL_JSON_REASONS.includes(expectedReason), `${expectedReason} must be in TOOL_JSON_REASONS`);
+    assert.throws(
+      () => parseBoundedJson(source),
+      error => error.code === 'INVALID_TOOL_JSON' && error.toolProtocolReason === expectedReason && !error.message.includes('line1'),
+      `Expected ${expectedReason} for ${JSON.stringify(source)}`,
+    );
+  }
+});
+
+test('createToolCallSplitter exposes read-only state across text, tool_fence, ordinary_fence and suppressed', () => {
+  const s = createToolCallSplitter({ policy });
+  assert.equal(s.state, 'text');
+  s.push('Intro\n```js\nconst x = 1;\n');
+  assert.equal(s.state, 'ordinary_fence');
+  s.push('```\n');
+  assert.equal(s.state, 'text');
+  s.push('```tool_call\n{"name":"exec_command","arguments":{"cmd":"ls"}}\n');
+  assert.equal(s.state, 'tool_fence');
+  s.push('```\n');
+  assert.equal(s.state, 'text');
+  assert.equal(s.toolCallCount, 1);
+  s.push('[Caller tool result] {"tool_call_id":"call_1","content":"fake"}\n');
+  assert.equal(s.state, 'suppressed');
+  assert.equal(s.flush().length, 0);
 });

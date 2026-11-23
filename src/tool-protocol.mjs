@@ -19,63 +19,104 @@ export class ProtocolError extends Error {
 export const protocolError = (code, status = 400, param = null) => new ProtocolError(code, status, param);
 const fail = (code, status = 400, param = null) => { throw protocolError(code, status, param); };
 
+export const TOOL_JSON_REASONS = Object.freeze([
+  'multiple_root_values',
+  'raw_newline_in_string',
+  'control_char_in_string',
+  'invalid_escape',
+  'unexpected_token_after_string',
+  'trailing_comma',
+  'unterminated_json',
+  'duplicate_key',
+  'nonfinite_number',
+  'invalid_surrogate',
+  'limit_exceeded',
+  'invalid_syntax',
+]);
+
 /** Bounded JSON parser: rejects duplicate keys, non-finite numbers and deep or
  * oversized trees, rather than silently overwriting ambiguous arguments. */
 export function parseBoundedJson(text, { status = 400 } = {}) {
-  if (typeof text !== 'string' || Buffer.byteLength(text) > TOOL_LIMITS.bytes) fail('INVALID_TOOL_JSON', status);
+  const bad = (reason = 'invalid_syntax') => {
+    const error = protocolError('INVALID_TOOL_JSON', status);
+    error.toolProtocolReason = reason;
+    throw error;
+  };
+  if (typeof text !== 'string') bad('invalid_syntax');
+  if (Buffer.byteLength(text) > TOOL_LIMITS.bytes) bad('limit_exceeded');
   let pos = 0, nodes = 0;
-  const bad = () => fail('INVALID_TOOL_JSON', status);
   const ws = () => { while (/[\t\n\r ]/.test(text[pos] ?? '\0')) pos++; };
   const string = () => {
     const start = pos++;
     while (pos < text.length) {
       const ch = text[pos++];
       if (ch === '"') {
-        try {
-          const result = JSON.parse(text.slice(start, pos));
-          if (Buffer.from(result).toString('utf8') !== result) bad();
-          return result;
-        } catch { bad(); }
+        let result;
+        try { result = JSON.parse(text.slice(start, pos)); } catch { bad('invalid_syntax'); }
+        if (Buffer.from(result).toString('utf8') !== result) bad('invalid_surrogate');
+        return result;
       }
-      if (ch === '\\') pos++;
+      if (ch === '\n' || ch === '\r') bad('raw_newline_in_string');
+      if (ch.charCodeAt(0) < 0x20) bad('control_char_in_string');
+      if (ch === '\\') {
+        if (pos >= text.length) bad('unterminated_json');
+        const esc = text[pos++];
+        if (esc === 'u') {
+          if (!/^[0-9a-fA-F]{4}/.test(text.slice(pos, pos + 4))) bad('invalid_escape');
+          pos += 4;
+        } else if (!'"\\/bfnrt'.includes(esc)) {
+          bad('invalid_escape');
+        }
+      }
     }
-    bad();
+    bad('unterminated_json');
   };
   const value = depth => {
-    if (++nodes > TOOL_LIMITS.nodes || depth > TOOL_LIMITS.depth) bad();
+    if (++nodes > TOOL_LIMITS.nodes || depth > TOOL_LIMITS.depth) bad('limit_exceeded');
     ws();
+    if (pos >= text.length) bad('unterminated_json');
     if (text[pos] === '"') return string();
     if (text[pos] === '{' || text[pos] === '[') {
       const object = text[pos++] === '{', result = object ? Object.create(null) : [];
       const end = object ? '}' : ']';
       ws();
+      if (pos >= text.length) bad('unterminated_json');
       if (text[pos] === end) { pos++; return result; }
       for (;;) {
         ws();
+        if (pos >= text.length) bad('unterminated_json');
+        if (text[pos] === end) bad('trailing_comma');
         let key;
         if (object) {
-          if (text[pos] !== '"') bad();
+          if (text[pos] !== '"') bad('invalid_syntax');
           key = string();
-          if (Object.hasOwn(result, key)) bad();
-          ws(); if (text[pos++] !== ':') bad();
+          if (Object.hasOwn(result, key)) bad('duplicate_key');
+          ws();
+          if (pos >= text.length) bad('unterminated_json');
+          if (text[pos++] !== ':') bad('unexpected_token_after_string');
         }
+        const childWasString = (() => { ws(); return text[pos] === '"'; })();
         const child = value(depth + 1);
         if (object) result[key] = child; else result.push(child);
         ws();
+        if (pos >= text.length) bad('unterminated_json');
         const separator = text[pos++];
         if (separator === end) return result;
-        if (separator !== ',') bad();
+        if (separator !== ',') bad(childWasString ? 'unexpected_token_after_string' : 'invalid_syntax');
       }
     }
     const token = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(pos));
-    if (!token) bad();
+    if (!token) bad('invalid_syntax');
     pos += token[0].length;
     const result = JSON.parse(token[0]);
-    if (typeof result === 'number' && !Number.isFinite(result)) bad();
+    if (typeof result === 'number' && !Number.isFinite(result)) bad('nonfinite_number');
     return result;
   };
   const result = value(0);
-  ws(); if (pos !== text.length) bad();
+  ws();
+  if (pos !== text.length) {
+    bad(text[pos] === '{' || text[pos] === '[' || text[pos] === ',' ? 'multiple_root_values' : 'invalid_syntax');
+  }
   return result;
 }
 
@@ -362,5 +403,6 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     },
     get toolCallCount() { return seen; },
     get suppressed() { return suppressed; },
+    get state() { return suppressed ? 'suppressed' : mode === 'tool' ? 'tool_fence' : mode === 'ordinary' ? 'ordinary_fence' : 'text'; },
   };
 }

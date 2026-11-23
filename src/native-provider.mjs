@@ -38,6 +38,48 @@ const failWithEvidence = (code, evidence) => {
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 const HYDROGEN_ATTRIBUTION = /\bhydrogen\b/i;
 const NEON_ATTRIBUTION = /\bneon\b/i;
+const ASYNC_DEEP_THINK_PLACEHOLDER_RE = /^\s*I'm on it\.\s*Responses with Deep Think can take some time, so check back in a bit\.\s*https?:\/\/googleusercontent\.com\/agentic_processing_chip\/\d+\s*$/i;
+const CLOSING_FENCE_LINE_RE = /^ {0,3}`{3,}/;
+const PENDING_TOOL_OPEN_RE = /^ {0,3}`{3,}[ \t]*t(?:o(?:o(?:l(?:_(?:c(?:a(?:l(?:l)?)?)?)?)?)?)?)?[ \t]*$/;
+
+/** Pure idle deadline selector for NativeDirectProvider.runTurn().
+ * Preserves strict priority: an enabled lower-priority timer never runs while
+ * a higher-priority condition matches with its own deadline disabled (null). */
+export function selectIdleDeadline(facts, now = Date.now()) {
+  if (!facts?.verified) return { kind: null, ms: null };
+  const elapsed = anchor => (anchor !== null && anchor !== undefined ? Math.max(0, now - anchor) : 0);
+  const completeRemaining = (facts.modelComplete && facts.postCompleteGraceMs !== null)
+    ? Math.max(0, facts.postCompleteGraceMs - elapsed(facts.modelCompleteAt))
+    : null;
+  if (facts.hasLiveToolError || facts.hasClosedToolError) {
+    const toolErrorRemaining = facts.hasLiveToolError
+      ? (facts.postToolIdleMs === null ? null : Math.max(0, (facts.liveToolErrorDeadline ?? now) - now))
+      : (facts.postToolIdleMs === null ? null : Math.max(0, facts.postToolIdleMs - elapsed(facts.lastTextProgressAt)));
+    if (toolErrorRemaining !== null && (completeRemaining === null || toolErrorRemaining <= completeRemaining)) {
+      return { kind: 'post_tool_error', ms: toolErrorRemaining };
+    }
+    if (completeRemaining !== null) {
+      return { kind: 'post_tool_error', ms: completeRemaining };
+    }
+    return { kind: null, ms: null };
+  }
+  if (facts.modelComplete && facts.hasText) {
+    return { kind: 'post_complete', ms: completeRemaining };
+  }
+  if (facts.hasLiveCalls && !facts.streamingTool) {
+    return {
+      kind: 'post_tool',
+      ms: facts.postToolIdleMs === null ? null : Math.max(0, facts.postToolIdleMs - elapsed(facts.lastTextProgressAt)),
+    };
+  }
+  if (facts.cleanOutput) {
+    return {
+      kind: 'post_output',
+      ms: facts.postOutputIdleMs === null ? null : Math.max(0, facts.postOutputIdleMs - elapsed(facts.lastTextProgressAt)),
+    };
+  }
+  return { kind: null, ms: null };
+}
 function one(fields, number) {
   const found = fields.filter(field => field.number === number);
   if (found.length > 1) fail('INVALID_NATIVE_RESPONSE');
@@ -282,7 +324,7 @@ export class NativeDirectProvider {
       : validateIdleMs(context.postOutputIdleMs, 'postOutputIdleMs');
     const body = normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
     if (body.native_search) return this.runNativeSearch(accountId, body, onDelta, { ...context, timeoutMs });
-    const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode);
+    const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode, context.recoveryReason);
     const appendRecovery = promptMessages => {
       if (!recoveryInstruction || !promptMessages?.length) return promptMessages;
       const next = promptMessages.map(msg => ({ ...msg }));
@@ -333,7 +375,7 @@ export class NativeDirectProvider {
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
       ...((body.reasoning_effort ?? body.reasoning?.effort) === undefined ? {} : { requestedReasoningEffort: body.reasoning_effort ?? body.reasoning?.effort }) };
-    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorTailStart = 0, liveToolErrorDeadline = null, toolErrorEarlyStop = false, postCompleteIdleFinished = false, sinkFailed = false;
+    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorTailStart = 0, liveToolErrorDeadline = null, readExit = 'none', sinkFailed = false;
     const deliver = async event => {
       try { await onDelta(event); }
       catch (error) { sinkFailed = true; throw error; }
@@ -401,85 +443,78 @@ export class NativeDirectProvider {
           ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
         iterator = turn.events[Symbol.asyncIterator]();
         try {
-      let cachedProbeText = null, cachedProbeRevision = -1, cachedProbeLiveCalls = -1, cachedProbeStructured = false, cachedProbeResult = { kind: 'none' };
-      const probeIdleState = () => {
-        if (cachedProbeText === rawText && cachedProbeRevision === revisionCount && cachedProbeLiveCalls === liveCalls.length && cachedProbeStructured === outputShape.nativeStructuredOutputPresent) {
-          return cachedProbeResult;
-        }
-        cachedProbeText = rawText;
-        cachedProbeRevision = revisionCount;
-        cachedProbeLiveCalls = liveCalls.length;
-        cachedProbeStructured = outputShape.nativeStructuredOutputPresent;
-        if (!rawText.trim()) return (cachedProbeResult = { kind: 'none' });
-        if (/^\s*I'm on it\.\s*Responses with Deep Think can take some time, so check back in a bit\.\s*https?:\/\/googleusercontent\.com\/agentic_processing_chip\/\d+\s*$/i.test(rawText)) {
-          return (cachedProbeResult = { kind: 'none' });
+      let cachedFallbackText = null, cachedFallbackRevision = -1, cachedFallbackResult = { kind: 'none' };
+      const probeFullRawText = () => {
+        if (cachedFallbackText === rawText && cachedFallbackRevision === revisionCount) return cachedFallbackResult;
+        cachedFallbackText = rawText;
+        cachedFallbackRevision = revisionCount;
+        if (!rawText.trim() || ASYNC_DEEP_THINK_PLACEHOLDER_RE.test(rawText)) {
+          return (cachedFallbackResult = { kind: 'none' });
         }
         let probeItems;
         try {
           const probe = createToolCallSplitter({ policy });
           probeItems = [...probe.push(rawText), ...probe.flush()];
         } catch (probeError) {
-          // Only a closed tool block (or malformed fence/call) failing parse/schema validation
-          // is a closed_tool_error. TRUNCATED_TOOL_CALL means a tool block is still streaming,
-          // and TOOL_CHOICE_NOT_SATISFIED is checked separately below so a valid preamble before
-          // a required tool_choice call is never misclassified as a closed tool error.
-          if (probeError?.code === 'TRUNCATED_TOOL_CALL') {
-            return (cachedProbeResult = { kind: 'streaming_tool' });
-          }
-          if (TOOL_ERRORS.has(probeError?.code)) {
-            return (cachedProbeResult = { kind: 'closed_tool_error', error: probeError });
-          }
-          return (cachedProbeResult = { kind: 'none' });
+          if (probeError?.code === 'TRUNCATED_TOOL_CALL') return (cachedFallbackResult = { kind: 'streaming_tool' });
+          if (TOOL_ERRORS.has(probeError?.code)) return (cachedFallbackResult = { kind: 'closed_tool_error', error: probeError });
+          return (cachedFallbackResult = { kind: 'none' });
         }
-        if (liveCalls.length > 0) return (cachedProbeResult = { kind: 'none' });
+        if (liveCalls.length > 0) return (cachedFallbackResult = { kind: 'none' });
         try {
           const probeCalls = probeItems.filter(it => it.type === 'call').map(it => it.call);
           const probeContent = probeItems.filter(it => it.type === 'content').map(it => it.text).join('');
-          if (!outputShape.nativeStructuredOutputPresent && softErrorReason(probeContent, body, probeCalls.length)) return (cachedProbeResult = { kind: 'none' });
-          if (body.parallel_tool_calls === false && probeCalls.length > 1) return (cachedProbeResult = { kind: 'none' });
+          if (!outputShape.nativeStructuredOutputPresent && softErrorReason(probeContent, body, probeCalls.length)) return (cachedFallbackResult = { kind: 'none' });
+          if (body.parallel_tool_calls === false && probeCalls.length > 1) return (cachedFallbackResult = { kind: 'none' });
           validateToolCompletion(probeCalls, policy);
-          if (!probeCalls.length && !probeContent.trim()) return (cachedProbeResult = { kind: 'none' });
+          if (!probeCalls.length && !probeContent.trim()) return (cachedFallbackResult = { kind: 'none' });
           if (body.response_format && !probeCalls.length) validateStructuredOutputText(probeContent, body.response_format);
-          return (cachedProbeResult = { kind: 'clean_output' });
+          return (cachedFallbackResult = { kind: 'clean_output' });
         } catch {
-          return (cachedProbeResult = { kind: 'none' });
+          return (cachedFallbackResult = { kind: 'none' });
         }
       };
-      const isCleanPostOutputIdleStall = () => probeIdleState().kind === 'clean_output';
+      // O(1) incremental idle classification for streaming turns via liveSplitter.state;
+      // only falls back to full probe when a pending closing fence lacks trailing LF or !incremental.
+      const classifyIdleSnapshot = () => {
+        if (!rawText.trim() || ASYNC_DEEP_THINK_PLACEHOLDER_RE.test(rawText)) return { kind: 'none' };
+        if (!liveSplitter) return probeFullRawText();
+        const state = liveSplitter.state;
+        const lastLf = rawText.lastIndexOf('\n');
+        const trailingLine = lastLf < 0 ? rawText : rawText.slice(lastLf + 1);
+        if (state === 'tool_fence') {
+          if (trailingLine && CLOSING_FENCE_LINE_RE.test(trailingLine)) return probeFullRawText();
+          return { kind: 'streaming_tool' };
+        }
+        if (state === 'text' && trailingLine && PENDING_TOOL_OPEN_RE.test(trailingLine)) {
+          return { kind: 'streaming_tool' };
+        }
+        if (liveCalls.length > 0) return { kind: 'none' };
+        if (policy.choice === 'required' || policy.forced) return { kind: 'none' };
+        const candidateText = liveContent + liveSplitter.preview();
+        if (!candidateText.trim()) return { kind: 'none' };
+        if (!outputShape.nativeStructuredOutputPresent && softErrorReason(candidateText, body, 0)) return { kind: 'none' };
+        return { kind: 'clean_output' };
+      };
       const nextEventWithIdle = async () => {
         const verified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
-        const probeState = (verified && !liveToolError) ? probeIdleState() : { kind: 'none' };
-        // Never arm an idle timer unless we already have verified, complete, deliverable output
-        // or a closed invalid tool block; never kill a slow still-streaming tool call (TRUNCATED_TOOL_CALL)
-        // or a valid preamble preceding a required tool_choice call.
-        const now = Date.now();
-        const toolErrorRemaining = liveToolError
-          ? (postToolIdleMs === null ? null : Math.max(0, (liveToolErrorDeadline ?? now) - now))
-          : (postToolIdleMs === null ? null : Math.max(0, postToolIdleMs - (lastTextProgressAt !== null ? now - lastTextProgressAt : 0)));
-        const completeRemaining = (modelComplete && postCompleteGraceMs !== null)
-          ? Math.max(0, postCompleteGraceMs - (modelCompleteAt !== null ? now - modelCompleteAt : 0))
-          : null;
-        let idleKind = null;
-        let idleMs = null;
-        if (verified && (liveToolError || probeState.kind === 'closed_tool_error')) {
-          // Take the shortest enabled deadline across post_tool_error and (when modelComplete) post_complete.
-          if (toolErrorRemaining !== null && (completeRemaining === null || toolErrorRemaining <= completeRemaining)) {
-            idleKind = 'post_tool_error';
-            idleMs = toolErrorRemaining;
-          } else if (completeRemaining !== null) {
-            idleKind = 'post_tool_error';
-            idleMs = completeRemaining;
-          }
-        } else if (modelComplete && verified && rawText.trim().length > 0) {
-          idleKind = 'post_complete';
-          idleMs = completeRemaining;
-        } else if (verified && liveCalls.length > 0 && probeState.kind !== 'streaming_tool') {
-          idleKind = 'post_tool';
-          idleMs = postToolIdleMs === null ? null : Math.max(0, postToolIdleMs - (lastTextProgressAt !== null ? now - lastTextProgressAt : 0));
-        } else if (probeState.kind === 'clean_output') {
-          idleKind = 'post_output';
-          idleMs = postOutputIdleMs === null ? null : Math.max(0, postOutputIdleMs - (lastTextProgressAt !== null ? now - lastTextProgressAt : 0));
-        }
+        const snap = (verified && !liveToolError) ? classifyIdleSnapshot() : { kind: 'none' };
+        const { kind: idleKind, ms: idleMs } = selectIdleDeadline({
+          verified,
+          hasText: rawText.trim().length > 0,
+          hasLiveToolError: Boolean(liveToolError),
+          hasClosedToolError: snap.kind === 'closed_tool_error',
+          modelComplete,
+          hasLiveCalls: liveCalls.length > 0,
+          streamingTool: snap.kind === 'streaming_tool',
+          cleanOutput: snap.kind === 'clean_output',
+          liveToolErrorDeadline,
+          lastTextProgressAt,
+          modelCompleteAt,
+          postCompleteGraceMs,
+          postToolIdleMs,
+          postOutputIdleMs,
+        });
         const nextPromise = iterator.next();
         if (idleMs === null) return bounded(nextPromise);
         nextPromise.catch(() => {});
@@ -488,7 +523,7 @@ export class NativeDirectProvider {
           return await Promise.race([
             bounded(nextPromise),
             new Promise(resolve => {
-              idleTimer = setTimeout(() => resolve({ [IDLE_TIMEOUT_SENTINEL]: idleKind, verified, probeError: probeState.error ?? null }), idleMs);
+              idleTimer = setTimeout(() => resolve({ [IDLE_TIMEOUT_SENTINEL]: idleKind, verified, probeError: snap.error ?? null }), idleMs);
               idleTimer.unref?.();
             }),
           ]);
@@ -504,7 +539,7 @@ export class NativeDirectProvider {
           if (idleKind === 'post_complete' && item.verified && rawText.trim().length > 0) {
             note('post_complete_idle_finish', { bytes: Buffer.byteLength(rawText) });
             try { turn?.cancel(); } catch {}
-            postCompleteIdleFinished = true;
+            readExit = 'complete_grace';
             ended = true;
             httpStatus = httpStatus ?? 200;
             grpc = grpc ?? 0;
@@ -514,7 +549,7 @@ export class NativeDirectProvider {
             if (!liveToolError) liveToolError = item.probeError;
             note('post_tool_error_idle_finish', { code: liveToolError.code, bytes: Buffer.byteLength(rawText) });
             try { turn?.cancel(); } catch {}
-            toolErrorEarlyStop = true;
+            readExit = 'deferred_tool_error';
             break;
           }
           note(`${idleKind}_idle_timeout`, {
@@ -524,7 +559,7 @@ export class NativeDirectProvider {
           });
           try { turn?.cancel(); } catch {}
           const idleError = protocolError('NATIVE_TURN_TIMEOUT', 504);
-          if (idleKind === 'post_output' && item.verified && isCleanPostOutputIdleStall()) {
+          if (idleKind === 'post_output' && item.verified && classifyIdleSnapshot().kind === 'clean_output') {
             idleError.postOutputIdleStall = true;
           }
           throw idleError;
@@ -636,6 +671,7 @@ export class NativeDirectProvider {
             if (!liveToolError && liveSplitter.suppressed && liveCalls.length > 0 && !downgrade && !outputShape.nativeRefusalPresent) {
               note('early_stop_post_tool_hallucination', { calls: liveCalls.length });
               try { turn?.cancel(); } catch {}
+              readExit = 'suppressed_after_valid_call';
               ended = true;
               modelComplete = true;
               httpStatus = httpStatus ?? 200;
@@ -650,7 +686,7 @@ export class NativeDirectProvider {
             if (postErrorTail.includes('[Caller tool result]') || postErrorTailBytes > 4096 || graceExpired) {
               note('early_stop_post_tool_error', { code: liveToolError.code, bytes: postErrorTailBytes });
               try { turn?.cancel(); } catch {}
-              toolErrorEarlyStop = true;
+              readExit = 'deferred_tool_error';
               break;
             }
           }
@@ -660,7 +696,7 @@ export class NativeDirectProvider {
             else if (info.quotaObservation.source === 'official') quotaObservation = mergeQuotaObservation(quotaObservation, info.quotaObservation);
           }
         } else if (event.type === 'end') {
-          phase = 'end'; ended = true; grpc = event.grpcStatus; httpStatus = event.httpStatus;
+          phase = 'end'; readExit = 'wire_end'; ended = true; grpc = event.grpcStatus; httpStatus = event.httpStatus;
           if (event.httpStatus === 429 || grpc === 8) fail('NATIVE_RATE_LIMITED', 429);
           if (event.httpStatus === 401 || grpc === 16) fail('NATIVE_AUTH_REJECTED');
           if (event.httpStatus === 403 || grpc === 7) fail('NATIVE_PERMISSION_REJECTED');
@@ -692,7 +728,7 @@ export class NativeDirectProvider {
       phase = 'validate';
       if (downgrade) fail('MODEL_DOWNGRADE_REJECTED');
       if (outputShape.nativeRefusalPresent) fail('NATIVE_RESPONSE_REFUSED', 422);
-      if (toolErrorEarlyStop && liveToolError) {
+      if (readExit === 'deferred_tool_error' && liveToolError) {
         if (!modeMatches(observedMode)) fail('MISSING_NATIVE_MODE_EVIDENCE');
         if (!attributionVerified()) fail('MODEL_DOWNGRADE_REJECTED');
         throw liveToolError;
@@ -700,7 +736,7 @@ export class NativeDirectProvider {
       if (!ended) fail('INCOMPLETE_NATIVE_RESPONSE');
       // An ordinary RPC close is not model completion. Async UI placeholders
       // must be non-retryable or PI will repeatedly submit fresh generations.
-      if (/^\s*I'm on it\.\s*Responses with Deep Think can take some time, so check back in a bit\.\s*https?:\/\/googleusercontent\.com\/agentic_processing_chip\/\d+\s*$/i.test(rawText)) fail('NATIVE_ASYNC_RESPONSE_UNSUPPORTED', 422);
+      if (ASYNC_DEEP_THINK_PLACEHOLDER_RE.test(rawText)) fail('NATIVE_ASYNC_RESPONSE_UNSUPPORTED', 422);
       if (!modelComplete) fail('INCOMPLETE_NATIVE_RESPONSE');
       if (!modeMatches(observedMode)) fail('MISSING_NATIVE_MODE_EVIDENCE');
       if (!attributionVerified()) fail('MODEL_DOWNGRADE_REJECTED');
@@ -765,8 +801,10 @@ export class NativeDirectProvider {
       note('provider_failure', { code: safe.code });
       let transport = {};
       try { transport = turn?.getSafeStatus?.() ?? {}; } catch {}
+      const committedOnFailure = committedOutput();
       safe.nativeEvidence = safeNativeEvidence({
         // Keep guard-site diagnostics raised deeper in this turn; they are byte counts only.
+        ...((committedOnFailure.publishedBytes > 0 || committedOnFailure.toolCallCount > 0 || TOOL_ERRORS.has(safe.code)) ? committedOnFailure : {}),
         ...(error.nativeEvidence ?? {}),
         phase, upstreamHttpStatus: transport.httpStatus ?? httpStatus,
         grpcStatus: transport.grpcStatus ?? grpc,
@@ -779,7 +817,7 @@ export class NativeDirectProvider {
         observedMode, observedThinking,
         fallback: observedFallback, downgradeReason,
         toolProtocolReason: safe.toolProtocolReason,
-        ...((toolErrorEarlyStop || (postCompleteIdleFinished && phase === 'validate' && TOOL_ERRORS.has(safe.code))) ? { toolErrorEarlyStop: true } : {}),
+        ...((readExit === 'deferred_tool_error' || (readExit === 'complete_grace' && phase === 'validate' && TOOL_ERRORS.has(safe.code))) ? { toolErrorEarlyStop: true } : {}),
         ...(outputObserved ? { nativeTextBytes: Buffer.byteLength(rawText), ...outputShape,
           nativeResponseRevisions: revisionCount, nativeResponseIdentityVerified: snapshotId !== null } : {}),
         ...(responseLimitReason ? { nativeResponseLimitReason: responseLimitReason } : {}),
