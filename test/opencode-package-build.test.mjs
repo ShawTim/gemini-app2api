@@ -13,6 +13,7 @@ import { verifyOpenCodePackageStaging } from '../scripts/check-opencode-package.
 test('traceOpenCodeRuntimeClosure resolves zero-dependency ESM closure with no child_process or state.mjs', () => {
   const files = traceOpenCodeRuntimeClosure();
   assert.ok(files.includes('extensions/opencode/index.js'));
+  assert.ok(files.includes('extensions/opencode/v2.js'));
   assert.ok(files.includes('extensions/opencode/models.js'));
   assert.ok(files.includes('extensions/opencode/auth.js'));
   assert.ok(files.includes('extensions/opencode/fetch.js'));

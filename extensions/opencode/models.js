@@ -74,6 +74,36 @@ export function normalizeOpenCodeModelId(raw) {
   return canonicalModel(trimmed);
 }
 
+export function buildOpenCodeV2Models({ providerID = PROVIDER_ID } = {}) {
+  return Object.entries(MODEL_SPECS).map(([id, spec]) => ({
+    id,
+    modelID: id,
+    providerID,
+    name: spec.name,
+    capabilities: {
+      tools: true,
+      input: ['text', 'image'],
+      output: ['text'],
+      temperature: false,
+    },
+    variants: [],
+    time: { released: 0 },
+    cost: [
+      {
+        input: 0,
+        output: 0,
+        cache: { read: 0, write: 0 },
+      },
+    ],
+    status: 'active',
+    enabled: true,
+    limit: {
+      context: spec.contextWindow,
+      output: spec.maxTokens,
+    },
+  }));
+}
+
 export function filterOpenCodeModels(models, subscriptionTier) {
   if (!models || typeof models !== 'object') return {};
   if (subscriptionTier === 'free') {

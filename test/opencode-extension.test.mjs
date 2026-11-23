@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { startLoopbackLogin as realStartLoopbackLogin, refreshNativeCredential as realRefreshNativeCredential } from '../native-wire/oauth-loopback.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 import { createGeminiAppOpenCodePlugin } from '../extensions/opencode/index.js';
-import { PROVIDER_ID, VIRTUAL_BASE_URL, OPENCODE_MODELS, mergeOpenCodeConfig, filterOpenCodeModels } from '../extensions/opencode/models.js';
+import {
+  createGeminiAppOpenCodeV2Plugin,
+  OPENCODE_V2_PLUGIN_ID,
+  OPENCODE_V2_OAUTH_METHOD_ID,
+  BRIDGE_TOKEN_HEADER,
+} from '../extensions/opencode/v2.js';
+import { PROVIDER_ID, VIRTUAL_BASE_URL, OPENCODE_MODELS, buildOpenCodeV2Models, mergeOpenCodeConfig, filterOpenCodeModels } from '../extensions/opencode/models.js';
 import { MODEL_SPECS } from '../src/openai-contract.mjs';
 
 function makeFrame(text, { mode = 3, thinking = 2, attribution = 'Used 4 Neon High model' } = {}) {
@@ -553,4 +560,632 @@ test('OpenCode fetch: post_tool stall delivers validated tool_calls cleanly, sal
   assert.match(seenPrompts[1], /encode all newlines.*\\n/i);
   const recoverJson = await recoverRes.json();
   assert.equal(recoverJson.choices[0].message.tool_calls[0].function.name, 'lookup');
+});
+
+function createMockOpenCodeV2Context({ initialCred = null } = {}) {
+  let activeCred = initialCred;
+  const integrations = new Map();
+  const oauthMethods = new Map();
+  const providers = new Map();
+  const modelTransforms = [];
+  const eventQueue = [];
+  let eventWake = null;
+  let modelReloadCount = 0;
+
+  const ctx = {
+    integration: {
+      async transform(cb) {
+        cb({
+          list: () => [...integrations.values()],
+          get: (id) => integrations.get(id),
+          update: (id, fn) => {
+            const cur = integrations.get(id) || { id, name: id };
+            fn(cur);
+            integrations.set(id, cur);
+          },
+          remove: (id) => integrations.delete(id),
+          method: {
+            list: (id) => oauthMethods.get(id) || [],
+            update: (reg) => {
+              const list = oauthMethods.get(reg.integrationID) || [];
+              const idx = list.findIndex((x) => x.method?.id === reg.method?.id);
+              if (idx === -1) list.push(reg);
+              else list[idx] = reg;
+              oauthMethods.set(reg.integrationID, list);
+            },
+            remove: () => {},
+          },
+        });
+        return { async dispose() {} };
+      },
+      async reload() {},
+      connection: {
+        async active(id) {
+          if (id !== PROVIDER_ID || !activeCred) return undefined;
+          return { type: 'credential', id: 'cred-1' };
+        },
+        async resolve() {
+          return activeCred ? structuredClone(activeCred) : undefined;
+        },
+      },
+    },
+    provider: {
+      async transform(cb) {
+        cb({
+          add(entry) {
+            // Mirror OpenCode V2 packages/core/src/provider.ts structuredClone(definition.info)
+            providers.set(entry.info.id, {
+              info: structuredClone(entry.info),
+              models: structuredClone(entry.models),
+            });
+          },
+        });
+        return { async dispose() {} };
+      },
+      async reload() {},
+    },
+    model: {
+      async transform(cb) {
+        modelTransforms.push(cb);
+        return { async dispose() {} };
+      },
+      async reload() {
+        modelReloadCount++;
+      },
+    },
+    event: {
+      subscribe({ signal } = {}) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            while (!signal?.aborted) {
+              if (eventQueue.length > 0) {
+                yield eventQueue.shift();
+                continue;
+              }
+              await new Promise((resolve) => {
+                eventWake = resolve;
+                signal?.addEventListener('abort', () => resolve(), { once: true });
+              });
+              eventWake = null;
+            }
+          },
+        };
+      },
+    },
+  };
+
+  return {
+    ctx,
+    integrations,
+    oauthMethods,
+    providers,
+    setActiveCred(next) {
+      activeCred = next;
+    },
+    emitEvent(ev) {
+      eventQueue.push(ev);
+      eventWake?.();
+    },
+    getModelReloadCount: () => modelReloadCount,
+    evaluateEnabledModels() {
+      const entry = providers.get(PROVIDER_ID);
+      const list = structuredClone(entry.models);
+      for (const cb of modelTransforms) {
+        cb({
+          list: (pid) => (pid ? list.filter((m) => m.providerID === pid) : list),
+          update: (pid, mid, fn) => {
+            const target = list.find((m) => m.providerID === pid && m.id === mid);
+            if (target) fn(target);
+          },
+        });
+      }
+      return list.filter((m) => m.enabled).map((m) => m.id);
+    },
+  };
+}
+
+test('OpenCode V2 plugin registers integration, structuredClone-safe provider, and proxies streaming + non-streaming via authenticated loopback bridge', async () => {
+  const v2Models = buildOpenCodeV2Models();
+  assert.deepEqual(v2Models.map((m) => m.id), Object.keys(MODEL_SPECS));
+
+  let seenTokens = [];
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    refreshNativeCredential: async (_cfg, refreshToken) => ({
+      accessToken: `access-for-${refreshToken}`,
+      refreshToken,
+      expiresInSeconds: 3600,
+    }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+    identifyGoogleAccount: async () => ({ email: 'v2-user@example.com' }),
+    startLoopbackLogin: async () => {
+      let resolveDone;
+      const done = new Promise((r) => { resolveDone = r; });
+      return {
+        authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=v2',
+        done,
+        async completeCallbackUrl(pasted) {
+          assert.match(pasted, /code=v2-code/);
+          resolveDone({ refreshToken: 'v2-refresh-1', expiresInSeconds: 3600 });
+        },
+        close() {},
+      };
+    },
+    openTurn: (token) => {
+      seenTokens.push(token);
+      return {
+        cancel() {},
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeFrame('Hello from OpenCode V2!') };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+  });
+
+  assert.equal(plugin.id, OPENCODE_V2_PLUGIN_ID);
+  assert.equal(typeof plugin.setup, 'function');
+
+  const mock = createMockOpenCodeV2Context();
+  const cleanup = await plugin.setup(mock.ctx);
+  assert.equal(typeof cleanup, 'function');
+
+  try {
+    const methods = mock.oauthMethods.get(PROVIDER_ID);
+    assert.equal(methods.length, 1);
+    assert.equal(methods[0].method.id, OPENCODE_V2_OAUTH_METHOD_ID);
+    assert.equal(methods[0].method.type, 'oauth');
+
+    // Verify OAuth authorize + remote submit + credential shape + label + refresh
+    const authAttempt = await methods[0].authorize({});
+    assert.equal(authAttempt.mode, 'auto');
+    assert.match(authAttempt.url, /accounts\.google\.com/);
+    await authAttempt.submit('http://127.0.0.1:43210/callback?code=v2-code&state=v2');
+    const savedCred = await authAttempt.callback;
+    assert.equal(savedCred.type, 'oauth');
+    assert.equal(savedCred.methodID, OPENCODE_V2_OAUTH_METHOD_ID);
+    assert.equal(savedCred.refresh, 'v2-refresh-1');
+    assert.equal(savedCred.access, 'access-for-v2-refresh-1');
+    assert.equal(Number.isInteger(savedCred.expires), true);
+    assert.equal(methods[0].label(savedCred), 'v2-user@example.com');
+
+    const refreshedCred = await methods[0].refresh(savedCred);
+    assert.equal(refreshedCred.access, 'access-for-v2-refresh-1');
+    assert.equal(refreshedCred.metadata?.tier, 'pro');
+
+    // Verify provider info + bridge security
+    const providerEntry = mock.providers.get(PROVIDER_ID);
+    assert.equal(providerEntry.info.package, '@opencode/ai/providers/openai-compatible');
+    assert.equal(providerEntry.info.activation, 'auto');
+    const baseUrl = providerEntry.info.settings.baseURL;
+    const bridgeToken = providerEntry.info.headers[BRIDGE_TOKEN_HEADER];
+    assert.match(baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
+    assert.ok(bridgeToken && bridgeToken.length >= 32);
+
+    // Reject missing/wrong bridge token with 401
+    const unauth = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gemini-neon', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(unauth.status, 401);
+
+    // Reject unknown endpoint with 404
+    const notFound = await fetch(`${baseUrl}/models`, {
+      method: 'GET',
+      headers: { [BRIDGE_TOKEN_HEADER]: bridgeToken },
+    });
+    assert.equal(notFound.status, 404);
+
+    // Activate OAuth credential and send non-streaming + streaming chat completions
+    mock.setActiveCred(savedCred);
+    const nonStreamRes = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(nonStreamRes.status, 200);
+    const nonStreamJson = await nonStreamRes.json();
+    assert.equal(nonStreamJson.choices[0].message.content, 'Hello from OpenCode V2!');
+
+    const streamRes = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(streamRes.status, 200);
+    assert.match(streamRes.headers.get('content-type') || '', /text\/event-stream/);
+    const sseText = await streamRes.text();
+    assert.match(sseText, /Hello from OpenCode V2!/);
+    assert.match(sseText, /data: \[DONE\]/);
+    assert.deepEqual(seenTokens, ['access-for-v2-refresh-1', 'access-for-v2-refresh-1']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('OpenCode V2 plugin enforces free-tier model gating and reloads on credential.switched event', async () => {
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: 'pro' }),
+  });
+
+  const mock = createMockOpenCodeV2Context({
+    initialCred: {
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-free',
+      access: 'a-free',
+      expires: Date.now() + 600_000,
+      metadata: { tier: 'free' },
+    },
+  });
+  const cleanup = await plugin.setup(mock.ctx);
+  try {
+    assert.deepEqual(mock.evaluateEnabledModels(), ['gemini-auto']);
+
+    // Switch active credential to Pro and emit credential.switched event
+    mock.setActiveCred({
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-pro',
+      access: 'a-pro',
+      expires: Date.now() + 600_000,
+      metadata: { tier: 'pro' },
+    });
+    mock.emitEvent({ type: 'credential.switched', data: { integrationID: PROVIDER_ID } });
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.ok(mock.getModelReloadCount() >= 1);
+    assert.deepEqual(mock.evaluateEnabledModels(), Object.keys(MODEL_SPECS));
+  } finally {
+    await cleanup();
+  }
+});
+
+test('OpenCode V2: first-time Free OAuth login reloads models and secondary method.refresh does not clobber active tier', async () => {
+  let detectedTier = 'free';
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    refreshNativeCredential: async (_cfg, refreshToken) => ({
+      accessToken: `access-${refreshToken}`,
+      refreshToken,
+      expiresInSeconds: 3600,
+    }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.alloc(0) }),
+    decodeSubscription: () => ({ tier: detectedTier }),
+    identifyGoogleAccount: async () => ({ email: `${detectedTier}@example.com` }),
+    startLoopbackLogin: async () => {
+      let resolveDone;
+      const done = new Promise((r) => { resolveDone = r; });
+      return {
+        authorizationUrl: 'https://accounts.google.com/o/oauth2/auth?state=free1',
+        done,
+        async completeCallbackUrl() {
+          resolveDone({ refreshToken: 'r-free-login', expiresInSeconds: 3600 });
+        },
+        close() {},
+      };
+    },
+  });
+
+  const mock = createMockOpenCodeV2Context();
+  const cleanup = await plugin.setup(mock.ctx);
+  try {
+    // Initially signed out -> all models enabled until Free account connects
+    assert.deepEqual(mock.evaluateEnabledModels(), Object.keys(MODEL_SPECS));
+    const method = mock.oauthMethods.get(PROVIDER_ID)[0];
+    const attempt = await method.authorize({});
+    await attempt.submit('http://127.0.0.1:43210/callback?code=ok&state=free1');
+    const savedFree = await attempt.callback;
+    assert.equal(savedFree.metadata?.tier, 'free');
+
+    // finalizeOAuthCredential must NOT pre-mutate activeTier; when OpenCode saves & emits switched, reload MUST fire
+    mock.setActiveCred(savedFree);
+    mock.emitEvent({ type: 'credential.switched', data: { integrationID: PROVIDER_ID } });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.ok(mock.getModelReloadCount() >= 1, 'first-time Free login must trigger model.reload()');
+    assert.deepEqual(mock.evaluateEnabledModels(), ['gemini-auto']);
+
+    // Switch to Pro active account, then refresh a secondary Free credential -> active Pro models MUST NOT be clobbered!
+    mock.setActiveCred({
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-pro-active',
+      access: 'a-pro-active',
+      expires: Date.now() + 600_000,
+      metadata: { tier: 'pro' },
+    });
+    mock.emitEvent({ type: 'credential.switched', data: { integrationID: PROVIDER_ID } });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(mock.evaluateEnabledModels(), Object.keys(MODEL_SPECS));
+
+    detectedTier = 'free';
+    const secondaryRefreshed = await method.refresh({
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-secondary-free',
+      access: 'old',
+      expires: Date.now() - 1000,
+    });
+    assert.equal(secondaryRefreshed.metadata?.tier, 'free');
+    assert.deepEqual(mock.evaluateEnabledModels(), Object.keys(MODEL_SPECS), 'refreshing secondary Free account must not clobber active Pro tier');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('OpenCode V2: active()/resolve() race rejects stale Account A lookup instead of sending old token after switch to B', async () => {
+  const credsByConn = new Map([
+    ['conn-a', { type: 'oauth', methodID: OPENCODE_V2_OAUTH_METHOD_ID, refresh: 'r-a', access: 'token-A', expires: Date.now() + 600_000, metadata: { tier: 'pro' } }],
+    ['conn-b', { type: 'oauth', methodID: OPENCODE_V2_OAUTH_METHOD_ID, refresh: 'r-b', access: 'token-B', expires: Date.now() + 600_000, metadata: { tier: 'pro' } }],
+  ]);
+  let activeConnId = 'conn-a';
+  let releaseResolveA = null;
+  let resolveAStarted = null;
+  const resolveAStartedPromise = new Promise((r) => { resolveAStarted = r; });
+  const dispatchedTokens = [];
+
+  const mock = createMockOpenCodeV2Context();
+  mock.ctx.integration.connection.active = async (id) => (id === PROVIDER_ID && activeConnId ? { type: 'credential', id: activeConnId } : undefined);
+  mock.ctx.integration.connection.resolve = async (conn) => {
+    if (conn.id === 'conn-a') {
+      resolveAStarted?.();
+      await new Promise((r) => { releaseResolveA = r; });
+    }
+    return structuredClone(credsByConn.get(conn.id));
+  };
+
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    openTurn: (token) => {
+      dispatchedTokens.push(token);
+      return {
+        cancel() {},
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeFrame(`ok:${token}`) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+  });
+
+  // Start with conn-b active initially so setup finishes immediately, then switch to conn-a to trigger the delayed resolve
+  activeConnId = 'conn-b';
+  const cleanup = await plugin.setup(mock.ctx);
+  try {
+    const providerEntry = mock.providers.get(PROVIDER_ID);
+    const baseUrl = providerEntry.info.settings.baseURL;
+    const bridgeToken = providerEntry.info.headers[BRIDGE_TOKEN_HEADER];
+
+    activeConnId = 'conn-a';
+    const reqA = fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'from A' }] }),
+    });
+    await resolveAStartedPromise;
+
+    // While A's resolve() is paused, switch active connection back to B and emit switch event
+    activeConnId = 'conn-b';
+    mock.emitEvent({ type: 'credential.switched', data: { integrationID: PROVIDER_ID } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Release A's stale resolve(); it MUST fail 401 OAUTH_ACCOUNT_CHANGED and NEVER dispatch token-A!
+    releaseResolveA();
+    const resA = await reqA;
+    assert.equal(resA.status, 401);
+    const bodyA = await resA.json();
+    assert.equal(bodyA.error.code, 'OAUTH_ACCOUNT_CHANGED');
+    assert.deepEqual(dispatchedTokens, []);
+
+    // Next request cleanly uses token-B
+    const resB = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'from B' }] }),
+    });
+    assert.equal(resB.status, 200);
+    assert.deepEqual(dispatchedTokens, ['token-B']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('OpenCode V2 bridge: 413 on keep-alive socket closes cleanly without poisoning next request, and cleanup() aborts in-flight turn immediately', async () => {
+  let upstreamAborted = false;
+  let turnStarted = null;
+  const turnStartedPromise = new Promise((r) => { turnStarted = r; });
+  let stallFirstTurn = false;
+
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    maxBodyBytes: 1024,
+    maxTotalBodyBytes: 2048,
+    openTurn: (_tok, opts) => ({
+      cancel() { upstreamAborted = true; },
+      events: (async function* () {
+        if (stallFirstTurn) {
+          turnStarted?.();
+          await new Promise((resolve) => {
+            if (opts.signal?.aborted) { upstreamAborted = true; resolve(); return; }
+            opts.signal?.addEventListener('abort', () => { upstreamAborted = true; resolve(); }, { once: true });
+          });
+          return;
+        }
+        yield { type: 'frame', bytes: makeFrame('alive') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+
+  const mock = createMockOpenCodeV2Context({
+    initialCred: {
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-ka',
+      access: 'a-ka',
+      expires: Date.now() + 600_000,
+      metadata: { tier: 'pro' },
+    },
+  });
+  const cleanup = await plugin.setup(mock.ctx);
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  try {
+    const providerEntry = mock.providers.get(PROVIDER_ID);
+    const baseUrl = new URL(providerEntry.info.settings.baseURL);
+    const bridgeToken = providerEntry.info.headers[BRIDGE_TOKEN_HEADER];
+
+    const sendRaw = (bodyStr, { chunked = false } = {}) =>
+      new Promise((resolve, reject) => {
+        const headers = {
+          'content-type': 'application/json',
+          [BRIDGE_TOKEN_HEADER]: bridgeToken,
+          ...(chunked ? { 'transfer-encoding': 'chunked' } : { 'content-length': Buffer.byteLength(bodyStr) }),
+        };
+        const req = http.request({ hostname: baseUrl.hostname, port: baseUrl.port, path: '/v1/chat/completions', method: 'POST', headers, agent }, (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, connection: res.headers.connection, body: Buffer.concat(chunks).toString('utf8') }));
+        });
+        req.on('error', reject);
+        req.end(bodyStr);
+      });
+
+    // 1. Oversized chunked payload (>1024 bytes) returns 413 with Connection: close
+    const huge = JSON.stringify({ model: 'gemini-neon', messages: [{ role: 'user', content: 'x'.repeat(4096) }] });
+    const r413 = await sendRaw(huge, { chunked: true });
+    assert.equal(r413.status, 413);
+    assert.equal(r413.connection, 'close');
+
+    // 2. Subsequent valid request on the same keepAlive agent MUST succeed without hanging!
+    const ok = await sendRaw(JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'hi' }] }));
+    assert.equal(ok.status, 200);
+    assert.match(ok.body, /alive/);
+
+    // 3. In-flight pre-header turn must be aborted when cleanup() runs and cleanup() must resolve quickly!
+    stallFirstTurn = true;
+    const inflightReq = fetch(`${providerEntry.info.settings.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'hang' }] }),
+    }).catch(() => null);
+    await turnStartedPromise;
+
+    const closeStart = Date.now();
+    await cleanup();
+    assert.ok(Date.now() - closeStart < 1500, 'cleanup() must not hang while a pre-header turn is active');
+    assert.equal(upstreamAborted, true, 'cleanup() must abort in-flight upstream turns');
+    await inflightReq;
+  } finally {
+    agent.destroy();
+    await cleanup();
+  }
+});
+
+test('OpenCode V2: shared tier probe/refresh decouples caller abort, does not permanently cache unknown, and closes pending OAuth login on cleanup', async () => {
+  let usageProbeCalls = 0;
+  let releaseFirstProbe = null;
+  let firstProbeStarted = null;
+  const firstProbeStartedPromise = new Promise((r) => { firstProbeStarted = r; });
+  let loginSessionClosed = false;
+  let submittedErrorUrl = null;
+
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    fetchGoogleUsageInfo: async () => {
+      usageProbeCalls++;
+      if (usageProbeCalls === 1) {
+        firstProbeStarted?.();
+        await new Promise((r) => { releaseFirstProbe = r; });
+        throw new Error('transient network timeout');
+      }
+      return { payload: Buffer.alloc(0) };
+    },
+    decodeSubscription: () => ({ tier: 'pro' }),
+    startLoopbackLogin: async (_cfg, deps) => {
+      let rejectDone;
+      const done = new Promise((_, rej) => { rejectDone = rej; });
+      done.catch(() => {});
+      const close = (reason) => {
+        loginSessionClosed = true;
+        rejectDone(Object.assign(new Error(reason || 'closed'), { code: reason || 'LOGIN_ABORTED' }));
+      };
+      deps?.signal?.addEventListener('abort', () => close('ABORTED'), { once: true });
+      return {
+        authorizationUrl: 'https://accounts.google.com/o/oauth2/auth?state=canceltest',
+        done,
+        close,
+        async completeCallbackUrl(u) {
+          submittedErrorUrl = u;
+          close('LOGIN_DECLINED');
+        },
+      };
+    },
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        yield { type: 'frame', bytes: makeFrame('ok') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+
+  // Credential without metadata.tier triggers fetchGoogleUsageInfo probe
+  const mock = createMockOpenCodeV2Context({
+    initialCred: {
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-probe',
+      access: 'a-probe',
+      expires: Date.now() + 600_000,
+    },
+  });
+  const cleanup = await plugin.setup(mock.ctx);
+  try {
+    const providerEntry = mock.providers.get(PROVIDER_ID);
+    const baseUrl = providerEntry.info.settings.baseURL;
+    const bridgeToken = providerEntry.info.headers[BRIDGE_TOKEN_HEADER];
+
+    // Two concurrent requests share the first tier probe; aborting Request 1 must NOT fail Request 2
+    const ac1 = new AbortController();
+    const p1 = fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'r1' }] }),
+      signal: ac1.signal,
+    }).catch((e) => e);
+    await firstProbeStartedPromise;
+
+    const p2 = fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'r2' }] }),
+    });
+    ac1.abort();
+    releaseFirstProbe();
+
+    const res2 = await p2;
+    assert.equal(res2.status, 200);
+    await p1;
+
+    // Because probe #1 threw -> returned 'unknown', it MUST NOT be permanently cached: next request re-probes!
+    const res3 = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [BRIDGE_TOKEN_HEADER]: bridgeToken },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'r3' }] }),
+    });
+    assert.equal(res3.status, 200);
+    assert.equal(usageProbeCalls, 2, 'transient unknown tier must not be permanently cached');
+
+    // OAuth ?error=access_denied redirect URL must be accepted by submit() and forwarded to completeCallbackUrl
+    const method = mock.oauthMethods.get(PROVIDER_ID)[0];
+    const errAttempt = await method.authorize({});
+    await errAttempt.submit('http://127.0.0.1:43210/callback?error=access_denied&state=canceltest');
+    assert.match(submittedErrorUrl, /error=access_denied/);
+
+    // Pending OAuth session must be closed cleanly on plugin cleanup() with no unhandled rejection
+    loginSessionClosed = false;
+    await method.authorize({});
+    await cleanup();
+    assert.equal(loginSessionClosed, true, 'cleanup() must close active OAuth loopback login sessions');
+  } finally {
+    await cleanup();
+  }
 });

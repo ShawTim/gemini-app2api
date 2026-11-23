@@ -40,7 +40,7 @@
 |---|---|---|---|
 | **Pi / GooeyPi** | `pi install npm:pi-gemini-app` | `/login gemini-app` · `/gemini-quota` | [npm](https://www.npmjs.com/package/pi-gemini-app) · [Pi Packages](https://pi.dev/packages/pi-gemini-app?name=pi-gemini-app) · [说明](extensions/pi/README.md) |
 | **OpenClaw** | `openclaw plugins install openclaw-gemini-app` *（或 `npm:openclaw-gemini-app`）* | `openclaw models auth login --provider gemini-app` · `/usage` | [npm](https://www.npmjs.com/package/openclaw-gemini-app) · [ClawHub](https://clawhub.ai/shawtim/plugins/openclaw-gemini-app) · [说明](extensions/openclaw/README.md) |
-| **OpenCode** | 在 `opencode.json` 中加入 `"plugin": ["opencode-gemini-app"]` | `/connect`（`gemini-app`） | [npm](https://www.npmjs.com/package/opencode-gemini-app) · [说明](extensions/opencode/README.md) |
+| **OpenCode** | V2：`opencode plugin add opencode-gemini-app`（V1：在 `opencode.json` 中加入 `"plugin": ["opencode-gemini-app"]`） | `/connect`（`gemini-app`） | [npm](https://www.npmjs.com/package/opencode-gemini-app) · [说明](extensions/opencode/README.md) |
 | **独立 MCP（stdio）** | `npx -y mcp-gemini-app` | `npx -y mcp-gemini-app login` · `quota` | [npm](https://www.npmjs.com/package/mcp-gemini-app) · [说明](extensions/mcp/README.md) |
 
 全部独立扩展均在进程内直连原生 HTTP/2（`15s` PING 保活、`HTTPS_PROXY` 支持、256 工具声明、并发多图上传、免费账户自动切换 `gemini-auto`）。

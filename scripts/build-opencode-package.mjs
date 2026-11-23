@@ -12,10 +12,13 @@ import {
 import { scanEcmaModule } from './js-module-scanner.mjs';
 
 export const OPENCODE_ENTRY_FILE = 'extensions/opencode/index.js';
+export const OPENCODE_V2_ENTRY_FILE = 'extensions/opencode/v2.js';
+export const OPENCODE_ENTRY_FILES = Object.freeze([OPENCODE_ENTRY_FILE, OPENCODE_V2_ENTRY_FILE]);
 export const OPENCODE_BUILD_MARKER = '.opencode-package-build-marker';
 
 export const ALLOWED_OPENCODE_RUNTIME_FILES = Object.freeze([
   'extensions/opencode/index.js',
+  'extensions/opencode/v2.js',
   'extensions/opencode/models.js',
   'extensions/opencode/auth.js',
   'extensions/opencode/fetch.js',
@@ -148,12 +151,12 @@ function assertCleanableOutDir(resolvedOut, baseRoot) {
 
 export function traceOpenCodeRuntimeClosure({
   baseRoot = root,
-  entry = OPENCODE_ENTRY_FILE,
+  entry = OPENCODE_ENTRY_FILES,
   allowedRuntimeFiles = ALLOWED_OPENCODE_RUNTIME_FILES,
 } = {}) {
   const allowed = new Set(allowedRuntimeFiles);
   const visited = new Set();
-  const queue = [entry];
+  const queue = Array.isArray(entry) ? [...entry] : [entry];
 
   while (queue.length > 0) {
     const relPosix = queue.shift();
@@ -237,7 +240,7 @@ export function buildOpenCodePackage({
 
   const runtimeFiles = traceOpenCodeRuntimeClosure({
     baseRoot,
-    entry: OPENCODE_ENTRY_FILE,
+    entry: OPENCODE_ENTRY_FILES,
     allowedRuntimeFiles,
   });
 
@@ -311,6 +314,7 @@ export function buildOpenCodePackage({
     main: './extensions/opencode/index.js',
     exports: {
       '.': './extensions/opencode/index.js',
+      './server': './extensions/opencode/v2.js',
     },
     license: meta.license || 'MIT',
     author: meta.author || 'shawtim',
