@@ -222,7 +222,7 @@ export class AccountPool {
           if (kind === "auth") this.accounts.invalidate?.(account.id);
           const rawAutomaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
           const isToolError = TOOL_ERRORS.has(error?.code);
-          const toolProtocolCapped = isToolError && toolProtocolRecoveries >= 1;
+          const toolProtocolCapped = isToolError && toolProtocolRecoveries >= 2;
           const automaticKind = toolProtocolCapped && rawAutomaticKind === 'tool_protocol' ? null : rawAutomaticKind;
           const quotaRetry = (this.allowQuotaFailover || this.allowAutomaticRecovery) && isExplicitQuotaFailure(error);
           const verifiedEmpty = isVerifiedEmptyResponse(error, model);

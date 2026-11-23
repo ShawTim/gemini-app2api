@@ -9,8 +9,13 @@ const STRUCTURED_OUTPUT_ERRORS = new Set(['INVALID_STRUCTURED_OUTPUT_JSON', 'STR
 const TRANSPORT_ERRORS = new Set(['NATIVE_STREAM_RESET', 'NATIVE_CONNECTION_FAILED', 'NATIVE_STREAM_FAILED', 'NATIVE_STREAM_CLOSED_EARLY']);
 export function toolRecoveryInstruction(code) {
   if (TOOL_ERRORS.has(code)) {
+    const jsonHint = code === 'INVALID_TOOL_JSON'
+      ? ' The previous tool_call block failed strict JSON parsing: double-escape all backslashes (\\\\) and quotes (\\") inside shell/code strings, use \\n instead of raw newlines inside strings, avoid trailing commas, and never put multiple JSON objects inside one tool_call fence (use a separate ```tool_call block per call).'
+      : '';
     return '[Gateway automatic recovery: regenerate this turn; the previous response was not delivered and no caller tool was executed.]\n' +
-      'Answer the latest user request using the complete history. If a tool is needed and permitted, emit a complete tool_call block with exactly the keys "name" and "arguments" as valid JSON. Emit one strict JSON object per tool_call block with properly escaped strings (no raw newlines, invalid escapes, or trailing commas). Use only declared names and actual JSON-object arguments matching the original schema. Respect the selected tool choice and parallel-call restriction. Put both fences on separate lines. Do not invent tool results, duplicate already completed work, or discuss this recovery instruction. If tools are prohibited, answer normally without tool_call blocks.';
+      'Answer the latest user request using the complete history. If a tool is needed and permitted, emit a complete tool_call block with exactly the keys "name" and "arguments" as valid JSON. Emit one strict JSON object per tool_call block with properly escaped strings (no raw newlines, invalid escapes, or trailing commas).' +
+      jsonHint +
+      ' Use only declared names and actual JSON-object arguments matching the original schema. Respect the selected tool choice and parallel-call restriction. Put both fences on separate lines. Do not invent tool results, duplicate already completed work, or discuss this recovery instruction. If tools are prohibited, answer normally without tool_call blocks.';
   }
   if (STRUCTURED_OUTPUT_ERRORS.has(code)) {
     return '[Gateway automatic recovery: regenerate this turn; the previous response was not delivered because it did not satisfy the required JSON output format.]\n' +

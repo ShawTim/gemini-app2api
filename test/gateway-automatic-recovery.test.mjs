@@ -28,6 +28,10 @@ test('reset, empty and bad tool JSON recover within one HTTP request and caller 
   assert.ok(f.seen.every(x => x.modeCategory === 3 && x.thinkingLevel === 2));
   assert.ok(f.seen[3].messages[0].content.includes('[Gateway automatic recovery:'));
   assert.ok(f.seen[3].messages[0].content.includes(input.messages[0].content));
+  assert.ok(
+    f.seen[3].messages[0].content.indexOf('[Gateway automatic recovery:') > f.seen[3].messages[0].content.indexOf(input.messages[0].content),
+    'recovery instruction must be appended at the tail of the flattened prompt rather than hoisted above long history',
+  );
   // Execute only the delivered, validated synthetic tool exactly once.
   let callerExecutions = 0; const call = message.tool_calls[0];
   assert.deepEqual(JSON.parse(call.function.arguments), { key: 'sample' }); callerExecutions++;
@@ -680,14 +684,14 @@ test('mid-stream liveToolError stops promptly on post-tool stall or hallucinatio
   assert.equal(hallucAttempts, 2);
   assert.equal(hallucCancelled, true);
 
-  // 3. Persistent INVALID_TOOL_JSON fails fast after 2 attempts (1 initial + 1 recovery) rather than burning 4 attempts.
-  const fPersist = await fixture({ ...options, accountCount: 4, turns: [badLine, badLine, toolBlock, toolBlock] });
+  // 3. Persistent INVALID_TOOL_JSON fails fast after 3 attempts (1 initial + 2 recoveries) rather than burning 4 attempts.
+  const fPersist = await fixture({ ...options, accountCount: 4, turns: [badLine, badLine, badLine, toolBlock] });
   t.after(fPersist.close);
   const persistRes = await fPersist.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: false }, headers });
   assert.equal(persistRes.status, 502);
   assert.equal((await persistRes.json()).error.code, 'INVALID_TOOL_JSON');
-  assert.equal(fPersist.seen.length, 2);
-  assert.equal(fPersist.app.overview().requests[0].providerAttempts, 2);
+  assert.equal(fPersist.seen.length, 3);
+  assert.equal(fPersist.app.overview().requests[0].providerAttempts, 3);
 });
 
 test('deferred comment-only SSE keepalive headers prevent client header-timeout on slow buffered tool calls and preserve uncommitted retry safety', async t => {
@@ -922,14 +926,14 @@ test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-
   assert.doesNotMatch(mixedWire, /NATIVE_TURN_TIMEOUT/);
   assert.equal(mixedAttempts, 1);
 
-  // 4. Held <2KB prefix in frame 1 + bad tool call in frame 2 + HTTP 200 end without grpc-status on attempt 2
-  //    (exercising shortOutput=true when automaticRecoveryKind returns null) must still stop at 2 attempts.
+  // 4. Held <2KB prefix in frame 1 + bad tool call in frame 2 + HTTP 200 end without grpc-status on attempt 3
+  //    (exercising shortOutput=true when automaticRecoveryKind returns null) must still stop at 3 attempts (2 retries).
   const fCap = await fixture({ ...options, accountCount: 4 });
   t.after(fCap.close);
   let capAttempts = 0;
   fCap.app.provider.openTurn = () => {
     capAttempts++;
-    if (capAttempts === 1) {
+    if (capAttempts <= 2) {
       return {
         events: (async function* () {
           yield { type: 'frame', bytes: textFrame(badLine) };
@@ -951,8 +955,8 @@ test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-
   assert.equal(capRes.status, 200);
   const capWire = await capRes.text();
   assert.match(capWire, /INVALID_TOOL_JSON/);
-  assert.equal(capAttempts, 2);
-  assert.equal(fCap.app.overview().requests[0].providerAttempts, 2);
+  assert.equal(capAttempts, 3);
+  assert.equal(fCap.app.overview().requests[0].providerAttempts, 3);
 
   // 5. Real HTTP/2 completed=true bad tool call with NO trailers/END_STREAM still recovers on attempt 2 with wireEnded=false.
   let h2CompAttempt = 0;
@@ -1220,7 +1224,7 @@ test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-
   assert.ok(Date.now() - tNullIdle < 1000);
 
   // 13. Reverse order tool-error cap: Attempt 1 uses shortOutputRetry (bad tool JSON + short prefix + missing grpc-status);
-  //     Attempt 2 has full trailers + bad tool JSON -> MUST NOT trigger a 3rd attempt via tool_protocol.
+  //     Attempts 2 & 3 have full trailers + bad tool JSON -> MUST NOT trigger a 4th attempt via tool_protocol.
   const fRevCap = await fixture({ ...options, accountCount: 4 }); t.after(fRevCap.close);
   fRevCap.app.provider.postToolIdleMs = 60;
   let revCapAttempts = 0;
@@ -1231,7 +1235,7 @@ test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-
         // Frame 1 delivers a held <2KB prefix so delivery.retryableShortfall is true.
         yield { type: 'frame', bytes: incompleteFrame('Short prefix\n') };
         // Frame 2 appends the bad tool block with completed=true; Attempt 1 omits grpc-status
-        // so automaticRecoveryKind() is null and shortOutputRetry runs (consuming the shared tool-error cap).
+        // so automaticRecoveryKind() is null and shortOutputRetry runs (consuming 1 of the 2 shared tool-error retries).
         yield { type: 'frame', bytes: textFrame('Short prefix\n' + badLine) };
         yield { type: 'end', httpStatus: 200, grpcStatus: n === 1 ? null : 0 };
       })(),
@@ -1246,7 +1250,7 @@ test('real local HTTP/2 transport verifies early-stop tool_protocol retry, same-
   });
   assert.equal(revCapRes.status, 200);
   assert.match(await revCapRes.text(), /INVALID_TOOL_JSON/);
-  assert.equal(revCapAttempts, 2, 'shortOutputRetry on attempt 1 tool error must share the 1-retry cap with tool_protocol');
+  assert.equal(revCapAttempts, 3, 'shortOutputRetry on attempt 1 tool error must share the 2-retry cap with tool_protocol');
 
   // 14. Keepalive + NATIVE_QUOTA_INSUFFICIENT and Keepalive + short unreleased prefix + SERVER_SHUTDOWN both emit retryable: true.
   const fQuotaInsuff = await fixture({ ...options, accountCount: 1, keepaliveHeadersDelayMs: 40 });
