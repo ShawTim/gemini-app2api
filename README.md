@@ -11,6 +11,8 @@ Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **OpenCode**, 
 [![pi-gemini-app on Pi Packages](https://img.shields.io/badge/Pi%20Packages-pi--gemini--app-6366F1)](https://pi.dev/packages/pi-gemini-app?name=pi-gemini-app)
 [![openclaw-gemini-app on npm](https://img.shields.io/npm/v/openclaw-gemini-app?logo=npm&label=openclaw-gemini-app)](https://www.npmjs.com/package/openclaw-gemini-app)
 [![openclaw-gemini-app on ClawHub](https://img.shields.io/badge/ClawHub-openclaw--gemini--app-F97316)](https://clawhub.ai/shawtim/plugins/openclaw-gemini-app)
+[![opencode-gemini-app on npm](https://img.shields.io/npm/v/opencode-gemini-app?logo=npm&label=opencode-gemini-app)](https://www.npmjs.com/package/opencode-gemini-app)
+[![mcp-gemini-app on npm](https://img.shields.io/npm/v/mcp-gemini-app?logo=npm&label=mcp-gemini-app)](https://www.npmjs.com/package/mcp-gemini-app)
 ![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0A84FF)
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
@@ -38,8 +40,8 @@ Use your eligible Google Gemini accounts in **Pi**, **OpenClaw**, **OpenCode**, 
 |---|---|---|---|
 | **Pi / GooeyPi** | `pi install npm:pi-gemini-app` | `/login gemini-app` · `/gemini-quota` | [npm](https://www.npmjs.com/package/pi-gemini-app) · [Pi Packages](https://pi.dev/packages/pi-gemini-app?name=pi-gemini-app) · [Guide](extensions/pi/README.md) |
 | **OpenClaw** | `openclaw plugins install openclaw-gemini-app` *(or `npm:openclaw-gemini-app`)* | `openclaw models auth login --provider gemini-app` · `/usage` | [npm](https://www.npmjs.com/package/openclaw-gemini-app) · [ClawHub](https://clawhub.ai/shawtim/plugins/openclaw-gemini-app) · [Guide](extensions/openclaw/README.md) |
-| **OpenCode** | `npm run build:opencode-package` *(zero-dep Bun/Node plugin)* | `opencode auth login` (`gemini-app`) | [Guide](extensions/opencode/README.md) |
-| **Standalone MCP (stdio)** | `node extensions/mcp/cli.js serve` *(or `npm run build:mcp-package`)* | `node extensions/mcp/cli.js login` · `quota` | [Guide](extensions/mcp/README.md) |
+| **OpenCode** | `"plugin": ["opencode-gemini-app"]` in `opencode.json` | `/connect` (`gemini-app`) | [npm](https://www.npmjs.com/package/opencode-gemini-app) · [Guide](extensions/opencode/README.md) |
+| **Standalone MCP (stdio)** | `npx -y mcp-gemini-app` | `npx -y mcp-gemini-app login` · `quota` | [npm](https://www.npmjs.com/package/mcp-gemini-app) · [Guide](extensions/mcp/README.md) |
 
 All standalone extensions run in-process over direct HTTP/2 (`15s` PING keepalives, `HTTPS_PROXY` support, 256 tools, parallel multimodal image uploads, automatic Free-tier `gemini-auto` filtering).
 

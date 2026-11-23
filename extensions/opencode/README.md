@@ -1,5 +1,7 @@
 # opencode-gemini-app
 
+[![npm](https://img.shields.io/npm/v/opencode-gemini-app?logo=npm&label=opencode-gemini-app)](https://www.npmjs.com/package/opencode-gemini-app)
+
 Zero-dependency native Google Gemini HTTP/2 provider plugin for **OpenCode** (`opencode`). Connect your Google Gemini subscription (**AI Pro**, **AI Ultra**, or **Free**) directly in-process via OAuth—no local gateway server, no localhost port, no Docker, and zero external npm dependencies.
 
 ## Install

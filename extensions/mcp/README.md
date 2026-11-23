@@ -1,5 +1,7 @@
 # mcp-gemini-app
 
+[![npm](https://img.shields.io/npm/v/mcp-gemini-app?logo=npm&label=mcp-gemini-app)](https://www.npmjs.com/package/mcp-gemini-app)
+
 Zero-dependency local **MCP (Model Context Protocol)** server for Google Gemini over direct HTTP/2 (`stdio` transport — no public domain, no local server port, no Docker, and zero external npm dependencies).
 
 Give **Claude Code**, **Cursor**, **Codex**, **OpenCode**, **Antigravity**, or any MCP-compatible client direct access to your Google Gemini subscription (**AI Pro**, **AI Ultra**, or **Free**) for 512k second-opinion reviews, multimodal image inspection, Google Search grounding with verified citations, and live quota checks.

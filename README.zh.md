@@ -11,6 +11,8 @@
 [![pi-gemini-app on Pi Packages](https://img.shields.io/badge/Pi%20Packages-pi--gemini--app-6366F1)](https://pi.dev/packages/pi-gemini-app?name=pi-gemini-app)
 [![openclaw-gemini-app on npm](https://img.shields.io/npm/v/openclaw-gemini-app?logo=npm&label=openclaw-gemini-app)](https://www.npmjs.com/package/openclaw-gemini-app)
 [![openclaw-gemini-app on ClawHub](https://img.shields.io/badge/ClawHub-openclaw--gemini--app-F97316)](https://clawhub.ai/shawtim/plugins/openclaw-gemini-app)
+[![opencode-gemini-app on npm](https://img.shields.io/npm/v/opencode-gemini-app?logo=npm&label=opencode-gemini-app)](https://www.npmjs.com/package/opencode-gemini-app)
+[![mcp-gemini-app on npm](https://img.shields.io/npm/v/mcp-gemini-app?logo=npm&label=mcp-gemini-app)](https://www.npmjs.com/package/mcp-gemini-app)
 ![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22.0.0-339933?logo=nodedotjs&logoColor=white)
 ![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0A84FF)
 ![Docker Ready](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
@@ -38,8 +40,8 @@
 |---|---|---|---|
 | **Pi / GooeyPi** | `pi install npm:pi-gemini-app` | `/login gemini-app` · `/gemini-quota` | [npm](https://www.npmjs.com/package/pi-gemini-app) · [Pi Packages](https://pi.dev/packages/pi-gemini-app?name=pi-gemini-app) · [說明](extensions/pi/README.md) |
 | **OpenClaw** | `openclaw plugins install openclaw-gemini-app` *（或 `npm:openclaw-gemini-app`）* | `openclaw models auth login --provider gemini-app` · `/usage` | [npm](https://www.npmjs.com/package/openclaw-gemini-app) · [ClawHub](https://clawhub.ai/shawtim/plugins/openclaw-gemini-app) · [說明](extensions/openclaw/README.md) |
-| **OpenCode** | `npm run build:opencode-package` *（零依賴 Bun/Node 插件）* | `opencode auth login`（`gemini-app`） | [說明](extensions/opencode/README.md) |
-| **獨立 MCP（stdio）** | `node extensions/mcp/cli.js serve` *（或 `npm run build:mcp-package`）* | `node extensions/mcp/cli.js login` · `quota` | [說明](extensions/mcp/README.md) |
+| **OpenCode** | 於 `opencode.json` 加入 `"plugin": ["opencode-gemini-app"]` | `/connect`（`gemini-app`） | [npm](https://www.npmjs.com/package/opencode-gemini-app) · [說明](extensions/opencode/README.md) |
+| **獨立 MCP（stdio）** | `npx -y mcp-gemini-app` | `npx -y mcp-gemini-app login` · `quota` | [npm](https://www.npmjs.com/package/mcp-gemini-app) · [說明](extensions/mcp/README.md) |
 
 全部獨立擴充套件均在進程內直連原生 HTTP/2（`15s` PING 保活、`HTTPS_PROXY` 支援、256 工具宣告、並行多圖上載、免費帳號自動切換 `gemini-auto`）。
 
