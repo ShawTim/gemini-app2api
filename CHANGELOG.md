@@ -2,6 +2,25 @@
 
 Release notes for Gemini App2API.
 
+## 1.8.0 — 2026-11-24
+
+### Native Windows (`win32`) Support (Fixes #5), Strict Responses Proxy Compatibility (Fixes #6), Sticky Post-Idle Affinity, and State-Machine Refactor (`pi-gemini-app@0.1.11`, `openclaw-gemini-app@0.1.7`, `mcp-gemini-app@0.1.2`, `opencode-gemini-app@0.1.2`)
+- **Native Windows (`win32`) Support & `windows-latest` CI (Fixes #5)** (`src/gateway/state.mjs`, `src/gateway/environment.mjs`, `src/gateway/native-diagnostic.mjs`, `src/gateway-server.mjs`, `scripts/run-current-contract.mjs`, `.github/workflows/ci.yml`, `test/gateway-win32-compat.test.mjs`, `docs/LOCKS_AND_LIMITS.md`):
+  - Implemented true OS-kernel single-instance locking on Windows using libuv `UV_FS_O_EXLOCK` (`dwShareMode = 0`) on a persistent `.state.lock` handle with an immediate fail-closed `EBUSY` self-probe (distinguishing `EBUSY` contention `STATE_IN_USE` from `EACCES`/`EPERM` `UNSAFE_STATE_PERMISSIONS`, and rejecting unsupported filesystems with `STATE_LOCK_UNAVAILABLE` rather than degrading to unsafe PID-only locking).
+  - Hardened newly created Windows `GATEWAY_DATA_DIR` folders using absolute `%SystemRoot%\System32\whoami.exe` and `icacls.exe` with locale-independent SIDs (`*S-1-5-18`, `*S-1-5-32-544`, and both local `S-1-5-*` and Entra ID `S-1-12-1-*` user SIDs), skipped synthesized POSIX `mode & 0o077` bits on `win32` while retaining symlink/hardlink/type/size checks, added bounded `renameWithWin32Retry` around `StateStore.save()` for transient Defender `EPERM`/`EACCES`/`EBUSY`, listened for `SIGBREAK`, and failed closed on optional `NativeDiagnostic.claim()` on `win32`.
+  - Converted `scripts/run-current-contract.mjs` `--import` preloads to `file://` URLs and preserved `SystemRoot`/`WINDIR`/`ComSpec` on `win32`; added `windows-latest` to the `current-contract` matrix plus a dedicated `windows-native` CI job verifying real NTFS locking, cross-process contention, forced-kill instant release, 4-way stdin-barrier races, `.env` loading, and loopback `/health` startup.
+- **Qualified Responses `response.completed` Compatibility for Strict Proxies (Fixes #6)** (`src/gateway/response-delivery.mjs`, `docs/COMPLETION_CONTRACT.md`, `docs/API_SUPPORT.md`):
+  - Separated `response.error` from `response.incomplete_details` in `createResponseDelivery()` so qualified usable Responses SSE completions (`>= 2,048` bytes, validated tool calls, or verified `postOutputIdleStall`) emit `status: "completed"` with **`response.error: null`**, while preserving `incomplete: true` (event + response), `incomplete_details: { reason: "upstream_interrupted", code }`, and `res.incomplete = true` (preventing resumption cache retention).
+  - Kept `response.error` intact on `response.failed`, `response.incomplete`, and non-streaming partial responses. Live-verified on 150K-token `POST /v1/responses` turns hitting real upstream `postOutputIdleStall`.
+- **Sticky Session & Image Blob Cache Preservation on Benign Post-Idle Stalls** (`src/native-provider.mjs`, `src/gateway/pool.mjs`, `src/gateway/app.mjs`):
+  - Tagged verified `post_tool` idle stalls (`postToolIdleStall`) alongside `postOutputIdleStall` so `AccountPool` no longer poisons `session.lastFailure` or increments account failure counts when upstream delivered verified usable output and merely held the stream open—preventing per-turn account ping-pong and per-account image `blobCache` thrashing in long multi-turn sessions.
+  - Restricted `X-Gemini-Recovery-Errors` response headers to actual retry attempts (`providerAttempts > 1`).
+- **Architectural State-Machine Refactor & Targeted Strict JSON Recovery** (`src/tool-protocol.mjs`, `src/gateway/native-evidence.mjs`, `src/gateway/automatic-recovery.mjs`, `src/gateway/response-delivery.mjs`, `src/native-provider.mjs`, `src/gateway/pool.mjs`, `extensions/pi/stream.js`, `extensions/opencode/fetch.js`):
+  - Added closed, privacy-safe `TOOL_JSON_REASONS` syntax subcodes in strict fail-closed `parseBoundedJson()` (fixing nested `invalid_surrogate` catch masking) with single-cause recovery hints appended at the **prompt tail** and 2 uncommitted `tool_protocol` retries across Gateway, Pi, and OpenCode.
+  - Fixed OpenCode `post_tool` stall handling and added committed multi-call tail salvage in `pi-gemini-app@0.1.11` and `opencode-gemini-app@0.1.2`.
+  - Converged `response-delivery.mjs` onto monotonic 4-state `wirePhase` (`pending → comments_only → events_started → settled`) + `attemptDisposition()` + `classifyInterruptEnding()`; replaced $O(N^2)$ per-frame `probeIdleState()` in `native-provider.mjs` with $O(1)$ `classifyIdleSnapshot()` + pure `selectIdleDeadline()` + single `readExit`; extracted pure `planRetry()` in `pool.mjs`.
+  - Added synthetic 150K-token HTTP/2 adversarial long-context suite (`test/gateway-long-context-adversarial.test.mjs`).
+
 ## 1.7.0 — 2026-11-23
 
 ### Native Gateway `POST /mcp` (Streamable HTTP), Trilingual Admin UI (`EN` / `繁` / `简`), Standalone MCP & OpenCode Plugins, and Pi 1.5.2 Session Affinity (Fixes #4)
