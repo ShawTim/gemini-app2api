@@ -154,3 +154,45 @@ test('a reset after response end but before close is rejected; late error is saf
   assert.equal(h.calls.length, 2); assert.equal(h.session.destroyed, true);
   await new Promise(resolve => setImmediate(resolve));
 });
+
+test('maxInFlightBytes paces large uploads sequentially and onUploaded preserves partial progress before a reset', async () => {
+  const bigBatch = Array.from({ length: 4 }, (_, i) => ({
+    mimeType: 'image/png',
+    data: Buffer.alloc(2_900_000, i + 1),
+  }));
+  let inFlightPuts = 0, peakPuts = 0, seq = 0;
+  const session = new EventEmitter();
+  session.destroyed = false; session.closed = false; session.destroy = () => { session.destroyed = true; };
+  session.request = (headers) => {
+    const stream = new EventEmitter(); stream.headers = headers; stream.rstCode = 0;
+    stream.end = () => {
+      if (headers[':method'] === 'PUT') {
+        inFlightPuts++;
+        peakPuts = Math.max(peakPuts, inFlightPuts);
+      }
+      setTimeout(() => {
+        if (headers[':method'] === 'POST') {
+          const id = ++seq;
+          stream.emit('response', { ':status': 200, 'x-goog-upload-status': 'active', 'x-goog-upload-url': `https://push.clients6.google.com/upload/session?id=${id}` });
+          stream.emit('end'); stream.emit('close');
+        } else {
+          inFlightPuts--;
+          stream.emit('response', { ':status': 200, 'x-goog-upload-status': 'final' });
+          stream.emit('data', Buffer.from(`blob-big-${seq}`));
+          stream.emit('end'); stream.emit('close');
+        }
+      }, 5);
+    };
+    return stream;
+  };
+  const notified = [];
+  const res = await uploadNativeImages(
+    TOKEN,
+    bigBatch,
+    { concurrency: 8, onUploaded: (idx, item) => notified.push([idx, item.blobId]) },
+    { connect: () => session },
+  );
+  assert.equal(res.length, 4);
+  assert.equal(peakPuts, 1, '4 x 2.9MB uploads must be paced to 1 in-flight under 4MiB byte budget');
+  assert.equal(notified.length, 4);
+});

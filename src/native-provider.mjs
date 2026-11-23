@@ -163,20 +163,50 @@ export class NativeDirectProvider {
       }
     }
     if (missImages.length) {
-      const uploaded = await this.uploadImages(token, missImages, { signal, timeoutMs: uploadTimeoutMs });
-      if (
-        !Array.isArray(uploaded) ||
-        uploaded.length !== missImages.length ||
-        uploaded.some((attachment, index) => attachment?.mimeType !== missImages[index].mimeType || typeof attachment.blobId !== 'string' || !attachment.blobId.length)
-      ) {
-        fail('INVALID_NATIVE_IMAGE_UPLOAD');
-      }
-      for (let slot = 0; slot < uploaded.length; slot++) {
-        const item = uploaded[slot];
+      const deadline = Date.now() + uploadTimeoutMs;
+      const completed = new Array(missImages.length);
+      const recordSlot = (slot, item) => {
+        if (!item || item.mimeType !== missImages[slot].mimeType || typeof item.blobId !== 'string' || !item.blobId.length) return false;
+        completed[slot] = item;
         for (const targetIndex of missSlotIndices[slot]) {
           attachments[targetIndex] = item;
           const key = keys[targetIndex];
           if (this.blobCache && key) this.blobCache.set(key, item);
+        }
+        return true;
+      };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const pendingSlots = [];
+        for (let slot = 0; slot < missImages.length; slot++) {
+          if (!completed[slot]) pendingSlots.push(slot);
+        }
+        if (!pendingSlots.length) break;
+        const remainingMs = Math.max(1, deadline - Date.now());
+        const batch = pendingSlots.map(slot => missImages[slot]);
+        try {
+          const uploaded = await this.uploadImages(token, batch, {
+            signal,
+            timeoutMs: remainingMs,
+            ...(attempt > 0 ? { concurrency: 1 } : {}),
+            onUploaded: (batchIndex, item) => {
+              const slot = pendingSlots[batchIndex];
+              if (slot !== undefined) recordSlot(slot, item);
+            },
+          });
+          if (!Array.isArray(uploaded) || uploaded.length !== batch.length) fail('INVALID_NATIVE_IMAGE_UPLOAD');
+          for (let batchIndex = 0; batchIndex < uploaded.length; batchIndex++) {
+            if (!recordSlot(pendingSlots[batchIndex], uploaded[batchIndex])) fail('INVALID_NATIVE_IMAGE_UPLOAD');
+          }
+          break;
+        } catch (err) {
+          const retryableReset = err?.code === 'NATIVE_IMAGE_UPLOAD_RESET' && !signal?.aborted && attempt < 2 && Date.now() + 250 < deadline;
+          if (!retryableReset) throw err;
+          await new Promise((resolve, reject) => {
+            const onAbort = () => { clearTimeout(t); reject(protocolError('NATIVE_IMAGE_UPLOAD_CANCELLED', 499)); };
+            const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, 200);
+            t.unref?.();
+            signal?.addEventListener('abort', onAbort, { once: true });
+          });
         }
       }
     }

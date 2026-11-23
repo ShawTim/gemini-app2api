@@ -37,7 +37,7 @@ export function classifyFailure(error) {
   if (error?.status === 429 || error?.grpcStatus === 8 || ["NATIVE_QUOTA_EXHAUSTED", "NATIVE_RATE_LIMITED", "UPSTREAM_QUOTA", "QUOTA_EXHAUSTED"].includes(code)) return "quota";
   if (error?.status === 401 || error?.status === 403 || ["NATIVE_PERMISSION_OR_AUTH", "NATIVE_AUTH_REJECTED", "NATIVE_PERMISSION_REJECTED", "ACCOUNT_LOGIN_REQUIRED"].includes(code)) return "auth";
   if (code === "NATIVE_PRECONDITION_REQUIRED" || isProviderRejection(error)) return "precondition";
-  if (["NATIVE_CONNECTION_FAILED", "NATIVE_STREAM_FAILED", "NATIVE_TRANSPORT_TIMEOUT", "OAUTH_REFRESH_FAILED", "UPSTREAM_UNAVAILABLE", "NATIVE_UPSTREAM_UNAVAILABLE"].includes(code)) return "transient";
+  if (["NATIVE_CONNECTION_FAILED", "NATIVE_STREAM_FAILED", "NATIVE_TRANSPORT_TIMEOUT", "NATIVE_IMAGE_UPLOAD_RESET", "NATIVE_IMAGE_UPLOAD_TIMEOUT", "OAUTH_REFRESH_FAILED", "UPSTREAM_UNAVAILABLE", "NATIVE_UPSTREAM_UNAVAILABLE"].includes(code)) return "transient";
   return "other";
 }
 export class AccountPool {

@@ -6,6 +6,7 @@ import { GATEWAY_USER_AGENT } from '../../native-wire/robin-current.mjs';
 
 const ORIGIN = 'https://push.clients6.google.com';
 export const DEFAULT_UPLOAD_CONCURRENCY = 8;
+export const DEFAULT_MAX_IN_FLIGHT_BYTES = 4 * 1024 * 1024;
 export const MAX_UPLOAD_TIMEOUT_MS = 600_000;
 const fail = (suffix, status = 502) => { throw protocolError(`NATIVE_IMAGE_UPLOAD_${suffix}`, status); };
 const mimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
@@ -82,7 +83,7 @@ function boundedLocation(value) {
 export async function uploadNativeImages(
   token,
   images,
-  { signal, timeoutMs = 60000, concurrency = DEFAULT_UPLOAD_CONCURRENCY } = {},
+  { signal, timeoutMs = 60000, concurrency = DEFAULT_UPLOAD_CONCURRENCY, maxInFlightBytes = DEFAULT_MAX_IN_FLIGHT_BYTES, onUploaded } = {},
   { connect = connectHttp2 } = {},
 ) {
   validateImages(images);
@@ -98,15 +99,45 @@ export async function uploadNativeImages(
     !Number.isSafeInteger(concurrency) ||
     concurrency < 1 ||
     concurrency > 32 ||
+    !Number.isSafeInteger(maxInFlightBytes) ||
+    maxInFlightBytes < 1 ||
+    (onUploaded !== undefined && typeof onUploaded !== 'function') ||
     (signal !== undefined && (!signal || typeof signal.addEventListener !== 'function')) ||
     typeof connect !== 'function'
   ) fail('INVALID_RESPONSE');
   if (signal?.aborted) fail('CANCELLED', 499);
   const deadline = Date.now() + timeoutMs;
   let session, timeout, sessionFailed = false, batchError = null;
+  let inFlightBytes = 0, activeUploads = 0;
   const activeStops = new Set();
+  const budgetWaiters = [];
+  const wakeBudgetWaiters = () => {
+    while (budgetWaiters.length) {
+      const next = budgetWaiters[0];
+      if (activeUploads === 0 || inFlightBytes + next.bytes <= maxInFlightBytes || batchError || sessionFailed || signal?.aborted) {
+        budgetWaiters.shift();
+        next.resolve();
+      } else {
+        break;
+      }
+    }
+  };
+  const acquireByteBudget = async (bytes) => {
+    while (activeUploads > 0 && inFlightBytes + bytes > maxInFlightBytes && !batchError && !sessionFailed && !signal?.aborted) {
+      await new Promise(resolve => budgetWaiters.push({ bytes, resolve }));
+    }
+    ensureAlive();
+    activeUploads++;
+    inFlightBytes += bytes;
+  };
+  const releaseByteBudget = (bytes) => {
+    activeUploads = Math.max(0, activeUploads - 1);
+    inFlightBytes = Math.max(0, inFlightBytes - bytes);
+    wakeBudgetWaiters();
+  };
   const stopAll = (err) => {
     if (!batchError) batchError = err;
+    wakeBudgetWaiters();
     for (const stop of [...activeStops]) stop(err);
   };
   const abortCode = () => signal?.aborted ? ['CANCELLED', 499] : Date.now() >= deadline ? ['TIMEOUT', 504] : null;
@@ -168,22 +199,30 @@ export async function uploadNativeImages(
   });
   const onSessionError = () => { sessionFailed = true; stopAll(protocolError('NATIVE_IMAGE_UPLOAD_RESET', 502)); };
   const uploadOne = async (image) => {
-    ensureAlive();
-    const initial = await request({ ':method': 'POST', ':path': '/upload/', authorization: `Bearer ${token}`, 'content-length': '0', 'push-id': 'feeds/mcudyrk2a4khkz', 'x-tenant-id': 'bard-storage', 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'start', 'x-goog-upload-content-type': image.mimeType, 'x-goog-upload-content-length': String(image.data.length), 'user-agent': GATEWAY_USER_AGENT }, null, 8192);
-    if (String(initial.headers['x-goog-upload-status'] ?? '').toLowerCase() !== 'active') fail('INVALID_RESPONSE');
-    const location = boundedLocation(initial.headers['x-goog-upload-url']);
-    ensureAlive();
-    const final = await request({ ':method': 'PUT', ':path': location.pathname + location.search, 'content-length': String(image.data.length), 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'upload, finalize', 'x-goog-upload-offset': '0', 'user-agent': GATEWAY_USER_AGENT }, image.data, 4096);
-    if (String(final.headers['x-goog-upload-status'] ?? '').toLowerCase() !== 'final') fail('INVALID_RESPONSE');
-    let blobId;
-    try { blobId = new TextDecoder('utf-8', { fatal: true }).decode(final.body); } catch { fail('INVALID_RESPONSE'); }
-    if (!blobId || Buffer.byteLength(blobId) > 4096 || /\s|[\x00-\x1f\x7f]/u.test(blobId)) fail('INVALID_RESPONSE');
-    ensureAlive();
-    return { blobId, mimeType: image.mimeType };
+    await acquireByteBudget(image.data.length);
+    try {
+      ensureAlive();
+      const initial = await request({ ':method': 'POST', ':path': '/upload/', authorization: `Bearer ${token}`, 'content-length': '0', 'push-id': 'feeds/mcudyrk2a4khkz', 'x-tenant-id': 'bard-storage', 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'start', 'x-goog-upload-content-type': image.mimeType, 'x-goog-upload-content-length': String(image.data.length), 'user-agent': GATEWAY_USER_AGENT }, null, 8192);
+      if (String(initial.headers['x-goog-upload-status'] ?? '').toLowerCase() !== 'active') fail('INVALID_RESPONSE');
+      const location = boundedLocation(initial.headers['x-goog-upload-url']);
+      ensureAlive();
+      const final = await request({ ':method': 'PUT', ':path': location.pathname + location.search, 'content-length': String(image.data.length), 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'upload, finalize', 'x-goog-upload-offset': '0', 'user-agent': GATEWAY_USER_AGENT }, image.data, 4096);
+      if (String(final.headers['x-goog-upload-status'] ?? '').toLowerCase() !== 'final') fail('INVALID_RESPONSE');
+      let blobId;
+      try { blobId = new TextDecoder('utf-8', { fatal: true }).decode(final.body); } catch { fail('INVALID_RESPONSE'); }
+      if (!blobId || Buffer.byteLength(blobId) > 4096 || /\s|[\x00-\x1f\x7f]/u.test(blobId)) fail('INVALID_RESPONSE');
+      ensureAlive();
+      return { blobId, mimeType: image.mimeType };
+    } finally {
+      releaseByteBudget(image.data.length);
+    }
   };
+  const onSignalAbort = () => wakeBudgetWaiters();
+  signal?.addEventListener('abort', onSignalAbort, { once: true });
   try {
     try { session = connect(ORIGIN, { settings: { enablePush: false, maxHeaderListSize: 8192 } }); } catch { fail('RESET'); }
     if (!session || typeof session.request !== 'function') fail('RESET');
+    try { session.socket?.setKeepAlive?.(true, 15_000); } catch {}
     session.on?.('error', onSessionError);
     session.on?.('close', onSessionError);
     timeout = setTimeout(() => { stopAll(protocolError('NATIVE_IMAGE_UPLOAD_TIMEOUT', 504)); try { session.destroy(); } catch {} }, Math.max(1, deadline - Date.now()));
@@ -195,7 +234,9 @@ export async function uploadNativeImages(
         const index = nextIndex++;
         if (index >= images.length) return;
         try {
-          results[index] = await uploadOne(images[index]);
+          const uploaded = await uploadOne(images[index]);
+          results[index] = uploaded;
+          try { onUploaded?.(index, uploaded); } catch {}
         } catch (err) {
           stopAll(err);
           throw err;
@@ -213,6 +254,8 @@ export async function uploadNativeImages(
     fail('RESET');
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', onSignalAbort);
+    wakeBudgetWaiters();
     try { session?.on?.('error', drainError); session?.removeListener?.('error', onSessionError); session?.removeListener?.('close', onSessionError); } catch {}
     try { session?.destroy(); } catch {}
   }

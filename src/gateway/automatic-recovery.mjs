@@ -50,6 +50,8 @@ export function automaticRecoveryKind(error, model, { allowAutoModel = false } =
   if (error.status !== 502) return null;
   if (TRANSPORT_ERRORS.has(error.code) && ['open', 'read', 'decode', 'end'].includes(e.phase) &&
       (e.upstreamHttpStatus === null || e.upstreamHttpStatus === 200) && (e.grpcStatus === null || e.grpcStatus === 0)) return 'transport';
+  if (error.code === 'NATIVE_IMAGE_UPLOAD_RESET' && e.phase === 'upload' &&
+      e.upstreamHttpStatus === null && e.grpcStatus === null) return 'transport';
   const completed = e.phase === 'validate' && e.upstreamHttpStatus === 200 && e.grpcStatus === 0 && e.wireEnded === true &&
     e.modelCompleted === true && modeOk(e.observedMode) && e.nativeRefusalPresent === false && e.http2ResetCode === undefined;
   const earlyStoppedToolError = e.phase === 'validate' && e.toolErrorEarlyStop === true &&

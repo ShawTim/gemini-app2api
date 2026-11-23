@@ -502,4 +502,35 @@ test('Responses function_call_output accepts array output with input_text/input_
   assert.equal(body.output[0].content[0].text, 'OK');
   assert.equal(uploadedCount, 1);
   assert.ok(body.usage.input_tokens >= 258 && body.usage.input_tokens < 1000, `expected compact tool-image token estimate, got ${body.usage.input_tokens}`);
+
+  // 11. Partial NATIVE_IMAGE_UPLOAD_RESET preserves already-uploaded images via onUploaded and retries remaining sequentially.
+  const fRetry = await fixture({ accountCount: 2, allowAutomaticRecovery: true, turns: [{ text: 'RECOVERED', mode: 3 }] });
+  t.after(() => fRetry.close());
+  const uploadCalls = [];
+  fRetry.app.provider.uploadImages = async (_token, imgs, opts) => {
+    uploadCalls.push({ count: imgs.length, concurrency: opts?.concurrency });
+    if (uploadCalls.length === 1) {
+      // Simulate image 0 succeeding before image 1 triggers NATIVE_IMAGE_UPLOAD_RESET.
+      opts?.onUploaded?.(0, { blobId: 'blob_first_ok', mimeType: imgs[0].mimeType });
+      throw protocolError('NATIVE_IMAGE_UPLOAD_RESET', 502);
+    }
+    return imgs.map((img, i) => ({ blobId: `blob_retry_${i}`, mimeType: img.mimeType }));
+  };
+  const pngA = url(png({ width: 2, height: 2 }));
+  const pngB = url(png({ width: 3, height: 3 }));
+  const retryRes = await fRetry.api('/v1/chat/completions', {
+    method: 'POST',
+    body: {
+      model: 'gemini-neon',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Inspect both images' },
+        { type: 'image_url', image_url: { url: pngA } },
+        { type: 'image_url', image_url: { url: pngB } },
+      ] }],
+    },
+  });
+  assert.equal(retryRes.status, 200);
+  assert.equal((await retryRes.json()).choices[0].message.content, 'RECOVERED');
+  assert.deepEqual(uploadCalls, [{ count: 2, concurrency: undefined }, { count: 1, concurrency: 1 }]);
+  assert.deepEqual(fRetry.seen[0].images.map(x => x.blobId), ['blob_first_ok', 'blob_retry_0']);
 });
