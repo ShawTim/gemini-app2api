@@ -293,7 +293,7 @@ export class NativeDirectProvider {
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
       ...((body.reasoning_effort ?? body.reasoning?.effort) === undefined ? {} : { requestedReasoningEffort: body.reasoning_effort ?? body.reasoning?.effort }) };
-    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, sinkFailed = false;
+    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorOffset = 0, sinkFailed = false;
     const deliver = async event => {
       try { await onDelta(event); }
       catch (error) { sinkFailed = true; throw error; }
@@ -384,9 +384,10 @@ export class NativeDirectProvider {
         // otherwise a slow mid-tool-call or mid-JSON pause would be falsely killed with 504 -> 422.
         const idleKind = (modelComplete && verified && rawText.trim().length > 0) ? 'post_complete'
           : (verified && liveCalls.length > 0 ? 'post_tool'
-            : (verified && liveCalls.length === 0 && isCleanPostOutputIdleStall() ? 'post_output' : null));
+            : (verified && liveToolError ? 'post_tool_error'
+              : (verified && liveCalls.length === 0 && isCleanPostOutputIdleStall() ? 'post_output' : null)));
         const idleMs = idleKind === 'post_complete' ? postCompleteGraceMs
-          : idleKind === 'post_tool' ? postToolIdleMs
+          : (idleKind === 'post_tool' || idleKind === 'post_tool_error') ? postToolIdleMs
           : idleKind === 'post_output' ? postOutputIdleMs
           : null;
         const nextPromise = iterator.next();
@@ -410,10 +411,11 @@ export class NativeDirectProvider {
         const item = await nextEventWithIdle();
         if (item && item[IDLE_TIMEOUT_SENTINEL]) {
           const idleKind = item[IDLE_TIMEOUT_SENTINEL];
-          if (idleKind === 'post_complete' && item.verified && rawText.trim().length > 0) {
-            note('post_complete_idle_finish', { frames, textBytes: Buffer.byteLength(rawText) });
+          if ((idleKind === 'post_complete' || idleKind === 'post_tool_error') && item.verified && rawText.trim().length > 0) {
+            note(`${idleKind}_idle_finish`, { frames, textBytes: Buffer.byteLength(rawText) });
             try { turn?.cancel(); } catch {}
             ended = true;
+            if (idleKind === 'post_tool_error') modelComplete = true;
             httpStatus = httpStatus ?? 200;
             grpc = grpc ?? 0;
             break;
@@ -498,7 +500,7 @@ export class NativeDirectProvider {
                   snapshotPriorBytes: Buffer.byteLength(rawText), snapshotNextBytes: Buffer.byteLength(info.text),
                   snapshotCommonPrefixBytes: commonPrefixBytes(rawText, info.text), ...committed });
                 if (liveSyncedLength > 0) await deliver({ reset: true, sameResponseIdentity: true, response: identity });
-                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0; liveToolError = null;
+                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0; liveToolError = null; liveToolErrorOffset = 0;
               }
             }
             if (id) snapshotId = id;
@@ -519,6 +521,7 @@ export class NativeDirectProvider {
               // automatic tool_protocol recovery (or same-ID revision) can run cleanly.
               if (!sinkFailed && TOOL_ERRORS.has(splitError?.code)) {
                 liveToolError = splitError;
+                liveToolErrorOffset = liveSyncedLength;
               } else {
                 throw splitError;
               }
@@ -528,6 +531,18 @@ export class NativeDirectProvider {
             // minutes for the model to finish generating discarded text.
             if (!liveToolError && liveSplitter.suppressed && liveCalls.length > 0 && !downgrade && !outputShape.nativeRefusalPresent) {
               note('early_stop_post_tool_hallucination', { calls: liveCalls.length });
+              try { turn?.cancel(); } catch {}
+              ended = true;
+              modelComplete = true;
+              httpStatus = httpStatus ?? 200;
+              grpc = grpc ?? 0;
+              break;
+            }
+          }
+          if (incremental && liveToolError && !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified()) {
+            const postErrorTail = rawText.slice(liveToolErrorOffset);
+            if (postErrorTail.includes('[Caller tool result]') || postErrorTail.length > 4096) {
+              note('early_stop_post_tool_error', { code: liveToolError.code, tailChars: postErrorTail.length });
               try { turn?.cancel(); } catch {}
               ended = true;
               modelComplete = true;

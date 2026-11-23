@@ -174,7 +174,7 @@ export class AccountPool {
     // each other's route or require a single request to own the session.
     const preferredId = session.accountId, previousModel = session.model, remembered = session.lastFailure;
     const tried = new Set();
-    let previous = null, emptyRecoveries = 0, shortOutputRecoveries = 0, sameAccountRetries = 0, sameAccountRetryId = null, retryDelayMs = 0, formatRecoveryCode = null, quotaFailures = 0, outcome = null;
+    let previous = null, emptyRecoveries = 0, shortOutputRecoveries = 0, toolProtocolRecoveries = 0, sameAccountRetries = 0, sameAccountRetryId = null, retryDelayMs = 0, formatRecoveryCode = null, quotaFailures = 0, outcome = null;
     const maxAttempts = this.allowAutomaticRecovery || this.allowQuotaFailover || this.allowEmptyResponseFailover ? 4 : 3;
     try {
       if (signal?.aborted) throw fault('REQUEST_CANCELLED', 499);
@@ -220,11 +220,12 @@ export class AccountPool {
           this.#telemetry.fail(account.id, model, error);
           const kind = classifyFailure(error);
           if (kind === "auth") this.accounts.invalidate?.(account.id);
-          const automaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
+          const rawAutomaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
+          const automaticKind = rawAutomaticKind === 'tool_protocol' && toolProtocolRecoveries >= 1 ? null : rawAutomaticKind;
           const quotaRetry = (this.allowQuotaFailover || this.allowAutomaticRecovery) && isExplicitQuotaFailure(error);
           const verifiedEmpty = isVerifiedEmptyResponse(error, model);
           const emptyRetry = this.allowEmptyResponseFailover && verifiedEmpty && emptyRecoveries === 0;
-          const recoveryKind = automaticKind ?? kind;
+          const recoveryKind = rawAutomaticKind ?? kind;
           outcome = { accountId: account.id, model, lastFailure: recoveryKind ? { accountId: account.id, model, kind: recoveryKind } : null };
           // Once output has been committed, another attempt would splice a new
           // answer/tool set into an existing response. Preserve this interruption.
@@ -237,6 +238,7 @@ export class AccountPool {
           if (!(automaticKind || quotaRetry || emptyRetry || generalRetry || shortOutputRetry) || attempt + 1 >= maxAttempts + quotaFailures) throw error;
           if (emptyRetry) emptyRecoveries++;
           if (shortOutputRetry) shortOutputRecoveries++;
+          if (automaticKind === 'tool_protocol') toolProtocolRecoveries++;
           if (automaticKind === 'tool_protocol' || automaticKind === 'structured_output') formatRecoveryCode = error.code;
           previous = { id: account.id, reason: automaticKind ?? (emptyRetry ? 'empty_response' : shortOutputRetry ? 'short_output' : kind), quotaFailover: quotaRetry,
             emptyRecovery: emptyRetry, shortOutputRecovery: shortOutputRetry, automaticRecovery: !!automaticKind };

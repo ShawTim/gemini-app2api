@@ -611,3 +611,81 @@ test('mid-stream bad tool JSON still honors committed-output no-retry, same-ID s
   assert.equal((await downgradeRes.json()).error.code, 'MODEL_DOWNGRADE_REJECTED');
   assert.equal(downgradeAttempts, 1);
 });
+
+test('mid-stream liveToolError stops promptly on post-tool stall or hallucination and caps tool_protocol recovery to 1 retry', async t => {
+  const badLine = '```tool_call\nnot json\n```\n';
+  const incompleteFrame = text => m(1003, m(1, Buffer.concat([
+    m(1, m(2, m(1, Buffer.from(text)))),
+    m(30, Buffer.from('Used 4 Neon High model')),
+    v(9, 0), v(41, 3), v(42, 2),
+  ])));
+
+  // 1. Upstream stalls after a broken tool_call without sending end: post_tool_error idle finishes quickly and retries.
+  const fStall = await fixture({ ...options, accountCount: 2 }); t.after(fStall.close);
+  fStall.app.provider.postToolIdleMs = 60;
+  let stallAttempts = 0;
+  let stallCancelled = false;
+  fStall.app.provider.openTurn = () => {
+    stallAttempts++;
+    if (stallAttempts === 1) {
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: incompleteFrame(badLine) };
+          await new Promise(() => {}); // deliberate stall
+        })(),
+        cancel() { stallCancelled = true; },
+      };
+    }
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame(toolBlock + '\n') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const stallRes = await fStall.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(stallRes.status, 200);
+  assert.match(await stallRes.text(), /fixture_lookup/);
+  assert.equal(stallAttempts, 2);
+  assert.equal(stallCancelled, true);
+
+  // 2. Model hallucinates [Caller tool result] after a broken tool_call: cancels immediately and recovers on attempt 2.
+  const fHalluc = await fixture({ ...options, accountCount: 2 }); t.after(fHalluc.close);
+  let hallucAttempts = 0;
+  let hallucCancelled = false;
+  fHalluc.app.provider.openTurn = () => {
+    hallucAttempts++;
+    if (hallucAttempts === 1) {
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: incompleteFrame(badLine) };
+          yield { type: 'frame', bytes: incompleteFrame(badLine + '[Caller tool result]\n{"fake":true}') };
+          await new Promise(() => {}); // would stall if early-stop did not fire
+        })(),
+        cancel() { hallucCancelled = true; },
+      };
+    }
+    return {
+      events: (async function* () {
+        yield { type: 'frame', bytes: textFrame(toolBlock + '\n') };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const hallucRes = await fHalluc.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: true }, headers });
+  assert.equal(hallucRes.status, 200);
+  assert.match(await hallucRes.text(), /fixture_lookup/);
+  assert.equal(hallucAttempts, 2);
+  assert.equal(hallucCancelled, true);
+
+  // 3. Persistent INVALID_TOOL_JSON fails fast after 2 attempts (1 initial + 1 recovery) rather than burning 4 attempts.
+  const fPersist = await fixture({ ...options, accountCount: 4, turns: [badLine, badLine, toolBlock, toolBlock] });
+  t.after(fPersist.close);
+  const persistRes = await fPersist.api('/v1/chat/completions', { method: 'POST', body: { ...input, stream: false }, headers });
+  assert.equal(persistRes.status, 502);
+  assert.equal((await persistRes.json()).error.code, 'INVALID_TOOL_JSON');
+  assert.equal(fPersist.seen.length, 2);
+  assert.equal(fPersist.app.overview().requests[0].providerAttempts, 2);
+});
