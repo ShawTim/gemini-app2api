@@ -155,6 +155,7 @@ try {
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   process.on("SIGHUP", onSignal);
+  if (process.platform === "win32") process.on("SIGBREAK", onSignal);
 } catch (error) {
   const startupClose = await closeBounded(app, 7000);
   let startupUnlockFailed = false;

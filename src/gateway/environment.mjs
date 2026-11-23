@@ -22,7 +22,7 @@ export function loadLocalEnvironment({
     stat.nlink !== 1 ||
     stat.size > 64 * 1024 ||
     (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
-    stat.mode & 0o077
+    (process.platform !== "win32" && (stat.mode & 0o077))
   )
     throw fault("UNSAFE_ENV_FILE", 503);
   try {

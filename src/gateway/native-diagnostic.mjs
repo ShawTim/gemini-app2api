@@ -94,7 +94,8 @@ export function nativeFrameMetadata(bytes) {
 }
 
 function privateRegular(stat) {
-  return stat.isFile() && (stat.mode & 0o777) === 0o600 &&
+  return stat.isFile() &&
+    (process.platform === 'win32' || (stat.mode & 0o777) === 0o600) &&
     (typeof process.getuid !== 'function' || stat.uid === process.getuid());
 }
 export class NativeDiagnostic {
@@ -107,7 +108,7 @@ export class NativeDiagnostic {
     try {
       if (!this.directory || !/^req_[a-f0-9-]{36}$/.test(requestId)) return null;
       const directory = fs.lstatSync(this.directory);
-      if (!directory.isDirectory() || (directory.mode & 0o077) !== 0) return null;
+      if (!directory.isDirectory() || (process.platform !== 'win32' && (directory.mode & 0o077) !== 0)) return null;
       const files = Object.fromEntries(Object.entries(NATIVE_DIAGNOSTIC_FILES).map(([key, name]) => [key, path.join(this.directory, name)]));
       if (fs.existsSync(files.claimed) || fs.existsSync(files.result)) return null;
       if (!privateRegular(fs.lstatSync(files.arm))) return null;

@@ -21,7 +21,7 @@
 | `PROFILE_CHANGE_REQUIRES_EMPTY_ACCOUNTS` | `409` | 已存有任何帳戶紀錄時，拒絕更換 OAuth client profile，避免憑證與既有 refresh token 不一致。 | 先移除既有帳戶紀錄後再匯入新 profile。 | [`state.mjs`](../src/gateway/state.mjs) |
 | `ACCOUNT_LIMIT` / `KEY_LIMIT` | `409` | 帳戶總數上限 `64`（含停用帳戶）；API key 紀錄上限 `256`（含已撤銷紀錄，列表僅顯示有效金鑰）。 | 移除不再需要的帳戶紀錄，或初始化新 state。 | [`state.mjs`](../src/gateway/state.mjs) |
 | `STATE_IN_USE` | `503` | 同一 `GATEWAY_DATA_DIR` 已被另一個執行中的程序持有系統核心目錄鎖（或同主機上尚未升級之 `<= v1.3.3` 舊版程序持有 PID 鎖），或 `runtime.lock` 為不安全／異常檔案物件（symlink、hardlink、FIFO、非 PID 內容、錯誤擁有者／權限）；此為啟動／目錄級別保護，並非單一 API 請求鎖。 | 原持有程序關閉釋放鎖檔（`SIGKILL` 或同核心鎖世代容器重啟遺留的死亡程序 `0600` PID `runtime.lock` 會在啟動時自動回收；跨容器由 `<= v1.3.3` 共卷升級前須先停止舊容器）。 | [`state.mjs`](../src/gateway/state.mjs) |
-| `STATE_LOCK_UNAVAILABLE` | `503` | 主機或容器缺少必要的系統核心 `flock(2)` 工具（Linux `/usr/bin/flock` 或 `/bin/flock`，macOS `/usr/bin/perl`），無法建立防競爭目錄鎖。閘道採 fail-closed 原則拒絕降級為不安全的純 PID 鎖。 | 在具備對應 `flock` 工具的支援環境執行。 | [`state.mjs`](../src/gateway/state.mjs) |
+| `STATE_LOCK_UNAVAILABLE` | `503` | 主機或容器缺少必要的系統核心鎖原語（Linux `/usr/bin/flock` 或 `/bin/flock`、macOS `/usr/bin/perl`、Windows NTFS `UV_FS_O_EXLOCK` 獨佔控制代碼自檢失敗），無法建立防競爭鎖。閘道採 fail-closed 原則拒絕降級為不安全的純 PID 鎖。 | 在具備對應系統核心鎖支援的本機檔案系統環境執行。 | [`state.mjs`](../src/gateway/state.mjs) |
 
 ### 明確不採用的人為限制（Non-locks by Design）
 
@@ -86,7 +86,7 @@
 
 - **權限隔離：** `/v1/*` 強制要求 Bearer client API key；`/admin/api/*` 使用獨立的 `HttpOnly` + `SameSite` Cookie，且所有寫入操作強制驗證精確 `Origin`、`Host` 與 `X-CSRF-Token`。兩套憑證互不相通。
 - **管理台登入頻率限制：** 密碼登入按來源位址設 `60` 秒視窗最多 `8` 次嘗試，超限回 `429 LOGIN_RATE_LIMITED`；管理台 session 有效期 `8` 小時、上限 `256` 筆。
-- **檔案系統權限檢查：** `GATEWAY_DATA_DIR` 必須為當前使用者擁有之 `0700` 目錄，狀態檔與 `.env` 必須為 `0600` 一般檔案（拒絕 symlink 與多硬連結），否則啟動時明確拒絕（`UNSAFE_STATE_PERMISSIONS` / `UNSAFE_ENV_FILE`）。
+- **檔案系統權限檢查：** 在 Linux / macOS 上，`GATEWAY_DATA_DIR` 必須為當前使用者擁有之 `0700` 目錄，狀態檔與 `.env` 必須為 `0600` 一般檔案（拒絕 symlink 與多硬連結），否則啟動時明確拒絕（`UNSAFE_STATE_PERMISSIONS` / `UNSAFE_ENV_FILE`）。在原生 Windows (`win32`) 上，新建 `GATEWAY_DATA_DIR` 會以語言無關 SID（`*S-1-5-18`、`*S-1-5-32-544` 及當前使用者 SID）自動執行 `icacls /inheritance:r /grant:r` 收緊 NTFS ACL（操作者亦應以同樣 SID 規則保護 `.env` 與自訂目錄）；`scripts/internal-server.mjs` 與 `scripts/internal-service.mjs` 屬 POSIX/launchd 內部運維腳本，不在 Windows 原生範圍內。
 - **串流與終局交付規則：**
   - 一般 `stream: true` 採用增量 SSE，在收到首段文字、工具呼叫或正常完成前延遲送出下游 `HTTP 200` 標頭。
   - 首段文字設有 `2,048 bytes` 初始緩衝門檻：若上游在未達 `2,048 bytes` 且無工具呼叫前意外中斷，閘道可在內部丟棄殘片並重試一次（`short_output`）。

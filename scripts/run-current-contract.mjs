@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const files = Object.freeze([
@@ -31,7 +31,11 @@ if (args.length !== 1 || !['--run', '--list'].includes(args[0])) {
   fs.mkdirSync(agent, { recursive: true, mode: 0o700 });
   const report = { scope: 'current-contract-only', fullReleaseAcceptance: false, historicalSuiteExecuted: false,
     realClientsExecuted: false, passed: false, startedAt: new Date().toISOString(), node: process.version, checks: [] };
+  const winEnv = process.platform === 'win32'
+    ? Object.fromEntries(['SystemRoot', 'WINDIR', 'ComSpec'].filter(k => process.env[k]).map(k => [k, process.env[k]]))
+    : {};
   const env = {
+    ...winEnv,
     PATH: process.env.PATH || '/usr/bin:/bin', HOME: home, USERPROFILE: home, TMPDIR: directory, TEMP: directory, TMP: directory,
     PI_CODING_AGENT_DIR: agent, PI_SCRATCH_DIR: directory, PI_OFFLINE: '1', NO_PROXY: 'localhost,127.0.0.1,::1', LANG: 'C',
   };
@@ -42,7 +46,7 @@ if (args.length !== 1 || !['--run', '--list'].includes(args[0])) {
     const start = Date.now();
     const childHome = path.join(directory, `home-${index + 1}`), childAgent = path.join(childHome, 'agent');
     fs.mkdirSync(childAgent, { recursive: true, mode: 0o700 });
-    const result = spawnSync(process.execPath, ['--import', path.join(root, 'scripts/offline-contract-network-guard.mjs'), full], {
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(root, 'scripts/offline-contract-network-guard.mjs')).href, full], {
       cwd: root, env: { ...env, HOME: childHome, USERPROFILE: childHome, PI_CODING_AGENT_DIR: childAgent },
       timeout: 45000, killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024, encoding: 'utf8', windowsHide: true,
     });

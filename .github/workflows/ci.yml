@@ -7,7 +7,7 @@ jobs:
     name: Current contract suite
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,7 @@ jobs:
         env:
           PI_SCRATCH_DIR: ${{ runner.temp }}
       - name: Check Docker COPY import closure without building an image
+        if: runner.os != 'Windows'
         run: node --import ./scripts/offline-contract-network-guard.mjs test/docker-copy-closure-offline.mjs
         env:
           PI_SCRATCH_DIR: ${{ runner.temp }}
@@ -31,6 +32,22 @@ jobs:
           name: current-contract-${{ matrix.os }}
           path: ${{ runner.temp }}/current-contract-*/
           if-no-files-found: warn
+  windows-native:
+    name: Native Windows runtime & NTFS lock checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Run native Windows NTFS lock, concurrency, crash-recovery, dotenv & server startup suite
+        run: node --test test/gateway-win32-compat.test.mjs
+        env:
+          PI_SCRATCH_DIR: ${{ runner.temp }}
+      - name: Verify CLI help entrypoint on Windows
+        run: node bin/gemini-gateway help
   offline:
     strategy:
       matrix:
