@@ -306,6 +306,7 @@ export function createGateway({
   publicOrigin = null,
   callbackPort = 18765,
   callbackHost = "127.0.0.1",
+  keepaliveHeadersDelayMs = 45000,
 } = {}) {
   if (!store) throw new TypeError("store required");
   const normalizedProbeHosts = parseProbeHosts(probeHosts);
@@ -468,7 +469,8 @@ export function createGateway({
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
       promptChars: Math.max(0, (body.__promptChars ?? 0) - imageUrlChars), imageCount,
       deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
-      signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000) });
+      signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000),
+      keepaliveHeadersDelayMs });
     let resolveInFlight;
     const inFlightPromise = new Promise((r) => { resolveInFlight = r; });
     inFlightTasks.add(inFlightPromise);
@@ -525,8 +527,8 @@ export function createGateway({
           ...(attemptDiagnostic ? { nativeDiagnostic: attemptDiagnostic } : {}) }); }
         catch (error) {
           // Only content the caller actually received commits this turn. A held
-          // tiny prefix is still replaceable by one retry.
-          error.responseStarted = res.headersSent === true || delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
+          // tiny prefix or comment-only SSE keepalive header is still replaceable without splicing output.
+          error.responseStarted = (res.headersSent === true && !delivery.keepaliveOnlyHeaders) || delivery.publishedBytes > 0 || delivery.callCount > 0 || res.destroyed === true;
           if (!error.responseStarted && !error.unverifiedOutput && !error.postOutputIdleStall && delivery.retryableShortfall) error.shortOutput = true;
           const evidence = safeNativeEvidence(error.nativeEvidence);
           const failure = { accountId: acc, status: Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502,
@@ -624,6 +626,7 @@ export function createGateway({
       if (hardDestroyTimer !== null) clearTimeout(hardDestroyTimer);
       req.off("aborted", disconnect);
       res.off("close", disconnect);
+      delivery.close();
       requests.unshift({
         id,
         at,

@@ -61,22 +61,30 @@ async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
     else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000 } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, parallelToolCalls = true, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000 } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
     requestedThinkingLevel: thinkingLevel, ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }) };
-  let started = false, settled = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
+  let started = false, keepaliveHeadersSent = false, settled = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
   let publishedLength = 0, publishedBytes = 0;
-  let keepaliveTimer = null;
+  let keepaliveTimer = null, deferredHeaderTimer = null;
+  const stopDeferredHeaderTimer = () => {
+    if (deferredHeaderTimer !== null) {
+      clearTimeout(deferredHeaderTimer);
+      deferredHeaderTimer = null;
+    }
+  };
   const stopKeepalive = () => {
+    stopDeferredHeaderTimer();
     if (keepaliveTimer !== null) {
       clearTimeout(keepaliveTimer);
       keepaliveTimer = null;
     }
     res.off?.('close', stopKeepalive);
     res.off?.('error', stopKeepalive);
+    signal?.removeEventListener?.('abort', stopKeepalive);
   };
   const armKeepalive = () => {
-    if (!stream || settled || !started || !Number.isFinite(keepaliveMs) || keepaliveMs <= 0) return;
+    if (!stream || settled || (!started && !keepaliveHeadersSent) || !Number.isFinite(keepaliveMs) || keepaliveMs <= 0) return;
     if (keepaliveTimer !== null) clearTimeout(keepaliveTimer);
     keepaliveTimer = setTimeout(() => {
       keepaliveTimer = null;
@@ -91,6 +99,45 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     }, keepaliveMs);
     keepaliveTimer.unref?.();
   };
+  const writeSseHeaders = (extraHeaders = {}) => {
+    if (!res.headersSent) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        'X-Gemini-Usage': 'estimated',
+        'X-Requested-Thinking-Level': String(meta.requestedThinkingLevel ?? ''),
+        ...extraHeaders,
+      });
+      res.flushHeaders?.();
+    }
+  };
+  const flushKeepaliveHeaders = () => {
+    deferredHeaderTimer = null;
+    if (!stream || !deferEmptyStart || settled || started || keepaliveHeadersSent || res.headersSent || res.destroyed || res.writableEnded || signal?.aborted) return;
+    try {
+      // Flush SSE 200 headers + comment-only keepalive before client fetch/headersTimeout
+      // (300s in OpenAI SDK / Node undici) expires while Gemini is thinking or generating a
+      // large buffered tool_call. No SSE data events are emitted, so uncommitted retries remain safe.
+      writeSseHeaders();
+      keepaliveHeadersSent = true;
+      if (!res.writableNeedDrain) {
+        if (typeof res.writeKeepalive === 'function') res.writeKeepalive(': keepalive\n\n');
+        else res.write(': keepalive\n\n');
+      }
+      armKeepalive();
+    } catch {
+      stopKeepalive();
+    }
+  };
+  if (stream && deferEmptyStart && Number.isFinite(keepaliveHeadersDelayMs) && keepaliveHeadersDelayMs > 0) {
+    res.once?.('close', stopKeepalive);
+    res.once?.('error', stopKeepalive);
+    signal?.addEventListener?.('abort', stopKeepalive, { once: true });
+    deferredHeaderTimer = setTimeout(flushKeepaliveHeaders, keepaliveHeadersDelayMs);
+    deferredHeaderTimer.unref?.();
+  }
   // Ordinary upstream responses carry no token accounting. Usage is therefore a
   // labelled estimate over the caller request and the delivered output, never a
   // value read from Google.
@@ -158,17 +205,16 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     if (settled) return;
     if (!started && identity) meta = { ...meta, ...identity };
     if (!stream || started) return;
+    stopDeferredHeaderTimer();
     started = true;
-    if (!res.headersSent) {
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
-        'X-Gemini-Usage': 'estimated',
-        'X-Requested-Thinking-Level': String(meta.requestedThinkingLevel ?? ''),
-        ...(Number.isSafeInteger(meta.thinkingLevel) ? { 'X-Thinking-Level': String(meta.thinkingLevel) } : {}),
-        ...(Number.isSafeInteger(meta.resolvedModeCategory) ? { 'X-Native-Mode': String(meta.resolvedModeCategory) } : {}),
-        ...(meta.requestedReasoningEffort === undefined ? {} : { 'X-Reasoning-Effort': meta.requestedReasoningEffort }),
-        ...(meta.ignoredTokenParameters?.length ? { 'X-Gemini-Token-Limit': 'not-enforced', 'X-Gemini-Ignored-Parameters': meta.ignoredTokenParameters.join(', ') } : {}) });
-      res.flushHeaders?.();
-    }
+    writeSseHeaders({
+      ...(Number.isSafeInteger(meta.thinkingLevel) ? { 'X-Thinking-Level': String(meta.thinkingLevel) } : {}),
+      ...(Number.isSafeInteger(meta.resolvedModeCategory) ? { 'X-Native-Mode': String(meta.resolvedModeCategory) } : {}),
+      ...(meta.requestedReasoningEffort === undefined ? {} : { 'X-Reasoning-Effort': meta.requestedReasoningEffort }),
+      ...(meta.ignoredTokenParameters?.length ? { 'X-Gemini-Token-Limit': 'not-enforced', 'X-Gemini-Ignored-Parameters': meta.ignoredTokenParameters.join(', ') } : {}),
+    });
+    res.off?.('close', stopKeepalive);
+    res.off?.('error', stopKeepalive);
     res.once?.('close', stopKeepalive);
     res.once?.('error', stopKeepalive);
     armKeepalive();
@@ -226,6 +272,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   }
   async function complete(result) {
     if (settled) return;
+    stopDeferredHeaderTimer();
     if (!stream) {
       const resultCalls = Array.isArray(result.calls) ? result.calls : [];
       const outputBytes = Buffer.byteLength(result.content ?? '') +
@@ -265,9 +312,10 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     settled = true; stopKeepalive(); res.end();
   }
   async function interrupt(error) {
+    stopDeferredHeaderTimer();
     if (settled || res.destroyed || res.writableEnded) { stopKeepalive(); return false; }
     if (error?.unverifiedOutput === true) {
-      if (!started) { discard(); return false; }
+      if (!started) { discard(); if (!keepaliveHeadersSent) { stopKeepalive(); return false; } }
       content = content.slice(0, publishedLength);
       bytes = Buffer.byteLength(content) + calls.reduce((total, call) => total + Buffer.byteLength(JSON.stringify(call)), 0);
     }
@@ -277,10 +325,11 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       partialCalls.reduce((total, call) => total + Buffer.byteLength(JSON.stringify(call)), 0);
     if (partialCalls.length > 32 || partialBytes > MAX) {
       if (!started) discard();
+      stopKeepalive();
       throw fault('RESPONSE_TOO_LARGE', 502);
     }
-    if (!started && error?.code === 'RESPONSE_TOO_LARGE') { discard(); return false; }
-    if (!started && !partial.content?.length && !partialCalls.length) return false;
+    if (!started && !keepaliveHeadersSent && error?.code === 'RESPONSE_TOO_LARGE') { discard(); stopKeepalive(); return false; }
+    if (!started && !keepaliveHeadersSent && !partial.content?.length && !partialCalls.length) { stopKeepalive(); return false; }
     const detail = { code: safeCode(error), type: error.status === 429 ? 'rate_limit_error' : error.status === 401 ? 'authentication_error' : error.status < 500 ? 'invalid_request_error' : 'server_error', message: safeCode(error) };
     res.incomplete = true;
     if (!stream) {
@@ -288,7 +337,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...partial, calls: partialCalls, parallelToolCalls, incomplete: true, incompleteDetails: { reason: 'upstream_interrupted', code: detail.code }, outputError: detail });
       return true;
     }
-    if (!started) await start(partial);
+    if (!started && (route !== 'chat' || !keepaliveHeadersSent || partial.content?.length || partialCalls.length)) await start(partial);
     // Decide from what the caller has actually seen, before the held prefix flushes.
     // Verified post-output upstream silence (HTTP 200, no reset/EOF, clean text) also
     // finishes cleanly with incomplete metadata instead of trapping callers in retries.
@@ -325,13 +374,14 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // A retried attempt must not inherit a discarded fragment.
   function discard() {
     if (settled) return;
-    stopKeepalive();
+    if (!stream || res.destroyed || res.writableEnded) stopKeepalive();
     delete meta.annotations;
     content = ''; calls = []; bytes = 0; publishedLength = 0; publishedBytes = 0; message = null; output.length = 0;
   }
-  return { accept, complete, interrupt, discard,
+  return { accept, complete, interrupt, discard, close: stopKeepalive,
     outputCommitState: () => ({ publishedBytes, toolCallCount: stream ? calls.length : 0 }),
     get started() { return started; },
+    get keepaliveOnlyHeaders() { return keepaliveHeadersSent && !started; },
     get hasContent() { return content.length > 0 || calls.length > 0; },
     get callCount() { return calls.length; },
     get publishedBytes() { return publishedBytes; },

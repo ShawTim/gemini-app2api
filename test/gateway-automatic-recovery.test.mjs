@@ -689,3 +689,100 @@ test('mid-stream liveToolError stops promptly on post-tool stall or hallucinatio
   assert.equal(fPersist.seen.length, 2);
   assert.equal(fPersist.app.overview().requests[0].providerAttempts, 2);
 });
+
+test('deferred comment-only SSE keepalive headers prevent client header-timeout on slow buffered tool calls and preserve uncommitted retry safety', async t => {
+  const { default: OpenAI } = await import('openai');
+  const bigArg = 'x'.repeat(30000);
+  const bigToolBlock = '```tool_call\n' + JSON.stringify({ name: 'fixture_lookup', arguments: { key: bigArg } }) + '\n```\n';
+  const badLine = '```tool_call\nnot json\n```\n';
+
+  // 1. Chat SSE: slow 500ms 30KB tool call > 300ms OpenAI SDK timeout succeeds cleanly via comment-only keepalive headers.
+  const fSlow = await fixture({ ...options, accountCount: 2, keepaliveHeadersDelayMs: 60 });
+  t.after(fSlow.close);
+  fSlow.app.provider.openTurn = () => ({
+    events: (async function* () {
+      await new Promise(r => setTimeout(r, 500));
+      yield { type: 'frame', bytes: textFrame(bigToolBlock) };
+      yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const slowClient = new OpenAI({ apiKey: fSlow.key.key, baseURL: fSlow.base + '/v1', timeout: 300, maxRetries: 0 });
+  const slowStream = await slowClient.chat.completions.create({
+    model: 'gemini-argon',
+    messages: [{ role: 'user', content: 'Generate large edit' }],
+    tools,
+    stream: true,
+  });
+  let slowArgs = '', slowFinish = null;
+  for await (const chunk of slowStream) {
+    const tc = chunk.choices?.[0]?.delta?.tool_calls?.[0];
+    if (tc?.function?.arguments) slowArgs += tc.function.arguments;
+    if (chunk.choices?.[0]?.finish_reason) slowFinish = chunk.choices[0].finish_reason;
+  }
+  assert.equal(slowFinish, 'tool_calls');
+  assert.equal(JSON.parse(slowArgs).key.length, 30000);
+
+  // 2. Chat SSE: retry after comment-only keepalive headers still recovers cleanly across 2 attempts > 300ms SDK timeout.
+  const fRetry = await fixture({ ...options, accountCount: 3, keepaliveHeadersDelayMs: 60 });
+  t.after(fRetry.close);
+  let retryAttempt = 0;
+  fRetry.app.provider.openTurn = () => {
+    const n = ++retryAttempt;
+    return {
+      events: (async function* () {
+        await new Promise(r => setTimeout(r, n === 1 ? 200 : 250));
+        yield { type: 'frame', bytes: textFrame(n === 1 ? badLine : bigToolBlock) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    };
+  };
+  const retryClient = new OpenAI({ apiKey: fRetry.key.key, baseURL: fRetry.base + '/v1', timeout: 300, maxRetries: 0 });
+  const retryStream = await retryClient.chat.completions.create({
+    model: 'gemini-argon',
+    messages: [{ role: 'user', content: 'Generate large edit with recovery' }],
+    tools,
+    stream: true,
+  });
+  let retryArgs = '';
+  for await (const chunk of retryStream) {
+    const tc = chunk.choices?.[0]?.delta?.tool_calls?.[0];
+    if (tc?.function?.arguments) retryArgs += tc.function.arguments;
+  }
+  assert.equal(JSON.parse(retryArgs).key.length, 30000);
+  assert.equal(retryAttempt, 2);
+
+  // 3. Chat SSE & Responses SSE: terminal error after keepalive headers closes SSE cleanly with explicit error code.
+  const fTerm = await fixture({ ...options, accountCount: 3, keepaliveHeadersDelayMs: 50 });
+  t.after(fTerm.close);
+  fTerm.app.provider.openTurn = () => ({
+    events: (async function* () {
+      await new Promise(r => setTimeout(r, 100));
+      yield { type: 'frame', bytes: textFrame(badLine) };
+      yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const termClient = new OpenAI({ apiKey: fTerm.key.key, baseURL: fTerm.base + '/v1', timeout: 500, maxRetries: 0 });
+  await assert.rejects(async () => {
+    const s = await termClient.chat.completions.create({
+      model: 'gemini-argon',
+      messages: [{ role: 'user', content: 'Always invalid tool JSON' }],
+      tools,
+      stream: true,
+    });
+    for await (const _chunk of s) {}
+  }, err => /INVALID_TOOL_JSON/.test(err.message));
+
+  const responseTools = tools.map(item => ({ type: 'function', ...item.function }));
+  const respRes = await fTerm.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-argon', input: 'Always invalid tool JSON', tools: responseTools, stream: true },
+  });
+  assert.equal(respRes.status, 200);
+  const respWire = await respRes.text();
+  assert.match(respWire, /: keepalive/);
+  assert.match(respWire, /response\.incomplete/);
+  assert.match(respWire, /INVALID_TOOL_JSON/);
+});
