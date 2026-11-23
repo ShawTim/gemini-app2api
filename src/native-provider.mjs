@@ -559,6 +559,9 @@ export class NativeDirectProvider {
           });
           try { turn?.cancel(); } catch {}
           const idleError = protocolError('NATIVE_TURN_TIMEOUT', 504);
+          if (idleKind === 'post_tool' && item.verified && liveCalls.length > 0) {
+            idleError.postToolIdleStall = true;
+          }
           if (idleKind === 'post_output' && item.verified && classifyIdleSnapshot().kind === 'clean_output') {
             idleError.postOutputIdleStall = true;
           }

@@ -283,13 +283,25 @@ export class AccountPool {
           session.turns++;
           return { result, accountId: account.id, sessionId: id };
         } catch (error) {
-          stat.failures++;
-          this.#telemetry.fail(account.id, model, error);
+          const benignPostIdle = error?.postToolIdleStall === true || error?.postOutputIdleStall === true;
+          if (!benignPostIdle) {
+            stat.failures++;
+            this.#telemetry.fail(account.id, model, error);
+          } else {
+            this.#telemetry.succeed(account.id, model, error?.partialResult ?? {});
+            session.turns++;
+          }
           const kind = classifyFailure(error);
           if (kind === "auth") this.accounts.invalidate?.(account.id);
           const rawAutomaticKind = this.allowAutomaticRecovery ? automaticRecoveryKind(error, model) : null;
           const recoveryKind = rawAutomaticKind ?? kind;
-          outcome = { accountId: account.id, model, lastFailure: recoveryKind ? { accountId: account.id, model, kind: recoveryKind } : null };
+          // Verified post_tool / post_output idle stalls delivered usable output; do not poison
+          // sticky session affinity (which would ping-pong accounts and thrash per-account blobCache).
+          outcome = {
+            accountId: account.id,
+            model,
+            lastFailure: (!benignPostIdle && recoveryKind) ? { accountId: account.id, model, kind: recoveryKind } : null,
+          };
           const hasAlternative = this.available(model).some(a => !tried.has(a.id));
           const decision = planRetry(
             { error, kind, rawAutomaticKind, verifiedEmpty: isVerifiedEmptyResponse(error, model), explicitQuota: isExplicitQuotaFailure(error) },

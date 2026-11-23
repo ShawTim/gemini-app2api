@@ -521,6 +521,7 @@ export function createGateway({
           res.setHeader("X-Gemini-Failover-Count", String(providerAttempts - 1));
           if (context.responseSessionId) res.setHeader('X-Session-ID', context.responseSessionId);
           if (context.failoverReason) res.setHeader("X-Gemini-Failover-Reason", context.failoverReason);
+          if (providerFailures.length) res.setHeader('X-Gemini-Recovery-Errors', [...new Set(providerFailures.map(f => f.code))].join(','));
         }
         try { return await provider.runTurn(acc, canonical, event => delivery.accept(event), { ...context, timeoutMs: settings.timeoutMs,
           incrementalOutput: true, outputMode: outputStreaming ? 'stream' : 'buffered',
@@ -536,7 +537,6 @@ export function createGateway({
           const failure = { accountId: acc, status: Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502,
             code: errorPayload(error).error.code, ...(evidence ? { nativeEvidence: evidence } : {}) };
           providerFailures.push(failure);
-          if (!res.headersSent) res.setHeader('X-Gemini-Recovery-Errors', [...new Set(providerFailures.map(f => f.code))].join(','));
           if (evidence) try {
             accounts.recordUpstreamError(acc, { at: Date.now(), status: failure.status, code: failure.code,
               model: canonical.model, nativeEvidence: evidence });
