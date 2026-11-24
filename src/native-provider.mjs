@@ -63,7 +63,7 @@ export function selectIdleDeadline(facts, now = Date.now()) {
     }
     return { kind: null, ms: null };
   }
-  if (facts.modelComplete) {
+  if (facts.modelComplete && facts.hasText) {
     return { kind: 'post_complete', ms: completeRemaining };
   }
   if (facts.hasLiveCalls && !facts.streamingTool) {
@@ -586,21 +586,13 @@ export class NativeDirectProvider {
         const item = await nextEventWithIdle();
         if (item && item[IDLE_TIMEOUT_SENTINEL]) {
           const idleKind = item[IDLE_TIMEOUT_SENTINEL];
-          if (idleKind === 'post_complete' && item.verified) {
-            if (rawText.trim().length > 0) {
-              note('post_complete_idle_finish', { bytes: Buffer.byteLength(rawText) });
-              try { turn?.cancel(); } catch {}
-              readExit = 'complete_grace';
-              ended = true;
-              httpStatus = httpStatus ?? 200;
-              grpc = grpc ?? 0;
-              break;
-            }
-            // Upstream marked modelComplete=true with empty/thoughts-only text and never closed the stream:
-            // break promptly without forging wireEnded=true so validate rejects as INCOMPLETE_NATIVE_RESPONSE.
-            note('post_complete_empty_idle_timeout', { frames, thoughtBytes: outputShape.nativeThoughtBytes });
+          if (idleKind === 'post_complete' && item.verified && rawText.trim().length > 0) {
+            note('post_complete_idle_finish', { bytes: Buffer.byteLength(rawText) });
             try { turn?.cancel(); } catch {}
-            readExit = 'complete_empty_grace';
+            readExit = 'complete_grace';
+            ended = true;
+            httpStatus = httpStatus ?? 200;
+            grpc = grpc ?? 0;
             break;
           }
           if (idleKind === 'post_tool_error' && item.verified && (liveToolError || item.probeError)) {

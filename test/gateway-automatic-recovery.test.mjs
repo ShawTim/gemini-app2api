@@ -1519,7 +1519,8 @@ test('pure refactored units: selectIdleDeadline, planRetry, wirePhase/attemptDis
     lastTextProgressAt: 5_000,
     lastGenerationProgressAt: 9_900,
   }, now), { kind: 'post_complete', ms: 500 });
-  // Empty/thoughts-only modelComplete=true also arms post_complete so hung empty completions never wait 600s
+  // Pre-text frames carrying modelComplete=true with empty text (hasText: false) MUST NOT arm
+  // the 2s post_complete kill switch; Gemini App emits field 9=1 on intermediate pre-text frames.
   assert.deepEqual(selectIdleDeadline({
     verified: true,
     hasLiveToolError: false,
@@ -1536,7 +1537,7 @@ test('pure refactored units: selectIdleDeadline, planRetry, wirePhase/attemptDis
     postOutputToolIdleMs: 45_000,
     lastTextProgressAt: null,
     lastGenerationProgressAt: null,
-  }, now), { kind: 'post_complete', ms: 500 });
+  }, now), { kind: null, ms: null });
 
   // 2. planRetry: shortOutputRetry blocks auth/precondition/downgrade/unpermitted-quota while keeping 1-time short-fragment replacement
   const shortOutAuth = {
