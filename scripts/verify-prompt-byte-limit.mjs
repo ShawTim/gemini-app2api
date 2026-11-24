@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import assert from 'node:assert/strict';
-import { CANONICAL_PROMPT_CHARS, normalizeChatRequest } from '../src/openai-contract.mjs';
 import { requireIsolation, installNetworkGuard, gatewayFixture } from './offline-client-fixture.mjs';
 const scratch = requireIsolation(), guard = installNetworkGuard();
 const output = path.join(scratch, 'prompt-byte-limit-offline-result.json');
@@ -26,10 +25,21 @@ const cases = [
 let fixture;
 const timer = setTimeout(() => { report.failure = 'PROBE_TIMEOUT'; fs.writeFileSync(output, JSON.stringify(report)); process.exit(2); }, 30000);
 try {
-  fixture = await gatewayFixture({ scratch, guard, maxRequests: cases.length, respond: () => ({ text: 'OFFLINE_BYTE_OK' }) });
+  let lastPromptChars = 0;
+  const promptTokensByName = new Map();
+  fixture = await gatewayFixture({
+    scratch,
+    guard,
+    maxRequests: cases.length,
+    respond: (_req, _attempt, options) => {
+      lastPromptChars = options.messages.reduce((sum, m) => sum + (typeof m?.content === 'string' ? m.content.length : 0), 0);
+      return { text: 'OFFLINE_BYTE_OK' };
+    },
+  });
   for (const c of cases) {
     fixture.store.data.settings.maxPromptBytes = c.limit;
     const before = fixture.attempts;
+    lastPromptChars = 0;
     const headers = { Authorization: 'Bearer ' + fixture.key, 'Content-Type': 'application/json' };
     let response;
     if (c.chunked) {
@@ -56,12 +66,14 @@ try {
       assert.equal(response.body.choices[0].finish_reason, 'stop');
       assert.equal(fixture.attempts, before + 1);
       assert.equal(response.body.usage.estimated, true);
-      const canonicalChars = normalizeChatRequest(JSON.parse(c.raw))[CANONICAL_PROMPT_CHARS];
-      assert.equal(response.body.usage.prompt_tokens, Math.ceil(canonicalChars / 3.5), 'usage estimator must reflect normalized canonical prompt chars');
+      assert.ok(lastPromptChars > 0, 'upstream must receive non-empty canonical prompt');
+      assert.equal(response.body.usage.prompt_tokens, Math.ceil(lastPromptChars / 3.5), 'usage estimator must reflect actual upstream prompt chars');
+      promptTokensByName.set(c.name, response.body.usage.prompt_tokens);
     }
     report.cases.push({ name: c.name, passed: true, bytes: Buffer.byteLength(c.raw), utf16Units: c.raw.length,
       limit: c.limit, status: response.status, upstreamAttempts: fixture.attempts - before });
   }
+  assert.equal(promptTokensByName.get('escaped_json_exact'), promptTokensByName.get('exact_utf8_boundary'), 'JSON escapes must not inflate usage.prompt_tokens');
   assert.equal(guard.blocked, 0);
   report.passed = true; report.upstreamAttempts = fixture.attempts;
 } catch (error) { report.failure = { name: error.name, message: String(error.message).slice(0, 240) }; process.exitCode = 1; }

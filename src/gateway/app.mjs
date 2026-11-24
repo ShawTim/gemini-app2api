@@ -274,10 +274,8 @@ async function readJson(req, limit, { distinguishNonObject = false } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw fault(distinguishNonObject ? "INVALID_REQUEST" : "INVALID_JSON");
   }
-  // Two different measurements. The usage estimator works in characters; an
-  // operator-facing byte limit must compare UTF-8 bytes, otherwise non-ASCII input
+  // An operator-facing byte limit must compare UTF-8 bytes, otherwise non-ASCII input
   // is undercounted by up to 3x. `length` is the raw received body byte count.
-  Object.defineProperty(value, "__promptChars", { value: text.length, enumerable: false });
   Object.defineProperty(value, "__promptBytes", { value: length, enumerable: false });
   return value;
 }
@@ -418,6 +416,17 @@ export function createGateway({
       keyCount: store.listKeys().filter((k) => !k.revokedAt).length,
     };
   };
+  function assertPromptByteLimit(body) {
+    const promptLimit = store.settings().maxPromptBytes;
+    if (
+      Number.isSafeInteger(promptLimit) &&
+      promptLimit > 0 &&
+      Number.isInteger(body?.__promptBytes) &&
+      body.__promptBytes > promptLimit
+    ) {
+      throw fault("PROMPT_SIZE_LIMIT", 413);
+    }
+  }
   async function execute(
     req,
     res,
@@ -425,6 +434,10 @@ export function createGateway({
     { owner, route, playground = false, mcp = false, accountTestId = null } = {},
   ) {
     if (req.aborted || res.destroyed) return;
+    // A conversation can grow past the point where the upstream finishes the turn at all.
+    // Rejecting it up front turns a 70-200 s dead wait into an immediate, explicit answer.
+    // Disabled by default (0).
+    assertPromptByteLimit(body);
     const canonical =
       route === "responses"
         ? protocol.normalizeResponsesRequest(body).body
@@ -434,13 +447,6 @@ export function createGateway({
       Array.isArray(message.content) && message.content.some(part =>
         part.type === "image_url" && /^https?:/i.test(part.image_url.url))))
       throw fault("REMOTE_IMAGES_DISABLED", 403);
-    // A conversation can grow past the point where the upstream finishes the turn at all.
-    // Rejecting it up front turns a 70-200 s dead wait into an immediate, explicit answer.
-    // Disabled by default (0).
-    const promptLimit = settings.maxPromptBytes;
-    if (Number.isSafeInteger(promptLimit) && promptLimit > 0 &&
-      Number.isInteger(body.__promptBytes) && body.__promptBytes > promptLimit)
-      throw fault("PROMPT_SIZE_LIMIT", 413);
     if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
     const outputStreaming = !playground && body.stream === true;
     let hardDestroyTimer = null;
@@ -1050,6 +1056,7 @@ export function createGateway({
         ) {
           const body = await readJson(req, store.settings().maxBodyBytes);
           if (req.aborted || res.destroyed) return;
+          assertPromptByteLimit(body);
           const route = p.endsWith('responses') ? 'responses' : 'chat';
           if (allowAutomaticRecovery) {
             const canonical = route === 'responses' ? protocol.normalizeResponsesRequest(body).body : protocol.normalizeChatRequest(body);
@@ -1113,19 +1120,14 @@ export function createGateway({
           const onAbort = () => capture.destroy();
           signal?.addEventListener("abort", onAbort, { once: true });
           const serialized = JSON.stringify(chatPayload);
-          const payloadWithChars = { ...chatPayload, stream: false };
-          Object.defineProperty(payloadWithChars, "__promptBytes", {
+          const payloadWithBytes = { ...chatPayload, stream: false };
+          Object.defineProperty(payloadWithBytes, "__promptBytes", {
             value: Math.max(rawMcpBytes, Buffer.byteLength(serialized, "utf8")),
             enumerable: false,
             configurable: true,
           });
-          Object.defineProperty(payloadWithChars, "__promptChars", {
-            value: Math.max(typeof rpcMessage?.__promptChars === "number" ? rpcMessage.__promptChars : 0, serialized.length),
-            enumerable: false,
-            configurable: true,
-          });
           try {
-            await execute(req, capture, payloadWithChars, { owner, route: "chat", mcp: true });
+            await execute(req, capture, payloadWithBytes, { owner, route: "chat", mcp: true });
           } finally {
             signal?.removeEventListener("abort", onAbort);
           }

@@ -203,9 +203,51 @@ test('Responses historical custom_tool_call/output replay works safely with inte
       { type: 'custom_tool_call_output', call_id: 'call_big', output: 'ok' },
     ],
   }), 'INVALID_TOOL_ARGUMENTS');
+
+  // Contradicting function_call_output name/namespace or reused call_id across turns is rejected
+  bad(() => normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'function_call', call_id: 'call_m1', name: 'Read', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call_m1', name: 'Write', output: 'ok' },
+    ],
+  }), 'INVALID_TOOL_RESULT');
+  bad(() => normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'function_call', call_id: 'call_m2', name: 'Read', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call_m2', name: 'Read', namespace: 'fs', output: 'ok' },
+    ],
+  }), 'INVALID_TOOL_RESULT');
+  bad(() => normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'function_call', call_id: 'call_m3', namespace: 'fs', name: 'Read', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call_m3', namespace: 'other', name: 'Read', output: 'ok' },
+    ],
+  }), 'INVALID_TOOL_RESULT');
+  bad(() => normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'function_call', call_id: 'call_dup', name: 'Read', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call_dup', output: 'first' },
+      { type: 'function_call', call_id: 'call_dup', name: 'Read', arguments: '{"path":"b"}' },
+      { type: 'function_call_output', call_id: 'call_dup', output: 'second' },
+    ],
+  }), 'INVALID_TOOL_CALL');
+
+  // Matching function_call_output name/namespace is accepted cleanly
+  const matched = normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'function_call', call_id: 'call_ok_ns', namespace: 'fs', name: 'Read', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call_ok_ns', namespace: 'fs', name: 'Read', output: 'ok' },
+    ],
+  });
+  assert.equal(matched.body.messages.length, 3);
 });
 
-test('Gateway HTTP /v1/responses usage.input_tokens comes from canonical prompt and is invariant to stripped reasoning JSON', async t => {
+test('Gateway HTTP /v1/responses usage.input_tokens matches actual upstream prompt and is invariant to stripped reasoning JSON', async t => {
   const f = await fixture({ turns: ['Clean reply.', 'Clean reply.'], allowFailover: false });
   t.after(f.close);
   const bareRes = await f.api('/v1/responses', {
@@ -232,5 +274,34 @@ test('Gateway HTTP /v1/responses usage.input_tokens comes from canonical prompt 
   });
   assert.equal(withReasoningRes.status, 200);
   const withReasoningJson = await withReasoningRes.json();
-  assert.equal(withReasoningJson.usage.input_tokens, bareJson.usage.input_tokens);
+  assert.equal(f.seen.length, 2);
+  const barePromptChars = f.seen[0].messages.reduce((sum, m) => sum + (typeof m?.content === 'string' ? m.content.length : 0), 0);
+  const withReasoningPromptChars = f.seen[1].messages.reduce((sum, m) => sum + (typeof m?.content === 'string' ? m.content.length : 0), 0);
+  assert.ok(barePromptChars > 0);
+  assert.equal(withReasoningPromptChars, barePromptChars);
+  assert.equal(bareJson.usage.input_tokens, Math.ceil(barePromptChars / 3.5));
+  assert.equal(withReasoningJson.usage.input_tokens, Math.ceil(withReasoningPromptChars / 3.5));
+});
+
+test('Gateway enforces maxPromptBytes before request-resumption cache lookup', async t => {
+  const f = await fixture({ turns: ['Cached reply.'], allowFailover: false, allowAutomaticRecovery: true });
+  t.after(f.close);
+  const rawNormal = JSON.stringify({ model: 'gemini-neon', input: 'aaaaaaaaaa' });
+  const rawEscaped = rawNormal.replaceAll('a', '\\u0061');
+  f.store.updateSettings({ maxPromptBytes: Buffer.byteLength(rawNormal, 'utf8') });
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${f.key.key}`,
+    'x-session-id': 'sess-max-prompt-resumption',
+  };
+  const first = await fetch(`${f.base}/v1/responses`, { method: 'POST', headers, body: rawNormal });
+  assert.equal(first.status, 200);
+  assert.equal(f.seen.length, 1);
+
+  // Semantically identical body with larger raw UTF-8 byte length must be rejected before resumption cache hit
+  const second = await fetch(`${f.base}/v1/responses`, { method: 'POST', headers, body: rawEscaped });
+  assert.equal(second.status, 413);
+  const errBody = await second.json();
+  assert.equal(errBody.error.code, 'PROMPT_SIZE_LIMIT');
+  assert.equal(f.seen.length, 1);
 });

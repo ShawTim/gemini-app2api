@@ -142,8 +142,9 @@ function text(value, { nullable = false } = {}) {
 // Validate UTF-8 and hard byte bounds for stripped replay scratchpad fields
 // without enforcing GEMINI_PROMPT_MAX_CHARS (which bounds rendered prompt text).
 function strippedText(value, param = null) {
-  if (typeof value !== 'string' || Buffer.from(value).toString('utf8') !== value) fail('INVALID_TEXT', 400, param);
+  if (typeof value !== 'string') fail('INVALID_TEXT', 400, param);
   if (Buffer.byteLength(value) > PROMPT_MAX_BYTES) fail('REQUEST_TOO_LARGE', 413, param);
+  if (Buffer.from(value).toString('utf8') !== value) fail('INVALID_TEXT', 400, param);
   return value;
 }
 function id(value) {
@@ -505,6 +506,7 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
   const deferredToolImages = [];
   let toolImageSeq = 0;
   const openCalls = new Map();
+  const seenCalls = new Set();
   let hasNormalizedInput = false;
   const flushToolImages = () => {
     if (deferredToolImages.length) messages.push({ role: 'user', content: deferredToolImages.splice(0) });
@@ -548,18 +550,24 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
         if (item.parsed_arguments !== undefined && item.parsed_arguments !== null) fail('UNSUPPORTED_PARAMETER', 400, 'input.parsed_arguments');
         validateReplayItemMeta(item, { allowCaller: true, allowAsync: true });
         const callId = id(item.call_id);
-        if (!openCalls.has(callId)) openCalls.set(callId, 'function_call');
-        call = { id: callId, type: 'function', function: { name: callName(item.name, item.namespace), arguments: item.arguments } };
+        if (seenCalls.has(callId)) fail('INVALID_TOOL_CALL');
+        const resolvedName = callName(item.name, item.namespace);
+        seenCalls.add(callId);
+        openCalls.set(callId, { kind: 'function_call', name: item.name, namespace: item.namespace ?? null });
+        call = { id: callId, type: 'function', function: { name: resolvedName, arguments: item.arguments } };
       } else {
         keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'input', 'caller', 'async'], 'input');
         validateReplayItemMeta(item, { allowCaller: true, allowAsync: true });
         const callId = id(item.call_id);
+        if (seenCalls.has(callId)) fail('INVALID_TOOL_CALL');
         const rawInput = text(item.input);
         if (Buffer.byteLength(rawInput, 'utf8') > TOOL_LIMITS.bytes) fail('INVALID_TOOL_ARGUMENTS', 400, 'input.input');
         const wrapped = JSON.stringify({ input: rawInput });
         if (Buffer.byteLength(wrapped, 'utf8') > TOOL_LIMITS.bytes) fail('INVALID_TOOL_ARGUMENTS', 400, 'input.input');
-        if (!openCalls.has(callId)) openCalls.set(callId, 'custom_tool_call');
-        call = { id: callId, type: 'function', function: { name: callName(item.name, item.namespace), arguments: wrapped } };
+        const resolvedName = callName(item.name, item.namespace);
+        seenCalls.add(callId);
+        openCalls.set(callId, { kind: 'custom_tool_call', name: item.name, namespace: item.namespace ?? null });
+        call = { id: callId, type: 'function', function: { name: resolvedName, arguments: wrapped } };
       }
       const previous = messages.at(-1);
       if (previous?.role === 'assistant') (previous.tool_calls ??= []).push(call);
@@ -585,13 +593,21 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
       }
       const callId = id(item.call_id);
       const expectedKind = isFunctionOutput ? 'function_call' : 'custom_tool_call';
-      const openKind = openCalls.get(callId);
-      if (openKind !== undefined && openKind !== expectedKind) fail('INVALID_TOOL_RESULT');
-      if (openKind === undefined) {
+      const openCall = openCalls.get(callId);
+      if (openCall !== undefined && openCall.kind !== expectedKind) fail('INVALID_TOOL_RESULT');
+      if (openCall === undefined) {
         // Avoid decoding base64/PNG images on unlinked outputs; normalizeChatRequest will reject
         // the orphan call_id with INVALID_TOOL_RESULT after validating earlier call arguments.
         messages.push({ role: 'tool', tool_call_id: callId, content: '' });
       } else {
+        if (isFunctionOutput) {
+          if (item.name !== undefined && item.name !== null && item.name !== openCall.name) {
+            fail('INVALID_TOOL_RESULT', 400, 'input.name');
+          }
+          if (item.namespace !== undefined && item.namespace !== null && item.namespace !== openCall.namespace) {
+            fail('INVALID_TOOL_RESULT', 400, 'input.namespace');
+          }
+        }
         openCalls.delete(callId);
         pushToolOutput(callId, item.output);
       }
