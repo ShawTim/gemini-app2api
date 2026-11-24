@@ -1420,6 +1420,106 @@ test('pure refactored units: selectIdleDeadline, planRetry, wirePhase/attemptDis
     lastTextProgressAt: 9_900,
   }, now), { kind: 'post_tool_error', ms: 50 });
 
+  // Issue #9: awaitingOptionalTool uses postOutputToolIdleMs anchored on lastGenerationProgressAt,
+  // bounded by maxPostOutputThoughtHoldMs anchored on lastTextProgressAt; null disables cleanly.
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: false,
+    hasText: true,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: true,
+    awaitingOptionalTool: true,
+    postOutputIdleMs: 15_000,
+    postOutputToolIdleMs: 45_000,
+    maxPostOutputThoughtHoldMs: 135_000,
+    lastTextProgressAt: 0,
+    lastGenerationProgressAt: 8_000,
+  }, now), { kind: 'post_output', ms: 43_000 });
+  // Thought-only progress cap bounds awaitingOptionalTool from lastTextProgressAt
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: false,
+    hasText: true,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: true,
+    awaitingOptionalTool: true,
+    postOutputIdleMs: 15_000,
+    postOutputToolIdleMs: 45_000,
+    maxPostOutputThoughtHoldMs: 12_000,
+    lastTextProgressAt: 0,
+    lastGenerationProgressAt: 9_000,
+  }, now), { kind: 'post_output', ms: 2_000 });
+  // postOutputToolIdleMs: null preserves null disable semantics
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: false,
+    hasText: true,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: true,
+    awaitingOptionalTool: true,
+    postOutputIdleMs: 15_000,
+    postOutputToolIdleMs: null,
+    lastTextProgressAt: 0,
+    lastGenerationProgressAt: 9_000,
+  }, now), { kind: 'post_output', ms: null });
+  // Non-tool turns (awaitingOptionalTool: false) ignore postOutputToolIdleMs and lastGenerationProgressAt
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: false,
+    hasText: true,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: true,
+    awaitingOptionalTool: false,
+    postOutputIdleMs: 15_000,
+    postOutputToolIdleMs: 45_000,
+    lastTextProgressAt: 0,
+    lastGenerationProgressAt: 9_500,
+  }, now), { kind: 'post_output', ms: 5_000 });
+  // post_tool and post_complete ignore lastGenerationProgressAt (thoughts never extend completed or post-tool clocks)
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: false,
+    hasText: true,
+    hasLiveCalls: true,
+    streamingTool: false,
+    postToolIdleMs: 6_000,
+    cleanOutput: false,
+    awaitingOptionalTool: false,
+    lastTextProgressAt: 5_000,
+    lastGenerationProgressAt: 9_900,
+  }, now), { kind: 'post_tool', ms: 1_000 });
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: true,
+    modelCompleteAt: 8_500,
+    postCompleteGraceMs: 2_000,
+    hasText: true,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: true,
+    awaitingOptionalTool: true,
+    postOutputIdleMs: 15_000,
+    postOutputToolIdleMs: 45_000,
+    lastTextProgressAt: 5_000,
+    lastGenerationProgressAt: 9_900,
+  }, now), { kind: 'post_complete', ms: 500 });
+
   // 2. planRetry: shortOutputRetry blocks auth/precondition/downgrade/unpermitted-quota while keeping 1-time short-fragment replacement
   const shortOutAuth = {
     error: Object.assign(new Error('auth'), { code: 'NATIVE_PERMISSION_OR_AUTH', status: 403, shortOutput: true }),

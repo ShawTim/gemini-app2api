@@ -73,6 +73,20 @@ export function selectIdleDeadline(facts, now = Date.now()) {
     };
   }
   if (facts.cleanOutput) {
+    if (facts.awaitingOptionalTool) {
+      const toolBudgetMs = facts.postOutputToolIdleMs === undefined ? facts.postOutputIdleMs : facts.postOutputToolIdleMs;
+      if (toolBudgetMs === null) return { kind: 'post_output', ms: null };
+      const progressAnchor = facts.lastGenerationProgressAt ?? facts.lastTextProgressAt;
+      const idleRemaining = Math.max(0, toolBudgetMs - elapsed(progressAnchor));
+      const maxHoldMs = facts.maxPostOutputThoughtHoldMs;
+      const capRemaining = (maxHoldMs !== null && maxHoldMs !== undefined && facts.lastTextProgressAt !== null && facts.lastTextProgressAt !== undefined)
+        ? Math.max(0, maxHoldMs - elapsed(facts.lastTextProgressAt))
+        : null;
+      return {
+        kind: 'post_output',
+        ms: capRemaining === null ? idleRemaining : Math.min(idleRemaining, capRemaining),
+      };
+    }
     return {
       kind: 'post_output',
       ms: facts.postOutputIdleMs === null ? null : Math.max(0, facts.postOutputIdleMs - elapsed(facts.lastTextProgressAt)),
@@ -150,7 +164,7 @@ const validateIdleMs = (value, name) => {
 const IDLE_TIMEOUT_SENTINEL = Symbol('IDLE_TIMEOUT_SENTINEL');
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 6_000, postOutputIdleMs = 15_000, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 6_000, postOutputIdleMs = 15_000, postOutputToolIdleMs = 45_000, maxPostOutputThoughtHoldMs = undefined, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
@@ -159,6 +173,10 @@ export class NativeDirectProvider {
     const resolvedPostCompleteGraceMs = validateIdleMs(postCompleteGraceMs, 'postCompleteGraceMs');
     const resolvedPostToolIdleMs = validateIdleMs(postToolIdleMs, 'postToolIdleMs');
     const resolvedPostOutputIdleMs = validateIdleMs(postOutputIdleMs, 'postOutputIdleMs');
+    const resolvedPostOutputToolIdleMs = validateIdleMs(postOutputToolIdleMs, 'postOutputToolIdleMs');
+    const resolvedMaxPostOutputThoughtHoldMs = maxPostOutputThoughtHoldMs === undefined
+      ? undefined
+      : validateIdleMs(maxPostOutputThoughtHoldMs, 'maxPostOutputThoughtHoldMs');
     if (continuation !== false) throw protocolError('UNSUPPORTED_CONTINUATION', 400);
     if (typeof allowAutoModel !== 'boolean') throw new TypeError('invalid auto model policy');
     const resolvedAlias = canonicalModel(modelAlias);
@@ -168,6 +186,8 @@ export class NativeDirectProvider {
     this.postCompleteGraceMs = resolvedPostCompleteGraceMs;
     this.postToolIdleMs = resolvedPostToolIdleMs;
     this.postOutputIdleMs = resolvedPostOutputIdleMs;
+    this.postOutputToolIdleMs = resolvedPostOutputToolIdleMs;
+    this.maxPostOutputThoughtHoldMs = resolvedMaxPostOutputThoughtHoldMs;
     this.downloadImages = downloadImages;
     this.blobCache = blobCache ?? null;
     if (typeof allowTextSnapshotReplacement !== 'boolean') throw new TypeError('invalid snapshot policy');
@@ -322,6 +342,14 @@ export class NativeDirectProvider {
     const postOutputIdleMs = context.postOutputIdleMs === undefined
       ? this.postOutputIdleMs
       : validateIdleMs(context.postOutputIdleMs, 'postOutputIdleMs');
+    const postOutputToolIdleMs = context.postOutputToolIdleMs === undefined
+      ? this.postOutputToolIdleMs
+      : validateIdleMs(context.postOutputToolIdleMs, 'postOutputToolIdleMs');
+    const maxPostOutputThoughtHoldMs = context.maxPostOutputThoughtHoldMs !== undefined
+      ? validateIdleMs(context.maxPostOutputThoughtHoldMs, 'maxPostOutputThoughtHoldMs')
+      : this.maxPostOutputThoughtHoldMs !== undefined
+        ? this.maxPostOutputThoughtHoldMs
+        : (postOutputToolIdleMs === null ? null : Math.min(600_000, postOutputToolIdleMs * 3));
     const body = normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
     if (body.native_search) return this.runNativeSearch(accountId, body, onDelta, { ...context, timeoutMs });
     const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode, context.recoveryReason);
@@ -363,19 +391,20 @@ export class NativeDirectProvider {
     const requiresHydrogen = body.model === 'gemini-hydrogen';
     const requiresNeon = body.model === 'gemini-neon';
     let rawText = '', frames = 0, received = 0, observedMode = null, observedThinking = null;
-    let modelComplete = false, modelCompleteAt = null, lastTextProgressAt = null, ended = false, grpc = null, httpStatus = null, downgrade = false, phase = 'auth';
+    let modelComplete = false, modelCompleteAt = null, lastTextProgressAt = null, lastGenerationProgressAt = null, ended = false, grpc = null, httpStatus = null, downgrade = false, phase = 'auth';
+    let thoughtHighWaterBytes = 0, allowThoughtRebase = false;
     let observedFallback = null, downgradeReason = null, observedAttribution = null;
     const attributionMatches = value => (!requiresHydrogen || HYDROGEN_ATTRIBUTION.test(value ?? '')) && (!requiresNeon || NEON_ATTRIBUTION.test(value ?? ''));
     const attributionVerified = () => attributionMatches(observedAttribution);
     let snapshotId = null, revisionCount = 0, quotaObservation = null, quotaFrames = 0;
     let emptyResponseReason = null, outputObserved = false, responseLimitReason = null, outputFailureReason = null;
-    const outputShape = { nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeStructuredOutputPresent: false, nativeRefusalPresent: false };
+    const outputShape = { nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeThoughtBytes: 0, nativeStructuredOutputPresent: false, nativeRefusalPresent: false };
     const incremental = context.incrementalOutput === true && !body.response_format;
     const identity = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model: body.model,
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
       ...((body.reasoning_effort ?? body.reasoning?.effort) === undefined ? {} : { requestedReasoningEffort: body.reasoning_effort ?? body.reasoning?.effort }) };
-    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorTailStart = 0, liveToolErrorDeadline = null, readExit = 'none', sinkFailed = false;
+    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorTailStart = 0, liveToolErrorDeadline = null, validatedIdleOutput = null, readExit = 'none', sinkFailed = false;
     const deliver = async event => {
       try { await onDelta(event); }
       catch (error) { sinkFailed = true; throw error; }
@@ -463,13 +492,13 @@ export class NativeDirectProvider {
         if (liveCalls.length > 0) return (cachedFallbackResult = { kind: 'none' });
         try {
           const probeCalls = probeItems.filter(it => it.type === 'call').map(it => it.call);
-          const probeContent = probeItems.filter(it => it.type === 'content').map(it => it.text).join('');
+          let probeContent = probeItems.filter(it => it.type === 'content').map(it => it.text).join('');
           if (!outputShape.nativeStructuredOutputPresent && softErrorReason(probeContent, body, probeCalls.length)) return (cachedFallbackResult = { kind: 'none' });
           if (body.parallel_tool_calls === false && probeCalls.length > 1) return (cachedFallbackResult = { kind: 'none' });
           validateToolCompletion(probeCalls, policy);
           if (!probeCalls.length && !probeContent.trim()) return (cachedFallbackResult = { kind: 'none' });
-          if (body.response_format && !probeCalls.length) validateStructuredOutputText(probeContent, body.response_format);
-          return (cachedFallbackResult = { kind: 'clean_output' });
+          if (body.response_format && !probeCalls.length) probeContent = validateStructuredOutputText(probeContent, body.response_format);
+          return (cachedFallbackResult = { kind: 'clean_output', hasCalls: probeCalls.length > 0, content: probeContent, calls: probeCalls });
         } catch {
           return (cachedFallbackResult = { kind: 'none' });
         }
@@ -494,26 +523,32 @@ export class NativeDirectProvider {
         const candidateText = liveContent + liveSplitter.preview();
         if (!candidateText.trim()) return { kind: 'none' };
         if (!outputShape.nativeStructuredOutputPresent && softErrorReason(candidateText, body, 0)) return { kind: 'none' };
-        return { kind: 'clean_output' };
+        return { kind: 'clean_output', hasCalls: false };
       };
       const nextEventWithIdle = async () => {
         const verified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
         const snap = (verified && !liveToolError) ? classifyIdleSnapshot() : { kind: 'none' };
+        const hasParsedCalls = liveCalls.length > 0 || snap.hasCalls === true;
+        const awaitingOptionalTool = policy.enabled && policy.choice === 'auto' && !hasParsedCalls;
         const { kind: idleKind, ms: idleMs } = selectIdleDeadline({
           verified,
           hasText: rawText.trim().length > 0,
           hasLiveToolError: Boolean(liveToolError),
           hasClosedToolError: snap.kind === 'closed_tool_error',
           modelComplete,
-          hasLiveCalls: liveCalls.length > 0,
+          hasLiveCalls: hasParsedCalls,
           streamingTool: snap.kind === 'streaming_tool',
-          cleanOutput: snap.kind === 'clean_output',
+          cleanOutput: snap.kind === 'clean_output' && !hasParsedCalls,
+          awaitingOptionalTool,
           liveToolErrorDeadline,
           lastTextProgressAt,
+          lastGenerationProgressAt,
           modelCompleteAt,
           postCompleteGraceMs,
           postToolIdleMs,
           postOutputIdleMs,
+          postOutputToolIdleMs,
+          maxPostOutputThoughtHoldMs,
         });
         const nextPromise = iterator.next();
         if (idleMs === null) return bounded(nextPromise);
@@ -559,11 +594,14 @@ export class NativeDirectProvider {
           });
           try { turn?.cancel(); } catch {}
           const idleError = protocolError('NATIVE_TURN_TIMEOUT', 504);
-          if (idleKind === 'post_tool' && item.verified && liveCalls.length > 0) {
+          const finalSnap = item.verified ? classifyIdleSnapshot() : { kind: 'none' };
+          if (idleKind === 'post_tool' && item.verified && (liveCalls.length > 0 || finalSnap.hasCalls === true)) {
             idleError.postToolIdleStall = true;
+            if (!incremental && finalSnap.kind === 'clean_output') validatedIdleOutput = finalSnap;
           }
-          if (idleKind === 'post_output' && item.verified && classifyIdleSnapshot().kind === 'clean_output') {
+          if (idleKind === 'post_output' && item.verified && finalSnap.kind === 'clean_output' && !finalSnap.hasCalls && liveCalls.length === 0) {
             idleError.postOutputIdleStall = true;
+            if (!incremental) validatedIdleOutput = finalSnap;
           }
           throw idleError;
         }
@@ -582,6 +620,7 @@ export class NativeDirectProvider {
           if (info?.outputShape) {
             outputObserved = true;
             outputShape.nativeShareableTextBytes = Math.max(outputShape.nativeShareableTextBytes, info.outputShape.nativeShareableTextBytes);
+            outputShape.nativeThoughtBytes = Math.max(outputShape.nativeThoughtBytes, info.outputShape.nativeThoughtBytes ?? 0);
             for (const key of ['nativeThoughtsPresent', 'nativeStructuredOutputPresent', 'nativeRefusalPresent']) outputShape[key] ||= info.outputShape[key];
             if (info.outputShape.nativeCompletenessState !== undefined) outputShape.nativeCompletenessState = info.outputShape.nativeCompletenessState;
           }
@@ -641,15 +680,35 @@ export class NativeDirectProvider {
               }
             }
             if (id) snapshotId = id;
-            if (!extendsPrior) revisionCount++;
+            if (!extendsPrior) {
+              revisionCount++;
+              thoughtHighWaterBytes = 0;
+              allowThoughtRebase = false;
+            }
             if (info.text !== rawText) {
+              const progressAt = Date.now();
               modelComplete = info.completed;
-              modelCompleteAt = modelComplete ? Date.now() : null;
-              lastTextProgressAt = Date.now();
+              modelCompleteAt = modelComplete ? progressAt : null;
+              lastTextProgressAt = progressAt;
+              lastGenerationProgressAt = progressAt;
+              allowThoughtRebase = true;
             }
             rawText = info.text;
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
+          }
+          const frameThoughtBytes = info.outputShape?.nativeThoughtBytes ?? 0;
+          if (frameThoughtBytes > 0) {
+            if (frameThoughtBytes > thoughtHighWaterBytes) {
+              thoughtHighWaterBytes = frameThoughtBytes;
+              allowThoughtRebase = false;
+              if (lastTextProgressAt !== null) lastGenerationProgressAt = Date.now();
+            } else if (frameThoughtBytes < thoughtHighWaterBytes && allowThoughtRebase) {
+              // Post-text new thought block restarted at a smaller byte count: rebase once
+              // without advancing the clock; a subsequent strictly larger frame must prove progress.
+              thoughtHighWaterBytes = frameThoughtBytes;
+              allowThoughtRebase = false;
+            }
           }
           if (incremental && !liveToolError && modeMatches(observedMode) && attributionVerified() && liveSyncedLength < rawText.length) {
             const delta = rawText.slice(liveSyncedLength);
@@ -799,6 +858,17 @@ export class NativeDirectProvider {
         try { await publish(liveSplitter.flush()); }
         catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }
       }
+      const nonIncrementalPartial = (!incremental && !liveToolError && modeVerified &&
+        (error?.postOutputIdleStall || error?.postToolIdleStall) &&
+        validatedIdleOutput && (validatedIdleOutput.content.length || validatedIdleOutput.calls.length))
+        ? validatedIdleOutput
+        : null;
+      if (nonIncrementalPartial && !sinkFailed) {
+        try {
+          if (nonIncrementalPartial.content) await deliver({ content: nonIncrementalPartial.content, response: { ...identity, thinkingLevel: observedThinking } });
+          for (const call of nonIncrementalPartial.calls) await deliver({ call, response: { ...identity, thinkingLevel: observedThinking } });
+        } catch { /* Preserve safe failure if sink write failed. */ }
+      }
       const safe = safeFailure(error);
       if (!modeVerified) safe.unverifiedOutput = true;
       note('provider_failure', { code: safe.code });
@@ -828,6 +898,8 @@ export class NativeDirectProvider {
         ...(emptyResponseReason ? { emptyResponseReason } : {}),
       });
       if (incremental && modeVerified && (publishedContent.length || publishedCalls)) safe.partialResult = { ...identity, content: publishedContent, calls: liveCalls.slice(0, publishedCalls),
+        thinkingLevel: observedThinking, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), nativeEvidence: safe.nativeEvidence };
+      else if (nonIncrementalPartial) safe.partialResult = { ...identity, content: nonIncrementalPartial.content, calls: nonIncrementalPartial.calls,
         thinkingLevel: observedThinking, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), nativeEvidence: safe.nativeEvidence };
       throw safe;
     }

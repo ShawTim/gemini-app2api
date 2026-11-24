@@ -15,7 +15,17 @@ export function inspectNativeOutput(fields) {
   const shareable = singular(mf, 7), thoughts = singular(mf, 12);
   const tf = thoughts ? parse(thoughts.payload) : [];
   const thoughtText = singular(tf, 1);
-  const thoughtsPresent = !!thoughtText?.payload.length || tf.some(field => field.number === 3 && field.wire === 2 && field.payload.length > 0);
+  let thoughtBytes = thoughtText?.payload.length ?? 0;
+  for (const field of tf) {
+    if (field.number === 3 && field.wire === 2 && field.payload.length > 0) thoughtBytes += field.payload.length;
+  }
+  // Structured thought headers (ModelResponse field 16) can repeat; sum wire===2 payloads without singular().
+  let structuredThoughtHeaderBytes = 0;
+  for (const field of mf) {
+    if (field.number === 16 && field.wire === 2 && field.payload.length > 0) structuredThoughtHeaderBytes += field.payload.length;
+  }
+  const nativeThoughtBytes = thoughtBytes + structuredThoughtHeaderBytes;
+  const thoughtsPresent = thoughtBytes > 0;
   // Descriptor model field19 is completenessState. Retain only the bounded raw
   // enum for diagnostics; its values are not established as acceptance rules.
   const completeness = mf.filter(field => field.number === 19);
@@ -25,6 +35,7 @@ export function inspectNativeOutput(fields) {
   // Native media/tree/artifact/goal channels are not caller-owned prompt tools.
   const structured = [4, 5, 13, 21, 23, 24, 25].some(number => mf.some(field => field.number === number && field.payload.length > 0));
   return { nativeShareableTextBytes: shareable?.payload.length ?? 0, nativeThoughtsPresent: thoughtsPresent,
+    nativeThoughtBytes,
     nativeStructuredOutputPresent: structured, nativeRefusalPresent: refusal,
     ...(Number.isSafeInteger(completenessState) && completenessState >= 0 && completenessState <= 0x7fffffff ? { nativeCompletenessState: completenessState } : {}) };
 }

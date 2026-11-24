@@ -87,6 +87,7 @@ export function safeNativeEvidence(value) {
   const emptyResponseReason = ['no_text', 'whitespace_only', 'thoughts_only', 'post_parse_empty'].includes(value.emptyResponseReason) ? value.emptyResponseReason : null;
   const nativeTextBytes = bounded(value.nativeTextBytes, 0, 8 * 1024 * 1024);
   const nativeShareableTextBytes = bounded(value.nativeShareableTextBytes, 0, 8 * 1024 * 1024);
+  const nativeThoughtBytes = bounded(value.nativeThoughtBytes, 0, 8 * 1024 * 1024);
   const nativeResponseRevisions = bounded(value.nativeResponseRevisions, 0, 4096);
   const nativeCompletenessState = bounded(value.nativeCompletenessState, 0, 0x7fffffff);
   return {
@@ -111,6 +112,7 @@ export function safeNativeEvidence(value) {
     ...(emptyResponseReason ? { emptyResponseReason } : {}),
     ...(nativeTextBytes !== null ? { nativeTextBytes } : {}),
     ...(nativeShareableTextBytes !== null ? { nativeShareableTextBytes } : {}),
+    ...(nativeThoughtBytes !== null ? { nativeThoughtBytes } : {}),
     ...(nativeResponseRevisions !== null ? { nativeResponseRevisions } : {}),
     ...(typeof value.nativeResponseIdentityVerified === 'boolean' ? { nativeResponseIdentityVerified: value.nativeResponseIdentityVerified } : {}),
     ...(['provider_publish', 'snapshot_stream', 'snapshot_identity', 'delivery_reset', 'delivery_final'].includes(value.nonMonotonicSite) ? { nonMonotonicSite: value.nonMonotonicSite } : {}),

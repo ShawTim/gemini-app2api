@@ -92,9 +92,13 @@ function buildSyntheticLongMessages(targetChars = 600_000) {
   return { messages, totalChars, turns: turn };
 }
 
-function makeNativeFrame(text, { id = 'resp-adv-1', complete = true, mode = 3, thinking = 2 } = {}) {
+function makeNativeFrame(text, { id = 'resp-adv-1', complete = true, mode = 3, thinking = 2, thoughtText = null, thoughtHeaders = [] } = {}) {
+  const modelParts = [m(1, Buffer.from(id))];
+  if (text !== null && text !== undefined) modelParts.push(m(2, m(1, Buffer.from(text))));
+  if (thoughtText !== null && thoughtText !== undefined && thoughtText.length > 0) modelParts.push(m(12, m(1, Buffer.from(thoughtText))));
+  for (const hdr of thoughtHeaders) modelParts.push(m(16, Buffer.from(hdr)));
   return m(1003, m(1, Buffer.concat([
-    m(1, Buffer.concat([m(1, Buffer.from(id)), m(2, m(1, Buffer.from(text)))])),
+    m(1, Buffer.concat(modelParts)),
     v(9, Number(complete)),
     m(30, Buffer.from('Used 4 Neon High model')),
     v(41, mode),
@@ -600,6 +604,7 @@ test('verified post_tool and post_output idle stalls keep sticky session pinned 
   t.after(f.close);
   f.app.provider.postToolIdleMs = 50;
   f.app.provider.postOutputIdleMs = 50;
+  f.app.provider.postOutputToolIdleMs = 50;
   const PNG_1X1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
   const goodCall = toolFence('read', { path: 'src/app.mjs' });
   let uploadCalls = 0;
@@ -731,4 +736,261 @@ test('Issue #6: Responses SSE short verified postOutputIdleStall completes with 
   assert.match(w2, /Follow-up turn succeeded cleanly\./);
   assert.equal(f.app.overview().requests[0].accountId, acc1);
   assert.equal(r2.headers.get('x-gemini-failover-reason'), null);
+});
+
+test('Issue #9: tool_choice=auto pre-fence preamble survives >postOutputIdleMs pause and delivers large tool_call on both Responses SSE and JSON, while true stalls stay bounded', async t => {
+  const f = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: true });
+  t.after(f.close);
+  f.app.provider.postCompleteGraceMs = 40;
+  f.app.provider.postToolIdleMs = 50;
+  f.app.provider.postOutputIdleMs = 60;
+  f.app.provider.postOutputToolIdleMs = 260;
+
+  const responsesTools = PI_SHAPED_TOOLS.map(t => ({ type: 'function', ...t.function }));
+  const largePayload = 'export const line = "synthetic-content";\n'.repeat(120);
+  const fullToolText = `Let me write the migration script to src/\n${toolFence('write', { path: 'src/migrate.mjs', content: largePayload })}`;
+
+  // 1. Both SSE and JSON: preamble -> 120ms silence (> 60ms postOutputIdleMs, < 260ms postOutputToolIdleMs) -> large tool_call succeeds on attempt 1.
+  for (const stream of [true, false]) {
+    let attempts = 0;
+    f.app.provider.openTurn = () => {
+      attempts++;
+      return {
+        events: (async function* () {
+          yield { type: 'headers', status: 200 };
+          yield { type: 'frame', bytes: makeNativeFrame('Let me write the migration script to src/', { complete: false }) };
+          await new Promise(r => setTimeout(r, 120));
+          yield { type: 'frame', bytes: makeNativeFrame(fullToolText, { complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    };
+    const res = await f.api('/v1/responses', {
+      method: 'POST',
+      body: { model: 'gemini-neon', input: 'Write src/migrate.mjs', tools: responsesTools, tool_choice: 'auto', stream },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(attempts, 1, `stream=${stream} must succeed on attempt 1 without premature cancel`);
+    if (stream) {
+      const wire = await res.text();
+      const evs = wire.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
+      const completed = evs.find(e => e.type === 'response.completed');
+      assert.ok(completed, 'must emit response.completed');
+      assert.equal(completed.incomplete, undefined);
+      const calls = completed.response.output.filter(o => o.type === 'function_call');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].name, 'write');
+      assert.equal(JSON.parse(calls[0].arguments).path, 'src/migrate.mjs');
+    } else {
+      const body = await res.json();
+      assert.equal(body.status, 'completed');
+      assert.equal(body.incomplete, undefined);
+      const calls = body.output.filter(o => o.type === 'function_call');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].name, 'write');
+    }
+  }
+
+  // 2. True stall with tool_choice=auto (never emits a tool_call) still finishes promptly around postOutputToolIdleMs
+  //    with response.completed + error: null (Issue #6 preserved, never waits for 600s timeoutMs).
+  let stalledAttempts = 0;
+  f.app.provider.openTurn = () => {
+    stalledAttempts++;
+    return {
+      events: (async function* () {
+        yield { type: 'headers', status: 200 };
+        yield { type: 'frame', bytes: makeNativeFrame('All checks passed.', { complete: false }) };
+        await new Promise(() => {});
+      })(),
+      cancel() {},
+    };
+  };
+  const tToolStall = Date.now();
+  const rToolStall = await f.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-neon', input: 'Summarize', tools: responsesTools, tool_choice: 'auto', stream: true },
+  });
+  const elapsedToolStall = Date.now() - tToolStall;
+  assert.equal(rToolStall.status, 200);
+  const wToolStall = await rToolStall.text();
+  const evsToolStall = wToolStall.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
+  const compToolStall = evsToolStall.find(e => e.type === 'response.completed');
+  assert.ok(compToolStall);
+  assert.equal(compToolStall.response.error, null);
+  assert.equal(stalledAttempts, 1, 'clean post_output stall must stay 1-attempt (Issue #6)');
+  assert.ok(elapsedToolStall >= 200 && elapsedToolStall < 1500, `tool_choice=auto stall should finish near 260ms, took ${elapsedToolStall}ms`);
+
+  // 3. Plain text turn (tool_choice=none) still uses shorter postOutputIdleMs (60ms), not postOutputToolIdleMs (260ms).
+  const tPlainStall = Date.now();
+  const rPlainStall = await f.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-neon', input: 'Summarize', tools: responsesTools, tool_choice: 'none', stream: true },
+  });
+  const elapsedPlainStall = Date.now() - tPlainStall;
+  assert.equal(rPlainStall.status, 200);
+  await rPlainStall.text();
+  assert.ok(elapsedPlainStall < 220, `tool_choice=none must keep shorter postOutputIdleMs (60ms), took ${elapsedPlainStall}ms`);
+});
+
+test('Issue #9: thought growth + one-shot rebase extend awaitingOptionalTool safely while duplicates, oscillation, post_complete, and thought-only cap stay strictly bounded', async t => {
+  const f = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: true });
+  t.after(f.close);
+  f.app.provider.postCompleteGraceMs = 40;
+  f.app.provider.postToolIdleMs = 50;
+  f.app.provider.postOutputIdleMs = 50;
+  f.app.provider.postOutputToolIdleMs = 110;
+  f.app.provider.maxPostOutputThoughtHoldMs = 360;
+
+  const responsesTools = PI_SHAPED_TOOLS.map(t => ({ type: 'function', ...t.function }));
+  const finalToolText = `Preparing patch.\n${toolFence('read', { path: 'src/index.mjs' })}`;
+
+  // 1. Pre-preamble thought (500B) -> preamble -> rebased smaller thought block (100B -> 180B -> 260B -> 340B)
+  //    spaced across > postOutputToolIdleMs (110ms) keeps turn alive until tool_call arrives.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('', { complete: false, thoughtText: 'T'.repeat(500) }) };
+      yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false }) };
+      await new Promise(r => setTimeout(r, 40));
+      yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false, thoughtText: 'a'.repeat(100) }) }; // rebase
+      await new Promise(r => setTimeout(r, 40));
+      yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false, thoughtText: 'a'.repeat(180) }) }; // +80B
+      await new Promise(r => setTimeout(r, 60));
+      yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false, thoughtText: 'a'.repeat(260), thoughtHeaders: ['h1'] }) }; // +82B
+      await new Promise(r => setTimeout(r, 60));
+      yield { type: 'frame', bytes: makeNativeFrame(finalToolText, { complete: true }) };
+      yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const rGrow = await f.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-neon', input: 'Read index', tools: responsesTools, tool_choice: 'auto', stream: true },
+  });
+  assert.equal(rGrow.status, 200);
+  const wGrow = await rGrow.text();
+  assert.match(wGrow, /src\/index\.mjs/);
+  assert.equal(wGrow.includes('"incomplete":true'), false);
+
+  // 2. Duplicate or oscillating/shrinking thoughts MUST NOT extend postOutputToolIdleMs forever.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('Checking state.', { complete: false, thoughtText: 'x'.repeat(200) }) };
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 25));
+        yield { type: 'frame', bytes: makeNativeFrame('Checking state.', { complete: false, thoughtText: 'x'.repeat(i % 2 === 0 ? 100 : 200) }) };
+      }
+    })(),
+    cancel() {},
+  });
+  const tOsc = Date.now();
+  const rOsc = await f.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-neon', input: 'Check', tools: responsesTools, tool_choice: 'auto', stream: true },
+  });
+  await rOsc.text();
+  const elapsedOsc = Date.now() - tOsc;
+  assert.equal(rOsc.status, 200);
+  assert.ok(elapsedOsc < 320, `oscillating/duplicate thoughts must not extend timer forever, took ${elapsedOsc}ms`);
+
+  // 3. Unbounded strictly-growing thoughts with zero visible text progress MUST hit maxPostOutputThoughtHoldMs cap.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('Still thinking.', { complete: false, thoughtText: 't'.repeat(50) }) };
+      for (let i = 1; i <= 40; i++) {
+        await new Promise(r => setTimeout(r, 30));
+        yield { type: 'frame', bytes: makeNativeFrame('Still thinking.', { complete: false, thoughtText: 't'.repeat(50 + i * 50) }) };
+      }
+    })(),
+    cancel() {},
+  });
+  const tCap = Date.now();
+  const rCap = await f.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-neon', input: 'Think', tools: responsesTools, tool_choice: 'auto', stream: true },
+  });
+  await rCap.text();
+  const elapsedCap = Date.now() - tCap;
+  assert.equal(rCap.status, 200);
+  assert.ok(elapsedCap >= 300 && elapsedCap < 900, `unbounded thoughts must stop at maxPostOutputThoughtHoldMs (~360ms), took ${elapsedCap}ms`);
+
+  // 4. Growing thoughts AFTER modelComplete=true MUST NOT extend postCompleteGraceMs (40ms).
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('Finished answer.', { complete: true, thoughtText: 't'.repeat(50) }) };
+      for (let i = 1; i <= 20; i++) {
+        await new Promise(r => setTimeout(r, 15));
+        yield { type: 'frame', bytes: makeNativeFrame('Finished answer.', { complete: true, thoughtText: 't'.repeat(50 + i * 50) }) };
+      }
+    })(),
+    cancel() {},
+  });
+  const tComplete = Date.now();
+  const rComplete = await f.api('/v1/responses', {
+    method: 'POST',
+    body: { model: 'gemini-neon', input: 'Done', tools: responsesTools, tool_choice: 'auto', stream: true },
+  });
+  const wComplete = await rComplete.text();
+  const elapsedComplete = Date.now() - tComplete;
+  assert.equal(rComplete.status, 200);
+  assert.match(wComplete, /Finished answer\./);
+  assert.ok(elapsedComplete < 220, `thoughts after modelComplete must not delay postCompleteGraceMs, took ${elapsedComplete}ms`);
+});
+
+test('Issue #9: closing tool fence without trailing newline uses postToolIdleMs and non-incremental response_format stall flushes validated JSON', async t => {
+  const f = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: true });
+  t.after(f.close);
+  f.app.provider.postToolIdleMs = 50;
+  f.app.provider.postOutputIdleMs = 60;
+  f.app.provider.postOutputToolIdleMs = 500;
+
+  // 1. Closing ``` without trailing newline must classify as post_tool (~50ms), NOT post_output_tool (~500ms).
+  const noTrailingLfTool = 'Running read.\n```tool_call\n{"name":"read","arguments":{"path":"src/no-lf.mjs"}}\n```';
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame(noTrailingLfTool, { complete: false }) };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  const tNoLf = Date.now();
+  const rNoLf = await f.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'gemini-neon', messages: [{ role: 'user', content: 'Read file' }], tools: PI_SHAPED_TOOLS, stream: true },
+  });
+  const wNoLf = await rNoLf.text();
+  const elapsedNoLf = Date.now() - tNoLf;
+  assert.equal(rNoLf.status, 200);
+  assert.match(wNoLf, /src\/no-lf\.mjs/);
+  assert.match(wNoLf, /"finish_reason":"tool_calls"/);
+  assert.ok(elapsedNoLf < 300, `closing fence without trailing LF should use postToolIdleMs (50ms), took ${elapsedNoLf}ms`);
+
+  // 2. Non-incremental response_format (json_object) stall with validated JSON flushes cleanly instead of GENERATION_FAILED.
+  f.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      if (opts?.emitHeaders) yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('{"ok":true,"count":3}', { complete: false }) };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  const rJson = await f.api('/v1/chat/completions', {
+    method: 'POST',
+    body: {
+      model: 'gemini-neon',
+      messages: [{ role: 'user', content: 'Return JSON' }],
+      response_format: { type: 'json_object' },
+      stream: true,
+    },
+  });
+  assert.equal(rJson.status, 200);
+  const wJson = await rJson.text();
+  assert.match(wJson, /\\"ok\\":true/);
+  assert.match(wJson, /"finish_reason":"stop"/);
+  assert.match(wJson, /"incomplete":true/);
 });
