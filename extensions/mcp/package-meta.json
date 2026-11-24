@@ -1,6 +1,6 @@
 {
   "name": "mcp-gemini-app",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Zero-dependency native Google Gemini HTTP/2 MCP server (ask_gemini, gemini_search, gemini_quota) over stdio using your Google Gemini subscription via OAuth.",
   "license": "MIT",
   "author": "shawtim",

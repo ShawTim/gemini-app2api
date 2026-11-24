@@ -2,6 +2,21 @@
 
 Release notes for Gemini App2API.
 
+## 1.8.1 — 2026-11-25
+
+### Responses Replay Compatibility (Fixes #8), Tool-Aware Long-Context Idle Patience (Fixes #9), and OpenCode V2 Dual Support (`pi-gemini-app@0.1.12`, `openclaw-gemini-app@0.1.8`, `opencode-gemini-app@0.1.4`, `mcp-gemini-app@0.1.3`)
+- **Standard OpenAI Responses Mid-Conversation Replay Compatibility (Fixes #8)** (`src/openai-contract.mjs`, `src/responses-tool-namespaces.mjs`, `src/gateway/app.mjs`, `docs/API_SUPPORT.md`):
+  - Accepted inert assistant `message.phase` (`"commentary"`, `"final_answer"`, `null`), coalescing interleaved assistant commentary between parallel tool calls so it never trips `PENDING_TOOL_CALLS`.
+  - Validated and transparently stripped replayed `type: "reasoning"` items under a dedicated `16 MiB` stripped-reasoning budget without flushing deferred tool images; unified `usage.input_tokens` / `prompt_tokens` estimation from the single-source canonical prompt (`CANONICAL_PROMPT_CHARS` / `CANONICAL_IMAGE_COUNT`) so stripped `encrypted_content` and JSON escapes never inflate token estimates.
+  - Accepted completed historical paired `custom_tool_call` / `custom_tool_call_output` items as read-only history replay (wrapped as `{"input":"..."}` with `<= 256 KiB` pre/post-serialization bounds, call-kind/`name`/`namespace`/duplicate-`call_id` linkage enforcement, and namespace alias reservation) while keeping active `tools` with `type: "custom"` fail-closed (`400 UNSUPPORTED_TOOL_TYPE`).
+  - Unified OpenAI SDK replay metadata validation (`id`, `status`, `caller`, `async`, `function_call_output.{name, namespace}`), moved `input[].type` dispatch ahead of message key checks (`400 UNSUPPORTED_INPUT_TYPE` for opaque `compaction`, `additional_tools`, and `configuration_update`), and enforced `maxPromptBytes` before `request-resumption` cache lookup.
+- **Tool-Aware Post-Output Idle Patience & Bounded Thought-Progress Tracking (Fixes #9)** (`src/native-provider.mjs`, `src/gateway/output-recovery.mjs`, `src/gateway/native-evidence.mjs`):
+  - Added `postOutputToolIdleMs` (default `45s` via `Math.max(postOutputIdleMs, 45_000)`, inheriting `postOutputIdleMs: null` cleanly) exclusively for `tool_choice: "auto"` turns awaiting an optional tool call (`!hasParsedCalls && !streamingTool`), preventing premature 15s cancellation of `< 2,048B` pre-tool preambles on 180K–450K long-context turns while keeping `END_STREAM` (`0ms`), `modelComplete` (`2s`), `postToolIdleMs` (`6s`), and non-tool / `tool_choice: "none"` (`15s`) unchanged.
+  - Added scoped `lastGenerationProgressAt` tracking on `ModelResponse` field `12` + field `16` `nativeThoughtBytes` with one-shot post-text rebase (duplicate/oscillating frames never extend timers) and a finite `maxPostOutputThoughtHoldMs` cap (`135s` default) anchored on `lastTextProgressAt` so turns never hang to `timeoutMs`.
+  - Armed `post_complete` grace for empty/thoughts-only `modelComplete: true` turns missing `END_STREAM` (exiting promptly via `validate` as `INCOMPLETE_NATIVE_RESPONSE` with `wireEnded: false`), unified ordered non-incremental item delivery for `response_format` stalls, and propagated flush sink errors instead of marking undelivered calls as benign stalls.
+- **OpenCode V2 (`./server`) + V1 (`.`) Dual Plugin Support** (`extensions/opencode/v2.js`, `extensions/opencode/models.js`, `scripts/build-opencode-package.mjs`, `scripts/check-opencode-package.mjs`):
+  - Added zero-dependency OpenCode V2 server plugin entrypoint (`exports["./server"]`) alongside V1 (`exports["."]`) with live OAuth connect/cancel, Free vs Pro tier gating, streaming SSE + tool calling, and real V1/V2 binary verification.
+
 ## 1.8.0 — 2026-11-24
 
 ### Native Windows (`win32`) Support (Fixes #5), Strict Responses Proxy Compatibility (Fixes #6), Sticky Post-Idle Affinity, and State-Machine Refactor (`pi-gemini-app@0.1.11`, `openclaw-gemini-app@0.1.7`, `mcp-gemini-app@0.1.2`, `opencode-gemini-app@0.1.2`)
