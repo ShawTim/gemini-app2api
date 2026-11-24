@@ -16,7 +16,7 @@ import { RequestResumption } from './request-resumption.mjs';
 import { QuotaRefreshJobs } from './quota-refresh-jobs.mjs';
 import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
-import { measurePromptImagePayload } from '../openai-usage.mjs';
+import { measurePromptImagePayload, measureStrippedReplayChars } from '../openai-usage.mjs';
 import {
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   buildMcpToolDefinitions,
@@ -464,11 +464,12 @@ export function createGateway({
     timer.unref();
     controllers.add(controller);
     const { imageCount, imageUrlChars } = measurePromptImagePayload(body);
+    const strippedReplayChars = measureStrippedReplayChars(body);
     const delivery = createResponseDelivery(res, { route, stream: outputStreaming, model: canonical.model,
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
       ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => canonical[key] !== undefined),
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
-      promptChars: Math.max(0, (body.__promptChars ?? 0) - imageUrlChars), imageCount,
+      promptChars: Math.max(0, (body.__promptChars ?? 0) - imageUrlChars - strippedReplayChars), imageCount,
       deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
       signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000),
       keepaliveHeadersDelayMs: route === 'chat' ? keepaliveHeadersDelayMs : 0 });

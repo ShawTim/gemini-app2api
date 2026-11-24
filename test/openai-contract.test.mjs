@@ -4,6 +4,7 @@ import OpenAI from 'openai';
 import { NativeDirectProvider, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse } from '../src/native-provider.mjs';
 import { errorPayload } from '../src/gateway/app.mjs';
 import { PROMPT_MAX_BYTES, buildCanonicalPrompt } from '../src/openai-contract.mjs';
+import { measureStrippedReplayChars, estimateUsage } from '../src/openai-usage.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 
 const tool = { type: 'function', function: { name: 'lookup', description: 'Caller lookup', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'], additionalProperties: false } } };
@@ -523,4 +524,83 @@ test('assistant replay reasoning_content and reasoning metadata are accepted and
   }
   invalid(() => normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', reasoning_content: 123 }] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning_content');
   invalid(() => normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', reasoning: { text: 'bad' } }] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning');
+});
+
+test('Responses replay accepts assistant message.phase, strips bounded reasoning items, subtracts stripped usage chars, and fails closed on compaction/unknown input types', () => {
+  // 1. Assistant message.phase ("commentary", "final_answer", null) accepted and stripped; non-assistant or bad values rejected
+  const phased = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    input: [
+      { role: 'user', content: 'Check file' },
+      { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', phase: 'commentary', content: [{ type: 'output_text', text: 'Checking the file.' }] },
+      { type: 'message', id: 'msg_2', role: 'assistant', status: 'completed', phase: 'final_answer', content: [{ type: 'output_text', text: 'All good.' }] },
+      { type: 'message', id: 'msg_3', role: 'assistant', status: 'completed', phase: null, content: [{ type: 'output_text', text: 'Done.' }] },
+      { role: 'user', content: 'Next' },
+    ],
+  });
+  assert.equal(phased.body.messages.length, 5);
+  assert.equal(phased.body.messages[1].content, 'Checking the file.');
+  assert.equal(phased.body.messages[2].content, 'All good.');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'message', role: 'user', phase: 'final_answer', content: 'Hi' }] }), 'UNSUPPORTED_PARAMETER', 'input.phase');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'message', role: 'assistant', phase: 'thinking', content: 'Hi' }] }), 'UNSUPPORTED_PARAMETER', 'input.phase');
+
+  // 2. Replayed reasoning items (empty placeholder and populated summary/content/encrypted_content) are validated and stripped cleanly
+  const encryptedBlob = 'gAAAAAB_' + 'A'.repeat(20_000);
+  const withReasoning = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    include: ['reasoning.encrypted_content'],
+    input: [
+      { role: 'user', content: 'Hi' },
+      { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: null },
+      {
+        type: 'reasoning',
+        id: '',
+        status: 'completed',
+        summary: [{ type: 'summary_text', text: 'PRIVATE_SUMMARY_TRACE' }],
+        content: [{ type: 'reasoning_text', text: 'PRIVATE_REASONING_TRACE' }],
+        encrypted_content: encryptedBlob,
+      },
+      { type: 'message', role: 'assistant', status: 'completed', phase: 'final_answer', content: [{ type: 'output_text', text: 'Hello' }] },
+      { role: 'user', content: 'Follow up' },
+    ],
+  });
+  assert.equal(withReasoning.body.messages.length, 3);
+  const promptText = buildCanonicalPrompt(withReasoning.body).messages[0].content;
+  assert.equal(promptText.includes('PRIVATE_SUMMARY_TRACE'), false);
+  assert.equal(promptText.includes('PRIVATE_REASONING_TRACE'), false);
+  assert.equal(promptText.includes('gAAAAAB_'), false);
+
+  // Stripped reasoning chars are measured so usage estimation does not count opaque encrypted_content as prompt tokens
+  const stripped = measureStrippedReplayChars({
+    input: [
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: '12345' }], content: [{ type: 'reasoning_text', text: '6789' }], encrypted_content: encryptedBlob },
+    ],
+  });
+  assert.equal(stripped, encryptedBlob.length + 9);
+  const chatStripped = measureStrippedReplayChars({
+    messages: [{ role: 'assistant', content: 'ok', reasoning_content: 'abcdef', reasoning: 'gh' }],
+  });
+  assert.equal(chatStripped, 8);
+  assert.ok(estimateUsage({ promptChars: Math.max(0, 20_500 - stripped) }).prompt_tokens < 200);
+
+  // 3. Input containing ONLY reasoning items (with or without instructions) fails with INPUT_REQUIRED
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', id: 'rs_only', summary: [], encrypted_content: null }] }), 'INPUT_REQUIRED', 'input');
+  invalid(() => normalizeResponsesRequest({ instructions: 'be brief', input: [{ type: 'reasoning', id: 'rs_only', summary: [], encrypted_content: null }] }), 'INPUT_REQUIRED', 'input');
+
+  // 4. Malformed reasoning items fail closed
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', status: 'in_progress', summary: [] }, user] }), 'INVALID_INPUT_STATUS');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', summary: 'bad' }, user] }), 'INVALID_REASONING_ITEM', 'input.summary');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', summary: [{ type: 'output_text', text: 'x' }] }, user] }), 'UNSUPPORTED_CONTENT_TYPE', 'input.summary');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', content: [{ type: 'summary_text', text: 'x' }] }, user] }), 'UNSUPPORTED_CONTENT_TYPE', 'input.content');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', extra_key: 1 }, user] }), 'UNSUPPORTED_PARAMETER', 'input.extra_key');
+
+  // 5. Compaction, additional_tools, configuration_update, and unknown item types fail BEFORE message keys() with UNSUPPORTED_INPUT_TYPE
+  for (const unsupportedItem of [
+    { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque-blob' },
+    { type: 'additional_tools', role: 'developer', tools: [] },
+    { type: 'configuration_update', reasoning: { effort: 'high' } },
+    { type: 'web_search_call', id: 'ws_1', status: 'completed' },
+  ]) {
+    invalid(() => normalizeResponsesRequest({ input: [user, unsupportedItem] }), 'UNSUPPORTED_INPUT_TYPE', 'input.type');
+  }
 });

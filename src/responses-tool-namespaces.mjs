@@ -42,7 +42,7 @@ export function normalizeResponsesTools(payload) {
   // Reserve historical flat names too: an undeclared old call must not alias a
   // currently declared namespace tool. History is not current authorization.
   for (const item of Array.isArray(payload.input) ? payload.input : []) {
-    if (item?.type === 'function_call' && item.namespace == null && typeof item.name === 'string') reserved.add(item.name);
+    if ((item?.type === 'function_call' || item?.type === 'custom_tool_call') && item.namespace == null && typeof item.name === 'string') reserved.add(item.name);
   }
   let nextAlias = 0;
   const callName = (toolName, namespace) => {

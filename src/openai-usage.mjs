@@ -39,6 +39,34 @@ export function measurePromptImagePayload(body) {
   return { imageCount, imageUrlChars };
 }
 
+export function measureStrippedReplayChars(body) {
+  let strippedChars = 0;
+  if (Array.isArray(body?.messages)) {
+    for (const message of body.messages) {
+      if (message?.role !== 'assistant') continue;
+      if (typeof message.reasoning_content === 'string') strippedChars += message.reasoning_content.length;
+      if (typeof message.reasoning === 'string') strippedChars += message.reasoning.length;
+    }
+  }
+  if (Array.isArray(body?.input)) {
+    for (const item of body.input) {
+      if (item?.type !== 'reasoning') continue;
+      if (typeof item.encrypted_content === 'string') strippedChars += item.encrypted_content.length;
+      if (Array.isArray(item.summary)) {
+        for (const part of item.summary) {
+          if (typeof part?.text === 'string') strippedChars += part.text.length;
+        }
+      }
+      if (Array.isArray(item.content)) {
+        for (const part of item.content) {
+          if (typeof part?.text === 'string') strippedChars += part.text.length;
+        }
+      }
+    }
+  }
+  return strippedChars;
+}
+
 export function estimateUsage({ promptChars = 0, imageCount = 0, outputBytes = 0 } = {}) {
   const safePrompt = Number.isFinite(promptChars) && promptChars > 0 ? promptChars : 0;
   const safeImages = Number.isInteger(imageCount) && imageCount > 0 ? imageCount : 0;
