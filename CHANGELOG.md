@@ -2,6 +2,13 @@
 
 Release notes for Gemini App2API.
 
+## 1.8.2 — 2026-11-25
+
+### Hotfix: Restore `hasText` Guard on `post_complete` Grace Timer (`pi-gemini-app@0.1.13`, `openclaw-gemini-app@0.1.9`, `opencode-gemini-app@0.1.5`, `mcp-gemini-app@0.1.4`)
+- **Prevent premature `2s` cancellation of long-thinking `gemini-neon` turns** (`src/native-provider.mjs`):
+  - Restored `facts.modelComplete && facts.hasText` in `selectIdleDeadline()` and removed the `v1.8.1` empty-text `post_complete` cutoff. Real Gemini App streams emit intermediate pre-text frames carrying `field 9 = 1` (`completed = true`) with empty display text during deep thinking and pause `> 2s` before streaming the visible reply; arming the 2-second `post_complete` grace timer before any visible text arrived prematurely cancelled healthy turns with `INCOMPLETE_NATIVE_RESPONSE` → `GENERATION_FAILED`.
+  - Preserved all `v1.8.1` Issue #8 (Responses replay compatibility) and Issue #9 (`postOutputToolIdleMs`, bounded thought-progress tracking, ordered non-incremental delivery, incremental flush sink error propagation) fixes intact.
+
 ## 1.8.1 — 2026-11-25
 
 ### Responses Replay Compatibility (Fixes #8), Tool-Aware Long-Context Idle Patience (Fixes #9), and OpenCode V2 Dual Support (`pi-gemini-app@0.1.12`, `openclaw-gemini-app@0.1.8`, `opencode-gemini-app@0.1.4`, `mcp-gemini-app@0.1.3`)

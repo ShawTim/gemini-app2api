@@ -1081,12 +1081,14 @@ test('Issue #9: review-hardening invariants (empty completed hang, postOutputIdl
   );
 
   // 5. Intermediate pre-text frame with modelComplete=true and empty text followed by >postCompleteGraceMs pause
-  //    MUST NOT trigger a premature 2s cancel; once visible answer arrives, the turn succeeds cleanly.
+  //    MUST NOT trigger a premature 2s cancel, and subsequent text frames must refresh modelCompleteAt (not inherit t1).
   f.app.provider.openTurn = () => ({
     events: (async function* () {
       yield { type: 'frame', bytes: makeNativeFrame('', { complete: true }) };
       await new Promise(r => setTimeout(r, 120));
       yield { type: 'frame', bytes: makeNativeFrame('Delayed answer after pre-text complete frame.', { complete: true }) };
+      await new Promise(r => setTimeout(r, 15));
+      yield { type: 'frame', bytes: makeNativeFrame('Delayed answer after pre-text complete frame. Final tail.', { complete: true }) };
       yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
     })(),
     cancel() {},
@@ -1095,7 +1097,7 @@ test('Issue #9: review-hardening invariants (empty completed hang, postOutputIdl
     'acc-0',
     { model: 'gemini-neon', messages: [{ role: 'user', content: 'hi' }] },
   );
-  assert.equal(preTextCompleteRes.content, 'Delayed answer after pre-text complete frame.');
+  assert.equal(preTextCompleteRes.content, 'Delayed answer after pre-text complete frame. Final tail.');
 
   // 6. Setting postOutputIdleMs: null without postOutputToolIdleMs disables auto-tool post_output idle too.
   f.app.provider.postOutputIdleMs = null;
