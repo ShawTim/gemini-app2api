@@ -124,29 +124,32 @@ test('Responses historical custom_tool_call/output replay works safely with inte
     input: [
       { role: 'user', content: 'Update foo.js and inspect screenshot.' },
       { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'planning' }], encrypted_content: 'enc_1' },
-      { type: 'function_call', call_id: 'call_fn_1', name: 'Read', arguments: '{"path":"foo.js"}' },
+      { type: 'function_call', id: null, status: null, call_id: 'call_fn_1', name: 'Read', arguments: '{"path":"foo.js"}', caller: { type: 'direct' }, async: false },
       // Interleaved GPT-5 commentary between sibling tool calls must coalesce onto the open assistant turn
-      { type: 'message', role: 'assistant', status: 'completed', phase: 'commentary', content: [{ type: 'output_text', text: 'Applying patch now.' }] },
-      { type: 'custom_tool_call', id: 'ctc_1', status: 'completed', call_id: 'call_custom_1', name: 'ns_0', input: rawPatch },
-      { type: 'function_call_output', call_id: 'call_fn_1', status: 'completed', output: [{ type: 'input_text', text: 'file contents' }, { type: 'input_image', image_url: png1x1 }] },
+      { type: 'message', id: null, role: 'assistant', status: 'completed', phase: 'commentary', content: [{ type: 'output_text', text: 'Applying patch now.' }] },
+      { type: 'custom_tool_call', id: 'ctc_1', status: 'completed', call_id: 'call_custom_1', name: 'ns_0', input: rawPatch, caller: null, async: null },
+      { type: 'custom_tool_call', id: null, status: null, call_id: 'call_custom_2', namespace: 'codex', name: 'apply_patch', input: 'noop', caller: { type: 'direct' }, async: false },
+      { type: 'function_call_output', id: null, call_id: 'call_fn_1', name: 'Read', namespace: null, status: 'completed', caller: { type: 'direct' }, output: [{ type: 'input_text', text: 'file contents' }, { type: 'input_image', image_url: png1x1 }] },
       // Reasoning item between sibling outputs must NOT flush deferred tool images prematurely
       { type: 'reasoning', id: 'rs_2', summary: [], encrypted_content: null },
-      { type: 'custom_tool_call_output', id: 'ctco_1', status: 'completed', call_id: 'call_custom_1', output: 'Patch applied cleanly.' },
+      { type: 'custom_tool_call_output', id: 'ctco_1', status: 'completed', call_id: 'call_custom_1', caller: null, output: 'Patch applied cleanly.' },
+      { type: 'custom_tool_call_output', id: null, status: null, call_id: 'call_custom_2', caller: { type: 'direct' }, output: [{ type: 'input_text', text: 'screenshot attached' }, { type: 'input_image', image_url: png1x1 }] },
       { role: 'user', content: 'Now summarize.' },
     ],
   }).body;
 
   // Namespace tool avoided colliding with historical custom tool name "ns_0"
   assert.deepEqual(normalized.tools.map((t) => t.function.name), ['Read', 'ns_1']);
-  // Assistant turn coalesced commentary + both tool calls; both tool results precede the deferred image user message
+  // Assistant turn coalesced commentary + all three tool calls; all tool results precede the deferred image user message
   assert.equal(normalized.messages[1].role, 'assistant');
   assert.equal(normalized.messages[1].content, 'Applying patch now.');
-  assert.deepEqual(normalized.messages[1].tool_calls.map((c) => c.id), ['call_fn_1', 'call_custom_1']);
+  assert.deepEqual(normalized.messages[1].tool_calls.map((c) => c.id), ['call_fn_1', 'call_custom_1', 'call_custom_2']);
   assert.equal(JSON.parse(normalized.messages[1].tool_calls[1].function.arguments).input, rawPatch);
   assert.equal(normalized.messages[2].role, 'tool');
   assert.equal(normalized.messages[3].role, 'tool');
-  assert.equal(normalized.messages[4].role, 'user'); // deferred tool image flushed AFTER both tool outputs
-  assert.equal(normalized.messages[5].role, 'user');
+  assert.equal(normalized.messages[4].role, 'tool');
+  assert.equal(normalized.messages[5].role, 'user'); // deferred tool images flushed AFTER all tool outputs
+  assert.equal(normalized.messages[6].role, 'user');
 
   // Raw patch stays JSON-quoted inside [Conversation] and never appears in tool declarations
   const prompt = buildCanonicalPrompt(normalized).messages[0].content;
@@ -154,11 +157,27 @@ test('Responses historical custom_tool_call/output replay works safely with inte
   assert.ok(prompt.includes('Patch applied cleanly.'));
   assert.ok(prompt.includes(JSON.stringify({ input: rawPatch })));
 
-  // Active custom tool declarations remain strictly rejected
+  // Active custom tool declarations (including with format field) remain strictly rejected with UNSUPPORTED_TOOL_TYPE
   bad(() => normalizeResponsesRequest({
     input: [{ role: 'user', content: 'hi' }],
-    tools: [{ type: 'custom', name: 'apply_patch', description: 'patch' }],
+    tools: [{ type: 'custom', name: 'apply_patch', description: 'patch', format: { type: 'text' } }],
   }), 'UNSUPPORTED_TOOL_TYPE');
+
+  // Programmatic caller and async: true remain fail-closed
+  bad(() => normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'custom_tool_call', call_id: 'c_prog', name: 'apply_patch', input: 'x', caller: { type: 'program', caller_id: 'p1' } },
+      { type: 'custom_tool_call_output', call_id: 'c_prog', output: 'ok' },
+    ],
+  }), 'UNSUPPORTED_PARAMETER');
+  bad(() => normalizeResponsesRequest({
+    input: [
+      { role: 'user', content: 'hi' },
+      { type: 'function_call', call_id: 'c_async', name: 'Read', arguments: '{}', async: true },
+      { type: 'function_call_output', call_id: 'c_async', output: 'ok' },
+    ],
+  }), 'UNSUPPORTED_PARAMETER');
 
   // Cross-kind call_id mismatch rejected with INVALID_TOOL_RESULT
   bad(() => normalizeResponsesRequest({
@@ -184,4 +203,34 @@ test('Responses historical custom_tool_call/output replay works safely with inte
       { type: 'custom_tool_call_output', call_id: 'call_big', output: 'ok' },
     ],
   }), 'INVALID_TOOL_ARGUMENTS');
+});
+
+test('Gateway HTTP /v1/responses usage.input_tokens comes from canonical prompt and is invariant to stripped reasoning JSON', async t => {
+  const f = await fixture({ turns: ['Clean reply.', 'Clean reply.'], allowFailover: false });
+  t.after(f.close);
+  const bareRes = await f.api('/v1/responses', {
+    method: 'POST',
+    body: {
+      model: 'gemini-neon',
+      input: [
+        { role: 'user', content: 'Hello' },
+        { type: 'message', role: 'assistant', status: 'completed', phase: 'final_answer', content: [{ type: 'output_text', text: 'Hi' }] },
+        { role: 'user', content: 'Summarize' },
+      ],
+    },
+  });
+  assert.equal(bareRes.status, 200);
+  const bareJson = await bareRes.json();
+
+  // Send raw JSON with \u0041-escaped 40KB reasoning.encrypted_content; usage.input_tokens must match bareJson identically!
+  const escapedBlob = '\\u0041'.repeat(8000);
+  const rawBody = `{"model":"gemini-neon","include":["reasoning.encrypted_content"],"input":[{"role":"user","content":"Hello"},{"type":"reasoning","id":"rs_1","status":"completed","summary":[{"type":"summary_text","text":"internal trace"}],"encrypted_content":"${escapedBlob}"},{"type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Hi"}]},{"role":"user","content":"Summarize"}]}`;
+  const withReasoningRes = await fetch(`${f.base}/v1/responses`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${f.key.key}` },
+    body: rawBody,
+  });
+  assert.equal(withReasoningRes.status, 200);
+  const withReasoningJson = await withReasoningRes.json();
+  assert.equal(withReasoningJson.usage.input_tokens, bareJson.usage.input_tokens);
 });

@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import net from "node:net";
 import { TextDecoder } from "node:util";
 import * as protocol from "../native-provider.mjs";
+import { CANONICAL_PROMPT_CHARS, CANONICAL_IMAGE_COUNT } from "../openai-contract.mjs";
 import { Security } from "./security.mjs";
 import { openDirectTurn } from "./native-transport.mjs";
 import { Accounts } from "./accounts.mjs";
@@ -16,7 +17,6 @@ import { RequestResumption } from './request-resumption.mjs';
 import { QuotaRefreshJobs } from './quota-refresh-jobs.mjs';
 import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
-import { measurePromptImagePayload, measureStrippedReplayChars } from '../openai-usage.mjs';
 import {
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   buildMcpToolDefinitions,
@@ -463,13 +463,11 @@ export function createGateway({
       }, settings.timeoutMs + 1000);
     timer.unref();
     controllers.add(controller);
-    const { imageCount, imageUrlChars } = measurePromptImagePayload(body);
-    const strippedReplayChars = measureStrippedReplayChars(body);
     const delivery = createResponseDelivery(res, { route, stream: outputStreaming, model: canonical.model,
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
       ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => canonical[key] !== undefined),
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
-      promptChars: Math.max(0, (body.__promptChars ?? 0) - imageUrlChars - strippedReplayChars), imageCount,
+      promptChars: canonical[CANONICAL_PROMPT_CHARS] ?? 0, imageCount: canonical[CANONICAL_IMAGE_COUNT] ?? 0,
       deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
       signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000),
       keepaliveHeadersDelayMs: route === 'chat' ? keepaliveHeadersDelayMs : 0 });

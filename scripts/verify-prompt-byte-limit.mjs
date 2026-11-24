@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import assert from 'node:assert/strict';
+import { CANONICAL_PROMPT_CHARS, normalizeChatRequest } from '../src/openai-contract.mjs';
 import { requireIsolation, installNetworkGuard, gatewayFixture } from './offline-client-fixture.mjs';
 const scratch = requireIsolation(), guard = installNetworkGuard();
 const output = path.join(scratch, 'prompt-byte-limit-offline-result.json');
@@ -55,7 +56,8 @@ try {
       assert.equal(response.body.choices[0].finish_reason, 'stop');
       assert.equal(fixture.attempts, before + 1);
       assert.equal(response.body.usage.estimated, true);
-      assert.equal(response.body.usage.prompt_tokens, Math.ceil(c.raw.length / 3.5), 'byte fix must not change character-based usage estimator');
+      const canonicalChars = normalizeChatRequest(JSON.parse(c.raw))[CANONICAL_PROMPT_CHARS];
+      assert.equal(response.body.usage.prompt_tokens, Math.ceil(canonicalChars / 3.5), 'usage estimator must reflect normalized canonical prompt chars');
     }
     report.cases.push({ name: c.name, passed: true, bytes: Buffer.byteLength(c.raw), utf16Units: c.raw.length,
       limit: c.limit, status: response.status, upstreamAttempts: fixture.attempts - before });

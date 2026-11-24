@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import OpenAI from 'openai';
 import { NativeDirectProvider, normalizeChatRequest, normalizeResponsesRequest, writeChatResponse, writeResponsesResponse } from '../src/native-provider.mjs';
 import { errorPayload } from '../src/gateway/app.mjs';
-import { PROMPT_MAX_BYTES, buildCanonicalPrompt } from '../src/openai-contract.mjs';
-import { measureStrippedReplayChars, estimateUsage } from '../src/openai-usage.mjs';
+import { PROMPT_MAX_BYTES, CANONICAL_PROMPT_CHARS, CANONICAL_IMAGE_COUNT, buildCanonicalPrompt } from '../src/openai-contract.mjs';
+import { estimateUsage } from '../src/openai-usage.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 
 const tool = { type: 'function', function: { name: 'lookup', description: 'Caller lookup', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'], additionalProperties: false } } };
@@ -526,26 +526,37 @@ test('assistant replay reasoning_content and reasoning metadata are accepted and
   invalid(() => normalizeChatRequest({ messages: [user, { role: 'assistant', content: 'x', reasoning: { text: 'bad' } }] }), 'UNSUPPORTED_PARAMETER', 'messages.reasoning');
 });
 
-test('Responses replay accepts assistant message.phase, strips bounded reasoning items, subtracts stripped usage chars, and fails closed on compaction/unknown input types', () => {
-  // 1. Assistant message.phase ("commentary", "final_answer", null) accepted and stripped; non-assistant or bad values rejected
+test('Responses replay accepts unified SDK metadata, assistant message.phase, strips bounded reasoning items with canonical prompt usage, and fails closed on compaction/unknown input types', () => {
+  // 1. Assistant message.phase ("commentary", "final_answer", null) and unified replay id/status metadata on all message roles
   const phased = normalizeResponsesRequest({
     model: 'gemini-neon',
     input: [
-      { role: 'user', content: 'Check file' },
+      { type: 'message', id: null, role: 'developer', status: 'completed', content: 'Be terse.' },
+      { type: 'message', id: '', role: 'user', status: 'completed', phase: null, content: 'Check file' },
       { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', phase: 'commentary', content: [{ type: 'output_text', text: 'Checking the file.' }] },
-      { type: 'message', id: 'msg_2', role: 'assistant', status: 'completed', phase: 'final_answer', content: [{ type: 'output_text', text: 'All good.' }] },
+      { type: 'message', id: 'msg_2', role: 'assistant', status: null, phase: 'final_answer', content: [{ type: 'output_text', text: 'All good.' }] },
       { type: 'message', id: 'msg_3', role: 'assistant', status: 'completed', phase: null, content: [{ type: 'output_text', text: 'Done.' }] },
       { role: 'user', content: 'Next' },
     ],
   });
-  assert.equal(phased.body.messages.length, 5);
-  assert.equal(phased.body.messages[1].content, 'Checking the file.');
-  assert.equal(phased.body.messages[2].content, 'All good.');
+  assert.equal(phased.body.messages.length, 6);
+  assert.equal(phased.body.messages[2].content, 'Checking the file.');
+  assert.equal(phased.body.messages[3].content, 'All good.');
   invalid(() => normalizeResponsesRequest({ input: [{ type: 'message', role: 'user', phase: 'final_answer', content: 'Hi' }] }), 'UNSUPPORTED_PARAMETER', 'input.phase');
   invalid(() => normalizeResponsesRequest({ input: [{ type: 'message', role: 'assistant', phase: 'thinking', content: 'Hi' }] }), 'UNSUPPORTED_PARAMETER', 'input.phase');
+  invalid(() => normalizeResponsesRequest({ input: [{ type: 'message', id: 'bad\nid', role: 'user', content: 'Hi' }] }), 'INVALID_INPUT_ITEM', 'input.id');
 
-  // 2. Replayed reasoning items (empty placeholder and populated summary/content/encrypted_content) are validated and stripped cleanly
+  // 2. Replayed reasoning items (empty placeholder and populated summary/content/encrypted_content) are validated and stripped cleanly;
+  //    canonical prompt char count is byte-for-byte invariant regardless of stripped reasoning blobs.
   const encryptedBlob = 'gAAAAAB_' + 'A'.repeat(20_000);
+  const bare = normalizeResponsesRequest({
+    model: 'gemini-neon',
+    input: [
+      { role: 'user', content: 'Hi' },
+      { type: 'message', role: 'assistant', status: 'completed', phase: 'final_answer', content: [{ type: 'output_text', text: 'Hello' }] },
+      { role: 'user', content: 'Follow up' },
+    ],
+  });
   const withReasoning = normalizeResponsesRequest({
     model: 'gemini-neon',
     include: ['reasoning.encrypted_content'],
@@ -565,23 +576,34 @@ test('Responses replay accepts assistant message.phase, strips bounded reasoning
     ],
   });
   assert.equal(withReasoning.body.messages.length, 3);
+  assert.equal(withReasoning.body[CANONICAL_PROMPT_CHARS], bare.body[CANONICAL_PROMPT_CHARS]);
+  assert.equal(withReasoning.body[CANONICAL_IMAGE_COUNT], 0);
+  assert.deepEqual(
+    estimateUsage({ promptChars: withReasoning.body[CANONICAL_PROMPT_CHARS] }),
+    estimateUsage({ promptChars: bare.body[CANONICAL_PROMPT_CHARS] }),
+  );
   const promptText = buildCanonicalPrompt(withReasoning.body).messages[0].content;
   assert.equal(promptText.includes('PRIVATE_SUMMARY_TRACE'), false);
   assert.equal(promptText.includes('PRIVATE_REASONING_TRACE'), false);
   assert.equal(promptText.includes('gAAAAAB_'), false);
 
-  // Stripped reasoning chars are measured so usage estimation does not count opaque encrypted_content as prompt tokens
-  const stripped = measureStrippedReplayChars({
-    input: [
-      { type: 'reasoning', summary: [{ type: 'summary_text', text: '12345' }], content: [{ type: 'reasoning_text', text: '6789' }], encrypted_content: encryptedBlob },
-    ],
-  });
-  assert.equal(stripped, encryptedBlob.length + 9);
-  const chatStripped = measureStrippedReplayChars({
-    messages: [{ role: 'assistant', content: 'ok', reasoning_content: 'abcdef', reasoning: 'gh' }],
-  });
-  assert.equal(chatStripped, 8);
-  assert.ok(estimateUsage({ promptChars: Math.max(0, 20_500 - stripped) }).prompt_tokens < 200);
+  // Stripped reasoning encrypted_content uses its own 16 MiB budget separate from 4 MiB plaintext budget
+  const multiTurnEncrypted = Array.from({ length: 5 }, (_, i) => ({
+    type: 'reasoning',
+    id: `rs_${i}`,
+    summary: [],
+    encrypted_content: 'E'.repeat(1024 * 1024),
+  }));
+  const multiTurnNorm = normalizeResponsesRequest({ model: 'gemini-neon', input: [...multiTurnEncrypted, { role: 'user', content: 'short prompt' }] });
+  assert.equal(multiTurnNorm.body.messages.length, 1);
+  assert.ok(multiTurnNorm.body[CANONICAL_PROMPT_CHARS] < 2000);
+  const overStrippedLimit = Array.from({ length: 17 }, (_, i) => ({
+    type: 'reasoning',
+    id: `rs_over_${i}`,
+    summary: [],
+    encrypted_content: 'E'.repeat(1024 * 1024),
+  }));
+  invalid(() => normalizeResponsesRequest({ model: 'gemini-neon', input: [...overStrippedLimit, { role: 'user', content: 'short' }] }), 'REQUEST_TOO_LARGE');
 
   // 3. Input containing ONLY reasoning items (with or without instructions) fails with INPUT_REQUIRED
   invalid(() => normalizeResponsesRequest({ input: [{ type: 'reasoning', id: 'rs_only', summary: [], encrypted_content: null }] }), 'INPUT_REQUIRED', 'input');

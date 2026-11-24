@@ -53,7 +53,10 @@ function thinkingSettings(body) {
 }
 export const PROMPT_MAX_BYTES = 4 * 1024 * 1024;
 export const REQUEST_MAX_NON_IMAGE_BYTES = PROMPT_MAX_BYTES;
+export const MAX_STRIPPED_REASONING_BYTES = 16 * 1024 * 1024;
 export const MAX_MESSAGES = 8192;
+export const CANONICAL_PROMPT_CHARS = Symbol('canonicalPromptChars');
+export const CANONICAL_IMAGE_COUNT = Symbol('canonicalImageCount');
 const REQUEST_MAX_NODES = 131072;
 const configured = Number(process.env.GEMINI_PROMPT_MAX_CHARS);
 const MAX_CHARS = Number.isSafeInteger(configured) && configured > 0 ? Math.min(configured, PROMPT_MAX_BYTES) : PROMPT_MAX_BYTES;
@@ -70,9 +73,10 @@ function keys(value, allowed, prefix = '') {
 // Bound work before compiling schemas, cloning tools or joining text blocks.
 // This is independent of the gateway's raw HTTP body limit.
 function requestBudget(root) {
-  let nodes = 0, bytes = 0, imageBytes = 0, imageCount = 0;
-  // Only declared user-image URL slots get a separate budget, never arbitrary strings.
+  let nodes = 0, bytes = 0, imageBytes = 0, strippedReasoningBytes = 0, imageCount = 0;
+  // Only declared user-image URL slots and stripped reasoning ciphertext get separate budgets.
   const imageSlots = new WeakMap();
+  const strippedSlots = new WeakMap();
   const mark = (part, responses = false) => {
     if (!plainObject(part)) return;
     if ((responses && part.type === 'input_image') || (!responses && part.type === 'image_url')) {
@@ -88,15 +92,18 @@ function requestBudget(root) {
     if (item?.type === 'input_image') mark(item, true);
     if (item?.role === 'user' && Array.isArray(item.content) && item.content.length <= 1024) for (const part of item.content) mark(part, true);
     if ((item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output') && Array.isArray(item.output) && item.output.length <= 1024) for (const part of item.output) mark(part, true);
+    if (plainObject(item) && item.type === 'reasoning') strippedSlots.set(item, 'encrypted_content');
   }
   const ancestors = new Set();
-  const visit = (value, depth, image = false) => {
+  const visit = (value, depth, slot = null) => {
     if (++nodes > REQUEST_MAX_NODES || depth > 32) fail('REQUEST_TOO_LARGE', 413);
     if (typeof value === 'string') {
-      if (image) {
+      if (slot === 'image') {
         const len = Buffer.byteLength(value);
         if (len > MAX_IMAGE_URL_BYTES) fail('IMAGE_TOO_LARGE', 413);
         imageBytes += len;
+      } else if (slot === 'stripped') {
+        strippedReasoningBytes += Buffer.byteLength(value);
       } else bytes += Buffer.byteLength(value);
     }
     else if (value === null || value === undefined || typeof value === 'boolean') bytes += 4;
@@ -114,11 +121,15 @@ function requestBudget(root) {
       } else {
         const entries = Object.entries(value);
         if (entries.length > 4096) fail('REQUEST_TOO_LARGE', 413);
-        for (const [key, child] of entries) { bytes += Buffer.byteLength(key); visit(child, depth + 1, imageSlots.get(value) === key); }
+        for (const [key, child] of entries) {
+          bytes += Buffer.byteLength(key);
+          const childSlot = imageSlots.get(value) === key ? 'image' : strippedSlots.get(value) === key ? 'stripped' : null;
+          visit(child, depth + 1, childSlot);
+        }
       }
       ancestors.delete(value);
     }
-    if (bytes > REQUEST_MAX_NON_IMAGE_BYTES || imageBytes > MAX_TOTAL_IMAGE_URL_BYTES) fail('REQUEST_TOO_LARGE', 413);
+    if (bytes > REQUEST_MAX_NON_IMAGE_BYTES || imageBytes > MAX_TOTAL_IMAGE_URL_BYTES || strippedReasoningBytes > MAX_STRIPPED_REASONING_BYTES) fail('REQUEST_TOO_LARGE', 413);
   };
   visit(root, 0);
 }
@@ -126,6 +137,13 @@ function text(value, { nullable = false } = {}) {
   if (nullable && value === null) return null;
   if (typeof value !== 'string' || Buffer.from(value).toString('utf8') !== value) fail('INVALID_TEXT');
   if (value.length > MAX_CHARS || Buffer.byteLength(value) > PROMPT_MAX_BYTES) fail('PROMPT_TOO_LARGE', 413);
+  return value;
+}
+// Validate UTF-8 and hard byte bounds for stripped replay scratchpad fields
+// without enforcing GEMINI_PROMPT_MAX_CHARS (which bounds rendered prompt text).
+function strippedText(value, param = null) {
+  if (typeof value !== 'string' || Buffer.from(value).toString('utf8') !== value) fail('INVALID_TEXT', 400, param);
+  if (Buffer.byteLength(value) > PROMPT_MAX_BYTES) fail('REQUEST_TOO_LARGE', 413, param);
   return value;
 }
 function id(value) {
@@ -374,7 +392,7 @@ export function normalizeChatRequest(payload, { allowAutoModel = false, _imageCa
         if (role !== 'assistant' || (message[key] !== null && typeof message[key] !== 'string')) {
           fail('UNSUPPORTED_PARAMETER', 400, `messages.${key}`);
         }
-        if (typeof message[key] === 'string') text(message[key]);
+        if (typeof message[key] === 'string') strippedText(message[key], `messages.${key}`);
       }
     }
     if (message.annotations !== undefined) {
@@ -416,25 +434,45 @@ export function normalizeChatRequest(payload, { allowAutoModel = false, _imageCa
       body.stream_options = { include_usage: payload.stream_options.include_usage };
     }
   }
-  buildCanonicalPrompt(body, undefined, imageCache); // Validate budgets BEFORE any account reservation.
+  const built = buildCanonicalPrompt(body, undefined, imageCache); // Validate budgets BEFORE any account reservation.
+  body[CANONICAL_PROMPT_CHARS] = built.messages.reduce((sum, m) => sum + (typeof m?.content === 'string' ? m.content.length : 0), 0);
+  body[CANONICAL_IMAGE_COUNT] = built.images.length;
   return body;
 }
 
+// Unified OpenAI Responses SDK replay metadata validator (aligned with openai/lib/responses/ResponseInputItems).
+// Keeps inert wire metadata consistent across message, reasoning, tool calls, and tool outputs.
 const MAX_REASONING_PARTS = 256;
-function validateReasoningItem(item) {
-  keys(item, ['type', 'id', 'status', 'summary', 'content', 'encrypted_content'], 'input');
-  if (item.id !== undefined && item.id !== null) {
-    if (!validBoundedChars(item.id, 256, 256) || /[\u0000-\u001f\u007f]/.test(item.id)) {
-      fail('INVALID_INPUT_ITEM', 400, 'input.id');
+const TOOL_IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function validateReplayItemId(value) {
+  if (value === undefined || value === null) return;
+  if (!validBoundedChars(value, 256, 256) || /[\u0000-\u001f\u007f]/.test(value)) {
+    fail('INVALID_INPUT_ITEM', 400, 'input.id');
+  }
+}
+function validateReplayItemMeta(item, { allowCaller = false, allowAsync = false } = {}) {
+  validateReplayItemId(item.id);
+  if (item.status !== undefined && item.status !== null && item.status !== 'completed') {
+    fail('INVALID_INPUT_STATUS', 400, 'input.status');
+  }
+  if (allowCaller && item.caller !== undefined && item.caller !== null) {
+    if (!plainObject(item.caller) || Object.keys(item.caller).some(k => k !== 'type') || item.caller.type !== 'direct') {
+      fail('UNSUPPORTED_PARAMETER', 400, 'input.caller');
     }
   }
-  if (item.status !== undefined && item.status !== null && item.status !== 'completed') fail('INVALID_INPUT_STATUS');
+  if (allowAsync && item.async !== undefined && item.async !== null && item.async !== false) {
+    fail('UNSUPPORTED_PARAMETER', 400, 'input.async');
+  }
+}
+function validateReasoningItem(item) {
+  keys(item, ['type', 'id', 'status', 'summary', 'content', 'encrypted_content'], 'input');
+  validateReplayItemMeta(item);
   if (item.summary !== undefined && item.summary !== null) {
     if (!Array.isArray(item.summary) || item.summary.length > MAX_REASONING_PARTS) fail('INVALID_REASONING_ITEM', 400, 'input.summary');
     for (const part of item.summary) {
       keys(part, ['type', 'text'], 'input.summary');
       if (part.type !== 'summary_text') fail('UNSUPPORTED_CONTENT_TYPE', 400, 'input.summary');
-      text(part.text);
+      strippedText(part.text, 'input.summary');
     }
   }
   if (item.content !== undefined && item.content !== null) {
@@ -442,11 +480,11 @@ function validateReasoningItem(item) {
     for (const part of item.content) {
       keys(part, ['type', 'text'], 'input.content');
       if (part.type !== 'reasoning_text') fail('UNSUPPORTED_CONTENT_TYPE', 400, 'input.content');
-      text(part.text);
+      strippedText(part.text, 'input.content');
     }
   }
   if (item.encrypted_content !== undefined && item.encrypted_content !== null) {
-    text(item.encrypted_content);
+    strippedText(item.encrypted_content, 'input.encrypted_content');
   }
 }
 
@@ -506,23 +544,21 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
       hasNormalizedInput = true;
       let call;
       if (item.type === 'function_call') {
-        keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'arguments', 'parsed_arguments'], 'input');
+        keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'arguments', 'parsed_arguments', 'caller', 'async'], 'input');
         if (item.parsed_arguments !== undefined && item.parsed_arguments !== null) fail('UNSUPPORTED_PARAMETER', 400, 'input.parsed_arguments');
-        if (item.id !== undefined) id(item.id);
-        if (item.status !== undefined && item.status !== 'completed') fail('INVALID_INPUT_STATUS');
+        validateReplayItemMeta(item, { allowCaller: true, allowAsync: true });
         const callId = id(item.call_id);
-        openCalls.set(callId, 'function_call');
+        if (!openCalls.has(callId)) openCalls.set(callId, 'function_call');
         call = { id: callId, type: 'function', function: { name: callName(item.name, item.namespace), arguments: item.arguments } };
       } else {
-        keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'input'], 'input');
-        if (item.id !== undefined) id(item.id);
-        if (item.status !== undefined && item.status !== 'completed') fail('INVALID_INPUT_STATUS');
+        keys(item, ['type', 'id', 'status', 'call_id', 'namespace', 'name', 'input', 'caller', 'async'], 'input');
+        validateReplayItemMeta(item, { allowCaller: true, allowAsync: true });
         const callId = id(item.call_id);
         const rawInput = text(item.input);
         if (Buffer.byteLength(rawInput, 'utf8') > TOOL_LIMITS.bytes) fail('INVALID_TOOL_ARGUMENTS', 400, 'input.input');
         const wrapped = JSON.stringify({ input: rawInput });
         if (Buffer.byteLength(wrapped, 'utf8') > TOOL_LIMITS.bytes) fail('INVALID_TOOL_ARGUMENTS', 400, 'input.input');
-        openCalls.set(callId, 'custom_tool_call');
+        if (!openCalls.has(callId)) openCalls.set(callId, 'custom_tool_call');
         call = { id: callId, type: 'function', function: { name: callName(item.name, item.namespace), arguments: wrapped } };
       }
       const previous = messages.at(-1);
@@ -530,15 +566,35 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
       else messages.push({ role: 'assistant', content: null, tool_calls: [call] });
     } else if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
       hasNormalizedInput = true;
-      keys(item, ['type', 'id', 'status', 'call_id', 'output'], 'input');
-      if (item.id !== undefined) id(item.id);
-      if (item.status !== undefined && item.status !== null && item.status !== 'completed') fail('INVALID_INPUT_STATUS');
+      const isFunctionOutput = item.type === 'function_call_output';
+      keys(
+        item,
+        isFunctionOutput
+          ? ['type', 'id', 'status', 'call_id', 'output', 'caller', 'name', 'namespace']
+          : ['type', 'id', 'status', 'call_id', 'output', 'caller'],
+        'input',
+      );
+      validateReplayItemMeta(item, { allowCaller: true });
+      if (isFunctionOutput) {
+        if (item.name !== undefined && item.name !== null && (typeof item.name !== 'string' || !TOOL_IDENTIFIER_RE.test(item.name))) {
+          fail('INVALID_TOOL_RESULT', 400, 'input.name');
+        }
+        if (item.namespace !== undefined && item.namespace !== null && (typeof item.namespace !== 'string' || !TOOL_IDENTIFIER_RE.test(item.namespace))) {
+          fail('INVALID_TOOL_RESULT', 400, 'input.namespace');
+        }
+      }
       const callId = id(item.call_id);
-      const expectedKind = item.type === 'function_call_output' ? 'function_call' : 'custom_tool_call';
+      const expectedKind = isFunctionOutput ? 'function_call' : 'custom_tool_call';
       const openKind = openCalls.get(callId);
       if (openKind !== undefined && openKind !== expectedKind) fail('INVALID_TOOL_RESULT');
-      openCalls.delete(callId);
-      pushToolOutput(callId, item.output);
+      if (openKind === undefined) {
+        // Avoid decoding base64/PNG images on unlinked outputs; normalizeChatRequest will reject
+        // the orphan call_id with INVALID_TOOL_RESULT after validating earlier call arguments.
+        messages.push({ role: 'tool', tool_call_id: callId, content: '' });
+      } else {
+        openCalls.delete(callId);
+        pushToolOutput(callId, item.output);
+      }
     } else if (item.type === 'input_text') {
       flushToolImages();
       hasNormalizedInput = true;
@@ -551,8 +607,7 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
       flushToolImages();
       hasNormalizedInput = true;
       keys(item, ['type', 'id', 'status', 'role', 'content', 'phase'], 'input');
-      if (item.id !== undefined) id(item.id);
-      if (item.status !== undefined && (item.role !== 'assistant' || item.status !== 'completed')) fail('INVALID_INPUT_STATUS');
+      validateReplayItemMeta(item);
       if (item.phase !== undefined && item.phase !== null) {
         if (item.role !== 'assistant' || !['commentary', 'final_answer'].includes(item.phase)) {
           fail('UNSUPPORTED_PARAMETER', 400, 'input.phase');
@@ -576,6 +631,7 @@ export function normalizeResponsesRequest(payload, { allowAutoModel = false } = 
   }
   flushToolImages();
   if (!hasNormalizedInput) fail('INPUT_REQUIRED', 400, 'input');
+  if (messages.length > MAX_MESSAGES) fail('REQUEST_TOO_LARGE', 413, 'input');
   const { include: _include, ...inertCompat } = compat;
   const body = normalizeChatRequest({ ...resolved, ...inertCompat, ...(response_format ? { response_format } : {}), messages, tools, tool_choice: choice, [RESPONSE_TOOL_IDENTITIES]: identities }, { allowAutoModel, _imageCache: imageCache });
   const projected = collectImageInputs(body.messages, undefined, imageCache).messages;

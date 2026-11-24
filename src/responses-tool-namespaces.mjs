@@ -22,8 +22,9 @@ export function normalizeResponsesTools(payload) {
   if (Buffer.byteLength(JSON.stringify(source)) > PROMPT_TOOL_LIMITS.declarationBytes) fail('TOOL_SIZE_LIMIT', 'tools.bytes');
   const declarations = [], namespaces = new Set(), reserved = new Set(), identities = new Map(), aliases = new Map();
   const add = (tool, namespace, description) => {
-    keys(tool, ['type', 'name', 'description', 'parameters', 'strict']);
+    if (!plainObject(tool)) fail('INVALID_TOOL_DECLARATION');
     if (tool.type !== 'function') fail('UNSUPPORTED_TOOL_TYPE');
+    keys(tool, ['type', 'name', 'description', 'parameters', 'strict']);
     name(tool.name);
     if (tool.description !== undefined && typeof tool.description !== 'string') fail('INVALID_TOOL_DECLARATION');
     if (declarations.length >= PROMPT_TOOL_LIMITS.tools) fail('TOOL_SIZE_LIMIT', 'tools.count');
