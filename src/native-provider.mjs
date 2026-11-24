@@ -63,7 +63,7 @@ export function selectIdleDeadline(facts, now = Date.now()) {
     }
     return { kind: null, ms: null };
   }
-  if (facts.modelComplete && facts.hasText) {
+  if (facts.modelComplete) {
     return { kind: 'post_complete', ms: completeRemaining };
   }
   if (facts.hasLiveCalls && !facts.streamingTool) {
@@ -164,7 +164,7 @@ const validateIdleMs = (value, name) => {
 const IDLE_TIMEOUT_SENTINEL = Symbol('IDLE_TIMEOUT_SENTINEL');
 
 export class NativeDirectProvider {
-  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 6_000, postOutputIdleMs = 15_000, postOutputToolIdleMs = 45_000, maxPostOutputThoughtHoldMs = undefined, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
+  constructor(authManager, { openTurn, uploadImages = uploadNativeImages, downloadImages = downloadRemoteImages, blobCache = createImageBlobCache(), timeoutMs = 600_000, postCompleteGraceMs = 2_000, postToolIdleMs = 6_000, postOutputIdleMs = 15_000, postOutputToolIdleMs = undefined, maxPostOutputThoughtHoldMs = undefined, modelAlias = 'gemini-neon', continuation = false, allowTextSnapshotReplacement = false, allowAutoModel = false } = {}) {
     if (!authManager || typeof authManager.getValidAccessToken !== 'function') throw new TypeError('authManager.getValidAccessToken required');
     if (typeof openTurn !== 'function') throw new TypeError('openTurn required');
     if (typeof uploadImages !== 'function') throw new TypeError('uploadImages required');
@@ -173,7 +173,9 @@ export class NativeDirectProvider {
     const resolvedPostCompleteGraceMs = validateIdleMs(postCompleteGraceMs, 'postCompleteGraceMs');
     const resolvedPostToolIdleMs = validateIdleMs(postToolIdleMs, 'postToolIdleMs');
     const resolvedPostOutputIdleMs = validateIdleMs(postOutputIdleMs, 'postOutputIdleMs');
-    const resolvedPostOutputToolIdleMs = validateIdleMs(postOutputToolIdleMs, 'postOutputToolIdleMs');
+    const resolvedPostOutputToolIdleMs = postOutputToolIdleMs === undefined
+      ? undefined
+      : validateIdleMs(postOutputToolIdleMs, 'postOutputToolIdleMs');
     const resolvedMaxPostOutputThoughtHoldMs = maxPostOutputThoughtHoldMs === undefined
       ? undefined
       : validateIdleMs(maxPostOutputThoughtHoldMs, 'maxPostOutputThoughtHoldMs');
@@ -342,9 +344,12 @@ export class NativeDirectProvider {
     const postOutputIdleMs = context.postOutputIdleMs === undefined
       ? this.postOutputIdleMs
       : validateIdleMs(context.postOutputIdleMs, 'postOutputIdleMs');
-    const postOutputToolIdleMs = context.postOutputToolIdleMs === undefined
-      ? this.postOutputToolIdleMs
-      : validateIdleMs(context.postOutputToolIdleMs, 'postOutputToolIdleMs');
+    const configuredPostOutputToolIdleMs = context.postOutputToolIdleMs !== undefined
+      ? validateIdleMs(context.postOutputToolIdleMs, 'postOutputToolIdleMs')
+      : this.postOutputToolIdleMs;
+    const postOutputToolIdleMs = configuredPostOutputToolIdleMs !== undefined
+      ? configuredPostOutputToolIdleMs
+      : (postOutputIdleMs === null ? null : Math.max(postOutputIdleMs, 45_000));
     const maxPostOutputThoughtHoldMs = context.maxPostOutputThoughtHoldMs !== undefined
       ? validateIdleMs(context.maxPostOutputThoughtHoldMs, 'maxPostOutputThoughtHoldMs')
       : this.maxPostOutputThoughtHoldMs !== undefined
@@ -408,6 +413,16 @@ export class NativeDirectProvider {
     const deliver = async event => {
       try { await onDelta(event); }
       catch (error) { sinkFailed = true; throw error; }
+    };
+    const deliverNonIncremental = async (items, content, calls, { includeMeta = false } = {}) => {
+      const extra = includeMeta ? { response: { ...identity, thinkingLevel: observedThinking } } : {};
+      if (body.response_format && !calls.length) {
+        if (content) await deliver({ content, ...extra });
+      } else {
+        for (const item of items) {
+          await deliver(item.type === 'call' ? { call: item.call, ...extra } : { content: item.text, ...extra });
+        }
+      }
     };
     // The sink owns the commit boundary: provider-published text may still be held.
     // Missing/invalid feedback is conservative for streaming callers.
@@ -498,7 +513,7 @@ export class NativeDirectProvider {
           validateToolCompletion(probeCalls, policy);
           if (!probeCalls.length && !probeContent.trim()) return (cachedFallbackResult = { kind: 'none' });
           if (body.response_format && !probeCalls.length) probeContent = validateStructuredOutputText(probeContent, body.response_format);
-          return (cachedFallbackResult = { kind: 'clean_output', hasCalls: probeCalls.length > 0, content: probeContent, calls: probeCalls });
+          return (cachedFallbackResult = { kind: 'clean_output', hasCalls: probeCalls.length > 0, content: probeContent, calls: probeCalls, items: probeItems });
         } catch {
           return (cachedFallbackResult = { kind: 'none' });
         }
@@ -571,13 +586,21 @@ export class NativeDirectProvider {
         const item = await nextEventWithIdle();
         if (item && item[IDLE_TIMEOUT_SENTINEL]) {
           const idleKind = item[IDLE_TIMEOUT_SENTINEL];
-          if (idleKind === 'post_complete' && item.verified && rawText.trim().length > 0) {
-            note('post_complete_idle_finish', { bytes: Buffer.byteLength(rawText) });
+          if (idleKind === 'post_complete' && item.verified) {
+            if (rawText.trim().length > 0) {
+              note('post_complete_idle_finish', { bytes: Buffer.byteLength(rawText) });
+              try { turn?.cancel(); } catch {}
+              readExit = 'complete_grace';
+              ended = true;
+              httpStatus = httpStatus ?? 200;
+              grpc = grpc ?? 0;
+              break;
+            }
+            // Upstream marked modelComplete=true with empty/thoughts-only text and never closed the stream:
+            // break promptly without forging wireEnded=true so validate rejects as INCOMPLETE_NATIVE_RESPONSE.
+            note('post_complete_empty_idle_timeout', { frames, thoughtBytes: outputShape.nativeThoughtBytes });
             try { turn?.cancel(); } catch {}
-            readExit = 'complete_grace';
-            ended = true;
-            httpStatus = httpStatus ?? 200;
-            grpc = grpc ?? 0;
+            readExit = 'complete_empty_grace';
             break;
           }
           if (idleKind === 'post_tool_error' && item.verified && (liveToolError || item.probeError)) {
@@ -587,14 +610,14 @@ export class NativeDirectProvider {
             readExit = 'deferred_tool_error';
             break;
           }
+          const finalSnap = item.verified ? classifyIdleSnapshot() : { kind: 'none' };
           note(`${idleKind}_idle_timeout`, {
             frames,
-            calls: liveCalls.length,
+            calls: liveCalls.length || (finalSnap.calls?.length ?? 0),
             textBytes: Buffer.byteLength(rawText),
           });
           try { turn?.cancel(); } catch {}
           const idleError = protocolError('NATIVE_TURN_TIMEOUT', 504);
-          const finalSnap = item.verified ? classifyIdleSnapshot() : { kind: 'none' };
           if (idleKind === 'post_tool' && item.verified && (liveCalls.length > 0 || finalSnap.hasCalls === true)) {
             idleError.postToolIdleStall = true;
             if (!incremental && finalSnap.kind === 'clean_output') validatedIdleOutput = finalSnap;
@@ -658,6 +681,7 @@ export class NativeDirectProvider {
             fail('MODEL_DOWNGRADE_REJECTED');
           }
           if (outputShape.nativeRefusalPresent) fail('NATIVE_RESPONSE_REFUSED', 422);
+          let textProgressed = false;
           if (info.text !== null) {
             const id = info.responseId || null;
             if (this.allowTextSnapshotReplacement && !id) fail('INVALID_NATIVE_RESPONSE');
@@ -692,13 +716,22 @@ export class NativeDirectProvider {
               lastTextProgressAt = progressAt;
               lastGenerationProgressAt = progressAt;
               allowThoughtRebase = true;
+              textProgressed = true;
             }
             rawText = info.text;
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
           }
           const frameThoughtBytes = info.outputShape?.nativeThoughtBytes ?? 0;
-          if (frameThoughtBytes > 0) {
+          if (textProgressed) {
+            // Keep allowThoughtRebase armed if this text-progress frame also carried the tail
+            // of pre-text thoughts; if a smaller post-text block already started here, rebase now.
+            if (frameThoughtBytes > thoughtHighWaterBytes) thoughtHighWaterBytes = frameThoughtBytes;
+            else if (frameThoughtBytes > 0 && frameThoughtBytes < thoughtHighWaterBytes) {
+              thoughtHighWaterBytes = frameThoughtBytes;
+              allowThoughtRebase = false;
+            }
+          } else if (frameThoughtBytes > 0) {
             if (frameThoughtBytes > thoughtHighWaterBytes) {
               thoughtHighWaterBytes = frameThoughtBytes;
               allowThoughtRebase = false;
@@ -843,13 +876,7 @@ export class NativeDirectProvider {
         nativeTextBytes: Buffer.byteLength(rawText), ...outputShape,
         nativeResponseRevisions: revisionCount, nativeResponseIdentityVerified: snapshotId !== null });
       phase = 'output';
-      if (!incremental) {
-        if (body.response_format && !calls.length) {
-          if (content) await onDelta({ content });
-        } else {
-          for (const item of items) await onDelta(item.type === 'call' ? { call: item.call } : { content: item.text });
-        }
-      }
+      if (!incremental) await deliverNonIncremental(items, content, calls);
       note('provider_success');
       return result;
     } catch (error) {
@@ -858,16 +885,16 @@ export class NativeDirectProvider {
         try { await publish(liveSplitter.flush()); }
         catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }
       }
-      const nonIncrementalPartial = (!incremental && !liveToolError && modeVerified &&
-        (error?.postOutputIdleStall || error?.postToolIdleStall) &&
-        validatedIdleOutput && (validatedIdleOutput.content.length || validatedIdleOutput.calls.length))
-        ? validatedIdleOutput
-        : null;
-      if (nonIncrementalPartial && !sinkFailed) {
+      let nonIncrementalDelivered = null;
+      if (!incremental && !liveToolError && modeVerified && !sinkFailed &&
+          (error?.postOutputIdleStall || error?.postToolIdleStall) &&
+          validatedIdleOutput && (validatedIdleOutput.content.length || validatedIdleOutput.calls.length)) {
         try {
-          if (nonIncrementalPartial.content) await deliver({ content: nonIncrementalPartial.content, response: { ...identity, thinkingLevel: observedThinking } });
-          for (const call of nonIncrementalPartial.calls) await deliver({ call, response: { ...identity, thinkingLevel: observedThinking } });
-        } catch { /* Preserve safe failure if sink write failed. */ }
+          await deliverNonIncremental(validatedIdleOutput.items, validatedIdleOutput.content, validatedIdleOutput.calls, { includeMeta: true });
+          nonIncrementalDelivered = validatedIdleOutput;
+        } catch (sinkError) {
+          error = sinkError;
+        }
       }
       const safe = safeFailure(error);
       if (!modeVerified) safe.unverifiedOutput = true;
@@ -899,7 +926,7 @@ export class NativeDirectProvider {
       });
       if (incremental && modeVerified && (publishedContent.length || publishedCalls)) safe.partialResult = { ...identity, content: publishedContent, calls: liveCalls.slice(0, publishedCalls),
         thinkingLevel: observedThinking, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), nativeEvidence: safe.nativeEvidence };
-      else if (nonIncrementalPartial) safe.partialResult = { ...identity, content: nonIncrementalPartial.content, calls: nonIncrementalPartial.calls,
+      else if (nonIncrementalDelivered) safe.partialResult = { ...identity, content: nonIncrementalDelivered.content, calls: nonIncrementalDelivered.calls,
         thinkingLevel: observedThinking, resolvedModeCategory: observedMode, ...(observedAttribution !== null ? { attribution: observedAttribution } : {}), nativeEvidence: safe.nativeEvidence };
       throw safe;
     }

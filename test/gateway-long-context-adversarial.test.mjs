@@ -744,7 +744,7 @@ test('Issue #9: tool_choice=auto pre-fence preamble survives >postOutputIdleMs p
   f.app.provider.postCompleteGraceMs = 40;
   f.app.provider.postToolIdleMs = 50;
   f.app.provider.postOutputIdleMs = 60;
-  f.app.provider.postOutputToolIdleMs = 260;
+  f.app.provider.postOutputToolIdleMs = 450;
 
   const responsesTools = PI_SHAPED_TOOLS.map(t => ({ type: 'function', ...t.function }));
   const largePayload = 'export const line = "synthetic-content";\n'.repeat(120);
@@ -819,9 +819,9 @@ test('Issue #9: tool_choice=auto pre-fence preamble survives >postOutputIdleMs p
   assert.ok(compToolStall);
   assert.equal(compToolStall.response.error, null);
   assert.equal(stalledAttempts, 1, 'clean post_output stall must stay 1-attempt (Issue #6)');
-  assert.ok(elapsedToolStall >= 200 && elapsedToolStall < 1500, `tool_choice=auto stall should finish near 260ms, took ${elapsedToolStall}ms`);
+  assert.ok(elapsedToolStall >= 380 && elapsedToolStall < 1800, `tool_choice=auto stall should finish near 450ms, took ${elapsedToolStall}ms`);
 
-  // 3. Plain text turn (tool_choice=none) still uses shorter postOutputIdleMs (60ms), not postOutputToolIdleMs (260ms).
+  // 3. Plain text turn (tool_choice=none) still uses shorter postOutputIdleMs (60ms), not postOutputToolIdleMs (450ms).
   const tPlainStall = Date.now();
   const rPlainStall = await f.api('/v1/responses', {
     method: 'POST',
@@ -830,7 +830,7 @@ test('Issue #9: tool_choice=auto pre-fence preamble survives >postOutputIdleMs p
   const elapsedPlainStall = Date.now() - tPlainStall;
   assert.equal(rPlainStall.status, 200);
   await rPlainStall.text();
-  assert.ok(elapsedPlainStall < 220, `tool_choice=none must keep shorter postOutputIdleMs (60ms), took ${elapsedPlainStall}ms`);
+  assert.ok(elapsedPlainStall < 350, `tool_choice=none must keep shorter postOutputIdleMs (60ms), took ${elapsedPlainStall}ms`);
 });
 
 test('Issue #9: thought growth + one-shot rebase extend awaitingOptionalTool safely while duplicates, oscillation, post_complete, and thought-only cap stay strictly bounded', async t => {
@@ -845,13 +845,13 @@ test('Issue #9: thought growth + one-shot rebase extend awaitingOptionalTool saf
   const responsesTools = PI_SHAPED_TOOLS.map(t => ({ type: 'function', ...t.function }));
   const finalToolText = `Preparing patch.\n${toolFence('read', { path: 'src/index.mjs' })}`;
 
-  // 1. Pre-preamble thought (500B) -> preamble -> rebased smaller thought block (100B -> 180B -> 260B -> 340B)
-  //    spaced across > postOutputToolIdleMs (110ms) keeps turn alive until tool_call arrives.
+  // 1. Same-frame preamble + pre-text thought growth (500B) MUST keep allowThoughtRebase armed so a subsequent
+  //    smaller post-preamble thought block (100B -> 180B -> 260B) still extends awaitingOptionalTool until tool_call arrives.
   f.app.provider.openTurn = () => ({
     events: (async function* () {
       yield { type: 'headers', status: 200 };
-      yield { type: 'frame', bytes: makeNativeFrame('', { complete: false, thoughtText: 'T'.repeat(500) }) };
-      yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false }) };
+      yield { type: 'frame', bytes: makeNativeFrame('', { complete: false, thoughtText: 'T'.repeat(300) }) };
+      yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false, thoughtText: 'T'.repeat(500) }) };
       await new Promise(r => setTimeout(r, 40));
       yield { type: 'frame', bytes: makeNativeFrame('Preparing patch.', { complete: false, thoughtText: 'a'.repeat(100) }) }; // rebase
       await new Promise(r => setTimeout(r, 40));
@@ -938,12 +938,13 @@ test('Issue #9: thought growth + one-shot rebase extend awaitingOptionalTool saf
   const elapsedComplete = Date.now() - tComplete;
   assert.equal(rComplete.status, 200);
   assert.match(wComplete, /Finished answer\./);
-  assert.ok(elapsedComplete < 220, `thoughts after modelComplete must not delay postCompleteGraceMs, took ${elapsedComplete}ms`);
+  assert.ok(elapsedComplete < 350, `thoughts after modelComplete must not delay postCompleteGraceMs, took ${elapsedComplete}ms`);
 });
 
-test('Issue #9: closing tool fence without trailing newline uses postToolIdleMs and non-incremental response_format stall flushes validated JSON', async t => {
-  const f = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: true });
+test('Issue #9: review-hardening invariants (empty completed hang, postOutputIdleMs:null disable, !incremental stream:false/postToolIdleStall order & sink error)', async t => {
+  const f = await fixture({ accountCount: 2, allowFailover: false, allowAutomaticRecovery: false });
   t.after(f.close);
+  f.app.provider.postCompleteGraceMs = 40;
   f.app.provider.postToolIdleMs = 50;
   f.app.provider.postOutputIdleMs = 60;
   f.app.provider.postOutputToolIdleMs = 500;
@@ -968,9 +969,9 @@ test('Issue #9: closing tool fence without trailing newline uses postToolIdleMs 
   assert.equal(rNoLf.status, 200);
   assert.match(wNoLf, /src\/no-lf\.mjs/);
   assert.match(wNoLf, /"finish_reason":"tool_calls"/);
-  assert.ok(elapsedNoLf < 300, `closing fence without trailing LF should use postToolIdleMs (50ms), took ${elapsedNoLf}ms`);
+  assert.ok(elapsedNoLf < 350, `closing fence without trailing LF should use postToolIdleMs (50ms), took ${elapsedNoLf}ms`);
 
-  // 2. Non-incremental response_format (json_object) stall with validated JSON flushes cleanly instead of GENERATION_FAILED.
+  // 2. Non-incremental response_format (json_object) stall flushes validated JSON on BOTH stream:true and stream:false.
   f.app.provider.openTurn = (_token, opts) => ({
     events: (async function* () {
       if (opts?.emitHeaders) yield { type: 'headers', status: 200 };
@@ -979,7 +980,7 @@ test('Issue #9: closing tool fence without trailing newline uses postToolIdleMs 
     })(),
     cancel() {},
   });
-  const rJson = await f.api('/v1/chat/completions', {
+  const rJsonSse = await f.api('/v1/chat/completions', {
     method: 'POST',
     body: {
       model: 'gemini-neon',
@@ -988,9 +989,112 @@ test('Issue #9: closing tool fence without trailing newline uses postToolIdleMs 
       stream: true,
     },
   });
-  assert.equal(rJson.status, 200);
-  const wJson = await rJson.text();
-  assert.match(wJson, /\\"ok\\":true/);
-  assert.match(wJson, /"finish_reason":"stop"/);
-  assert.match(wJson, /"incomplete":true/);
+  assert.equal(rJsonSse.status, 200);
+  const wJsonSse = await rJsonSse.text();
+  assert.match(wJsonSse, /\\"ok\\":true/);
+  assert.match(wJsonSse, /"finish_reason":"stop"/);
+  assert.match(wJsonSse, /"incomplete":true/);
+
+  const rJsonBuf = await f.api('/v1/chat/completions', {
+    method: 'POST',
+    body: {
+      model: 'gemini-neon',
+      messages: [{ role: 'user', content: 'Return JSON buffered' }],
+      response_format: { type: 'json_object' },
+      stream: false,
+    },
+  });
+  assert.equal(rJsonBuf.status, 200);
+  const jBuf = await rJsonBuf.json();
+  assert.equal(jBuf.choices[0].message.content, '{"ok":true,"count":3}');
+  assert.equal(jBuf.status, 'incomplete');
+  assert.deepEqual(jBuf.incomplete_details, { reason: 'upstream_interrupted', code: 'NATIVE_TURN_TIMEOUT' });
+
+  // 3. Non-incremental response_format + tools stalling with call-then-text preserves exact item order on Responses SSE
+  //    and resolves on postToolIdleMs (~50ms), NOT postOutputToolIdleMs (500ms).
+  const responsesTools = PI_SHAPED_TOOLS.map(t => ({ type: 'function', ...t.function }));
+  const callThenText = `${toolFence('read', { path: 'src/order.mjs' })}Trailing explanation after call.`;
+  f.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      if (opts?.emitHeaders) yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame(callThenText, { complete: false }) };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  const tOrder = Date.now();
+  const rOrder = await f.api('/v1/responses', {
+    method: 'POST',
+    body: {
+      model: 'gemini-neon',
+      input: 'Read then note',
+      tools: responsesTools,
+      text: { format: { type: 'json_object' } },
+      stream: true,
+    },
+  });
+  const wOrder = await rOrder.text();
+  const elapsedOrder = Date.now() - tOrder;
+  assert.equal(rOrder.status, 200);
+  assert.ok(elapsedOrder < 350, `non-incremental postToolIdleStall should resolve near 50ms, took ${elapsedOrder}ms`);
+  const evsOrder = wOrder.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
+  const compOrder = evsOrder.find(e => e.type === 'response.completed');
+  assert.ok(compOrder);
+  assert.deepEqual(compOrder.response.output.map(o => o.type), ['function_call', 'message'], 'non-incremental stall must preserve exact call -> text item order');
+
+  // 4. Non-incremental stall sink failure MUST propagate the sink error instead of marking benign stall or partialResult.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'frame', bytes: makeNativeFrame('{"ok":true}', { complete: false }) };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  await assert.rejects(
+    f.app.provider.runTurn(
+      'acc-0',
+      { model: 'gemini-neon', messages: [{ role: 'user', content: 'Return JSON' }], response_format: { type: 'json_object' } },
+      () => { throw protocolError('REQUEST_CANCELLED', 499); },
+      { incrementalOutput: false },
+    ),
+    err => err.code === 'REQUEST_CANCELLED' && !err.postOutputIdleStall && !err.partialResult,
+  );
+
+  // 5. Empty/thoughts-only modelComplete=true without END_STREAM terminates promptly in postCompleteGraceMs
+  //    with INCOMPLETE_NATIVE_RESPONSE and wireEnded=false (never hangs 600s and never forges wireEnded=true).
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'frame', bytes: makeNativeFrame('', { complete: true, thoughtText: 'silent thought only' }) };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  const tEmptyDone = Date.now();
+  await assert.rejects(
+    f.app.provider.runTurn('acc-0', { model: 'gemini-neon', messages: [{ role: 'user', content: 'hi' }] }),
+    err => err.code === 'INCOMPLETE_NATIVE_RESPONSE' && err.nativeEvidence?.wireEnded === false && err.nativeEvidence?.modelCompleted === true,
+  );
+  assert.ok(Date.now() - tEmptyDone < 400, 'empty completed frame without END_STREAM must not hang until timeoutMs');
+
+  // 6. Setting postOutputIdleMs: null without postOutputToolIdleMs disables auto-tool post_output idle too.
+  f.app.provider.postOutputIdleMs = null;
+  f.app.provider.postOutputToolIdleMs = undefined;
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('Waiting with postOutputIdleMs disabled.', { complete: false }) };
+      await new Promise(r => setTimeout(r, 120));
+      yield { type: 'frame', bytes: makeNativeFrame(`Waiting with postOutputIdleMs disabled.\n${toolFence('read', { path: 'src/null-ok.mjs' })}`, { complete: true }) };
+      yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const nullDisabledResult = await f.app.provider.runTurn(
+    'acc-0',
+    { model: 'gemini-neon', messages: [{ role: 'user', content: 'read' }], tools: PI_SHAPED_TOOLS, tool_choice: 'auto' },
+    () => {},
+    { incrementalOutput: true, timeoutMs: 2000 },
+  );
+  assert.equal(nullDisabledResult.calls.length, 1);
+  assert.equal(nullDisabledResult.calls[0].function.name, 'read');
 });

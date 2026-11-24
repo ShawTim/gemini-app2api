@@ -1519,6 +1519,24 @@ test('pure refactored units: selectIdleDeadline, planRetry, wirePhase/attemptDis
     lastTextProgressAt: 5_000,
     lastGenerationProgressAt: 9_900,
   }, now), { kind: 'post_complete', ms: 500 });
+  // Empty/thoughts-only modelComplete=true also arms post_complete so hung empty completions never wait 600s
+  assert.deepEqual(selectIdleDeadline({
+    verified: true,
+    hasLiveToolError: false,
+    hasClosedToolError: false,
+    modelComplete: true,
+    modelCompleteAt: 8_500,
+    postCompleteGraceMs: 2_000,
+    hasText: false,
+    hasLiveCalls: false,
+    streamingTool: false,
+    cleanOutput: false,
+    awaitingOptionalTool: true,
+    postOutputIdleMs: 15_000,
+    postOutputToolIdleMs: 45_000,
+    lastTextProgressAt: null,
+    lastGenerationProgressAt: null,
+  }, now), { kind: 'post_complete', ms: 500 });
 
   // 2. planRetry: shortOutputRetry blocks auth/precondition/downgrade/unpermitted-quota while keeping 1-time short-fragment replacement
   const shortOutAuth = {
