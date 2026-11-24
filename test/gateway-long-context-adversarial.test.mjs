@@ -1060,6 +1060,26 @@ test('Issue #9: review-hardening invariants (empty completed hang, postOutputIdl
     err => err.code === 'REQUEST_CANCELLED' && !err.postOutputIdleStall && !err.partialResult,
   );
 
+  // 4b. Incremental closing fence without trailing LF whose sink rejects the flushed call MUST propagate
+  //     the sink error and NEVER claim postToolIdleStall=true.
+  f.app.provider.openTurn = () => ({
+    events: (async function* () {
+      yield { type: 'headers', status: 200 };
+      yield { type: 'frame', bytes: makeNativeFrame('```tool_call\n{"name":"read","arguments":{"path":"src/reject.mjs"}}\n```', { complete: false }) };
+      await new Promise(() => {});
+    })(),
+    cancel() {},
+  });
+  await assert.rejects(
+    f.app.provider.runTurn(
+      'acc-0',
+      { model: 'gemini-neon', messages: [{ role: 'user', content: 'read' }], tools: PI_SHAPED_TOOLS },
+      ev => { if (ev.call) throw protocolError('REQUEST_CANCELLED', 499); },
+      { incrementalOutput: true },
+    ),
+    err => err.code === 'REQUEST_CANCELLED' && !err.postToolIdleStall && !err.partialResult,
+  );
+
   // 5. Empty/thoughts-only modelComplete=true without END_STREAM terminates promptly in postCompleteGraceMs
   //    with INCOMPLETE_NATIVE_RESPONSE and wireEnded=false (never hangs 600s and never forges wireEnded=true).
   f.app.provider.openTurn = () => ({

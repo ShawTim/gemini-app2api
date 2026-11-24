@@ -883,8 +883,13 @@ export class NativeDirectProvider {
       const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
       if (incremental && !liveToolError && modeVerified && !sinkFailed) {
         try { await publish(liveSplitter.flush()); }
-        catch { /* Retain already-published text; never release an invalid/incomplete tool body. */ }
+        catch (flushError) {
+          if (sinkFailed) error = flushError;
+          /* Otherwise (e.g. TRUNCATED_TOOL_CALL / parse error): retain already-published text without releasing an invalid/incomplete tool body. */
+        }
       }
+      if (incremental && error?.postToolIdleStall && publishedCalls === 0) delete error.postToolIdleStall;
+      if (incremental && error?.postOutputIdleStall && !publishedContent.trim().length) delete error.postOutputIdleStall;
       let nonIncrementalDelivered = null;
       if (!incremental && !liveToolError && modeVerified && !sinkFailed &&
           (error?.postOutputIdleStall || error?.postToolIdleStall) &&
