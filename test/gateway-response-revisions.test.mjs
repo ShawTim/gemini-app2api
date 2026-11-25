@@ -154,6 +154,87 @@ for (const route of ['chat/completions', 'responses']) test(`${route}: revising 
   assert.equal(row.outputIncomplete, true); assert.equal(row.nativeEvidence.nonMonotonicSite, 'snapshot_stream');
 });
 
+for (const route of ['chat/completions', 'responses']) test(`${route}: rejected complete=true snapshot never releases retracted old held draft calls (#11)`, async t => {
+  const publishedProse = 'Published prose sentence.\n'.repeat(100);
+  for (const [secondId, expectedCode] of [[privateId, 'NON_MONOTONIC_NATIVE_RESPONSE'], ['other-response-id', 'INVALID_NATIVE_RESPONSE']]) {
+    const f = await fixture({ allowFailover: false, allowAutomaticRecovery: false }); t.after(f.close);
+    f.app.provider.openTurn = () => turn([
+      snapshot(publishedProse + call('retracted draft') + '\n', { id: privateId, complete: false }),
+      snapshot('Completely different final answer with no calls.', { id: secondId, complete: true }),
+      end,
+    ]);
+    const body = route === 'responses' ? { model: request.model, input: 'Continue.', tools: responseTools, stream: true } : { ...request, stream: true };
+    const response = await f.api('/v1/' + route, { method: 'POST', body }); assert.equal(response.status, 200);
+    const wire = await response.text();
+    assert.doesNotMatch(wire, /retracted draft|fixture_lookup/);
+    const events = wire.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+    if (route === 'responses') {
+      const terminal = events.find(e => e.type === 'response.completed');
+      assert.equal(terminal.incomplete, true);
+      assert.equal(terminal.response.incomplete_details.code, expectedCode);
+      assert.equal(terminal.response.output.filter(x => x.type === 'function_call').length, 0);
+    } else {
+      const terminal = events.find(e => e.incomplete);
+      assert.equal(terminal.choices[0].finish_reason, 'stop');
+      assert.equal(terminal.incomplete_details.code, expectedCode);
+      assert.equal(events.flatMap(e => e.choices ?? []).flatMap(c => c.delta?.tool_calls ?? []).length, 0);
+    }
+  }
+});
+
+for (const route of ['chat/completions', 'responses']) test(`${route}: validated Call A survives broken Call B + reset/timeout, and temporary broken draft rebases cleanly to final (#11)`, async t => {
+  const badCall = '```tool_call\n{"name":"fixture_lookup","arguments":{"key":"line1\nline2"}}\n```\n';
+  for (const [completeFlag, errCode, errStatus] of [[true, 'NATIVE_STREAM_RESET', 502], [false, 'NATIVE_TURN_TIMEOUT', 504]]) {
+    const f = await fixture({ allowFailover: false, allowAutomaticRecovery: false }); t.after(f.close);
+    f.app.provider.openTurn = () => turn([
+      snapshot(call('callA') + '\n', { complete: false }),
+      snapshot(call('callA') + '\n' + badCall, { complete: completeFlag }),
+      Object.assign(new Error(errCode), { code: errCode, status: errStatus }),
+    ]);
+    const body = route === 'responses' ? { model: request.model, input: 'Continue.', tools: responseTools, stream: true } : { ...request, stream: true };
+    const response = await f.api('/v1/' + route, { method: 'POST', body }); assert.equal(response.status, 200);
+    const wire = await response.text();
+    assert.match(wire, /callA/);
+    const events = wire.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+    if (route === 'responses') {
+      const terminal = events.find(e => e.type === 'response.completed');
+      assert.equal(terminal.incomplete, true);
+      assert.equal(terminal.response.output.filter(x => x.type === 'function_call').length, 1);
+    } else {
+      const terminal = events.find(e => e.incomplete);
+      assert.equal(terminal.choices[0].finish_reason, 'tool_calls');
+      assert.equal(events.flatMap(e => e.choices ?? []).flatMap(c => c.delta?.tool_calls ?? []).length, 1);
+    }
+  }
+
+  // Same-id temporary broken draft inside held call after >2KB prose recovers on Frame 3 final call.
+  const prose = 'Published prose sentence.\n'.repeat(100);
+  const f3 = await fixture({ allowFailover: false, allowAutomaticRecovery: false }); t.after(f3.close);
+  f3.app.provider.openTurn = () => turn([
+    snapshot(prose + call('draft') + '\n', { complete: false }),
+    snapshot(prose + badCall, { complete: false }),
+    snapshot(prose + call('final') + '\n', { complete: true }),
+    end,
+  ]);
+  const body = route === 'responses' ? { model: request.model, input: 'Continue.', tools: responseTools, stream: true } : { ...request, stream: true };
+  const r3 = await f3.api('/v1/' + route, { method: 'POST', body }); assert.equal(r3.status, 200);
+  const wire3 = await r3.text();
+  assert.match(wire3, /final/);
+  assert.doesNotMatch(wire3, /"key":"draft"/);
+  const evs3 = wire3.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+  if (route === 'responses') {
+    const terminal = evs3.find(e => e.type === 'response.completed');
+    assert.ok(terminal); assert.equal(terminal.incomplete, undefined);
+    const fnCalls = terminal.response.output.filter(x => x.type === 'function_call');
+    assert.equal(fnCalls.length, 1); assert.equal(fnCalls[0].arguments, '{"key":"final"}');
+  } else {
+    const terminal = evs3.find(e => e.choices?.[0]?.finish_reason === 'tool_calls');
+    assert.ok(terminal); assert.equal(terminal.incomplete, undefined);
+    const fnCalls = evs3.flatMap(e => e.choices ?? []).flatMap(c => c.delta?.tool_calls ?? []);
+    assert.equal(fnCalls.length, 1); assert.equal(fnCalls[0].function.arguments, '{"key":"final"}');
+  }
+});
+
 test('revision diagnostics expose only bounded counts and identity-checked state', async () => {
   await assert.rejects(provider([snapshot('draft'), snapshot('final')]).runTurn('synthetic', request), e => {
     assert.equal(e.nativeEvidence.nativeResponseRevisions, 1); assert.equal(e.nativeEvidence.nativeResponseIdentityVerified, true);

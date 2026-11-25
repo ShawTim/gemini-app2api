@@ -450,10 +450,33 @@ export class NativeDirectProvider {
     };
     // Same-id revision after output was committed: accept it only if replaying the new
     // snapshot reproduces everything already delivered (visible text prefix + identical calls).
+    // A recoverable TOOL_ERRORS failure in an unpublished tail is deferred so a subsequent
+    // same-id revision can still repair the draft without leaking old held calls.
     const tryRebaseLive = nextText => {
-      const splitter = createToolCallSplitter({ policy });
+      let splitter = createToolCallSplitter({ policy });
       let items;
-      try { items = splitter.push(nextText); } catch { return false; }
+      let rebaseToolError = null;
+      try {
+        items = splitter.push(nextText);
+      } catch (splitError) {
+        if (!TOOL_ERRORS.has(splitError?.code)) return false;
+        const replay = createToolCallSplitter({ policy });
+        items = [];
+        for (let pos = 0; pos < nextText.length;) {
+          const nl = nextText.indexOf('\n', pos);
+          const end = nl < 0 ? nextText.length : nl + 1;
+          try {
+            items.push(...replay.push(nextText.slice(pos, end)));
+          } catch (lineErr) {
+            if (!TOOL_ERRORS.has(lineErr?.code)) return false;
+            rebaseToolError = lineErr;
+            break;
+          }
+          pos = end;
+        }
+        if (!rebaseToolError) return false;
+        splitter = replay;
+      }
       let content = '';
       const calls = [];
       for (const item of items) {
@@ -479,9 +502,15 @@ export class NativeDirectProvider {
       liveContent = content;
       liveCalls = calls;
       liveSyncedLength = nextText.length;
-      liveToolError = null;
-      liveToolErrorTailStart = 0;
-      liveToolErrorDeadline = null;
+      if (rebaseToolError) {
+        liveToolError = rebaseToolError;
+        liveToolErrorTailStart = Number.isInteger(rebaseToolError.postFenceOffset) ? rebaseToolError.postFenceOffset : nextText.length;
+        liveToolErrorDeadline = postToolIdleMs === null ? null : Date.now() + postToolIdleMs;
+      } else {
+        liveToolError = null;
+        liveToolErrorTailStart = 0;
+        liveToolErrorDeadline = null;
+      }
       return true;
     };
     const publish = async (items, { final = false } = {}) => {
@@ -714,9 +743,6 @@ export class NativeDirectProvider {
             if (!Number.isSafeInteger(info.thinkingLevel) || info.thinkingLevel < 0 || info.thinkingLevel > 4) fail('INVALID_NATIVE_THINKING_LEVEL');
             observedThinking = info.thinkingLevel;
           }
-          const wasComplete = modelComplete;
-          modelComplete ||= info.completed;
-          if (!wasComplete && modelComplete) modelCompleteAt = Date.now();
           // Stop as soon as a wrong model is proven; do not pay for a full
           // downgraded answer that this gateway can never return as success.
           if (downgrade) {
@@ -769,6 +795,12 @@ export class NativeDirectProvider {
             rawText = info.text;
           } else if (snapshotId !== null && info.responseId && info.responseId !== snapshotId) {
             fail('INVALID_NATIVE_RESPONSE');
+          }
+          // Completion evidence applies ONLY after frame identity and monotonicity checks succeed.
+          if (!textProgressed) {
+            const wasComplete = modelComplete;
+            modelComplete ||= info.completed;
+            if (!wasComplete && modelComplete) modelCompleteAt = Date.now();
           }
           const frameThoughtBytes = info.outputShape?.nativeThoughtBytes ?? 0;
           if (textProgressed) {
@@ -953,10 +985,11 @@ export class NativeDirectProvider {
       return result;
     } catch (error) {
       const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
+      // Only an accepted snapshot may authorize releasing held tool calls; a rejected
+      // frame (wrong identity or failed rebase) must never promote old draft calls.
+      const snapshotAccepted = !['NON_MONOTONIC_NATIVE_RESPONSE', 'INVALID_NATIVE_RESPONSE'].includes(error?.code);
+      const releaseHeld = snapshotAccepted && (error?.postToolIdleStall === true || modelComplete || error?.code === 'NATIVE_TURN_TIMEOUT');
       if (incremental && !liveToolError && modeVerified && !sinkFailed) {
-        // A completed snapshot, post-tool idle stall, or turn timeout after validated calls
-        // were parsed means upstream finished or stopped progressing on a verified snapshot.
-        const releaseHeld = error?.postToolIdleStall === true || modelComplete || error?.code === 'NATIVE_TURN_TIMEOUT';
         try { await publish(liveSplitter.flush({ interrupted: true }), { final: releaseHeld }); }
         catch (flushError) {
           if (sinkFailed) error = flushError;
@@ -966,9 +999,10 @@ export class NativeDirectProvider {
           /* Otherwise (e.g. TRUNCATED_TOOL_CALL / parse error): retain already-published text without releasing an invalid/incomplete tool body. */
         }
       }
-      // Deferred tool-protocol errors surface only after the stream settled; release the
-      // already validated earlier calls so the caller can salvage them as before.
-      if (deferCalls && modeVerified && !sinkFailed && TOOL_ERRORS.has(error?.code) && publishedCalls < liveCalls.length) {
+      // Deferred tool-protocol errors (or transport reset/timeout after a bad tail) leave
+      // earlier validated calls from the same accepted snapshot eligible for salvage.
+      if (deferCalls && modeVerified && !sinkFailed && snapshotAccepted && publishedCalls < liveCalls.length &&
+          (TOOL_ERRORS.has(error?.code) || releaseHeld)) {
         try { await publish([], { final: true }); } catch (releaseError) { if (sinkFailed) error = releaseError; }
       }
       if (incremental && error?.postToolIdleStall && publishedCalls === 0) delete error.postToolIdleStall;
