@@ -1978,3 +1978,46 @@ test('pi-gemini-app salvages valid Call #1 on Call #2 INVALID_TOOL_JSON and allo
   assert.match(seenPrompts[1], /encode all newlines.*\\n/i);
   assert.deepEqual(recovered.content.find((b) => b.type === 'toolCall')?.arguments, { key: 'ok' });
 });
+
+test('pi-gemini-app automatically recovers when model leads with hallucinated [Caller tool result] wire block (seen === 0)', async () => {
+  const model = { id: 'gemini-neon', provider: 'gemini-app', api: 'gemini-app-api' };
+  const toolContext = {
+    messages: [{ role: 'user', content: 'Continue task', timestamp: 1 }],
+    tools: [{ name: 'lookup', description: 'Lookup key', parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }],
+  };
+  const fakeLead = '[Caller tool result] {"tool_call_id":"call_4428ef6e09544348b0a1a5f4","content":"fake output"}';
+  const validCall = '```tool_call\n{"name":"lookup","arguments":{"key":"real"}}\n```\n';
+  let attempts = 0;
+  let cancelledFirst = false;
+  const handler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    openTurn: () => {
+      const idx = ++attempts;
+      if (idx === 1) {
+        return {
+          events: (async function* () {
+            yield { type: 'frame', bytes: buildNativeFrame(fakeLead.slice(0, 14), { complete: false }) };
+            yield { type: 'frame', bytes: buildNativeFrame(fakeLead, { complete: false }) };
+            await new Promise(() => {});
+          })(),
+          cancel() { cancelledFirst = true; },
+        };
+      }
+      return {
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame(validCall, { complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    },
+  });
+  const msg = await handler.streamSimple(model, toolContext, { apiKey: 'fixture-token' }).result();
+  assert.equal(attempts, 2);
+  assert.equal(cancelledFirst, true, 'hallucinated leading caller tool result must early-stop upstream immediately');
+  assert.equal(msg.stopReason, 'toolUse');
+  const textOut = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  assert.equal(textOut.includes('Caller tool result'), false);
+  assert.deepEqual(msg.content.find((b) => b.type === 'toolCall')?.arguments, { key: 'real' });
+});

@@ -487,35 +487,38 @@ export class NativeDirectProvider {
           ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
         iterator = turn.events[Symbol.asyncIterator]();
         try {
-      let cachedFallbackText = null, cachedFallbackRevision = -1, cachedFallbackResult = { kind: 'none' };
+      let cachedFallbackText = null, cachedFallbackRevision = -1, cachedFallbackComplete = null, cachedFallbackResult = { kind: 'none' };
       const probeFullRawText = () => {
-        if (cachedFallbackText === rawText && cachedFallbackRevision === revisionCount) return cachedFallbackResult;
+        if (cachedFallbackText === rawText && cachedFallbackRevision === revisionCount && cachedFallbackComplete === modelComplete) return cachedFallbackResult;
         cachedFallbackText = rawText;
         cachedFallbackRevision = revisionCount;
+        cachedFallbackComplete = modelComplete;
         if (!rawText.trim() || ASYNC_DEEP_THINK_PLACEHOLDER_RE.test(rawText)) {
           return (cachedFallbackResult = { kind: 'none' });
         }
         let probeItems;
+        let probeSuppressed = false;
         try {
           const probe = createToolCallSplitter({ policy });
-          probeItems = [...probe.push(rawText), ...probe.flush()];
+          probeItems = [...probe.push(rawText), ...probe.flush({ interrupted: !modelComplete })];
+          probeSuppressed = probe.suppressed;
         } catch (probeError) {
           if (probeError?.code === 'TRUNCATED_TOOL_CALL') return (cachedFallbackResult = { kind: 'streaming_tool' });
           if (TOOL_ERRORS.has(probeError?.code)) return (cachedFallbackResult = { kind: 'closed_tool_error', error: probeError });
           return (cachedFallbackResult = { kind: 'none' });
         }
-        if (liveCalls.length > 0) return (cachedFallbackResult = { kind: 'none' });
+        if (liveCalls.length > 0) return (cachedFallbackResult = { kind: 'none', suppressed: probeSuppressed });
         try {
           const probeCalls = probeItems.filter(it => it.type === 'call').map(it => it.call);
           let probeContent = probeItems.filter(it => it.type === 'content').map(it => it.text).join('');
-          if (!outputShape.nativeStructuredOutputPresent && softErrorReason(probeContent, body, probeCalls.length)) return (cachedFallbackResult = { kind: 'none' });
-          if (body.parallel_tool_calls === false && probeCalls.length > 1) return (cachedFallbackResult = { kind: 'none' });
+          if (!outputShape.nativeStructuredOutputPresent && softErrorReason(probeContent, body, probeCalls.length)) return (cachedFallbackResult = { kind: 'none', suppressed: probeSuppressed });
+          if (body.parallel_tool_calls === false && probeCalls.length > 1) return (cachedFallbackResult = { kind: 'none', suppressed: probeSuppressed });
           validateToolCompletion(probeCalls, policy);
-          if (!probeCalls.length && !probeContent.trim()) return (cachedFallbackResult = { kind: 'none' });
+          if (!probeCalls.length && !probeContent.trim()) return (cachedFallbackResult = { kind: 'none', suppressed: probeSuppressed });
           if (body.response_format && !probeCalls.length) probeContent = validateStructuredOutputText(probeContent, body.response_format);
-          return (cachedFallbackResult = { kind: 'clean_output', hasCalls: probeCalls.length > 0, content: probeContent, calls: probeCalls, items: probeItems });
+          return (cachedFallbackResult = { kind: 'clean_output', hasCalls: probeCalls.length > 0, suppressed: probeSuppressed, content: probeContent, calls: probeCalls, items: probeItems });
         } catch {
-          return (cachedFallbackResult = { kind: 'none' });
+          return (cachedFallbackResult = { kind: 'none', suppressed: probeSuppressed });
         }
       };
       // O(1) incremental idle classification for streaming turns via liveSplitter.state;
@@ -752,13 +755,33 @@ export class NativeDirectProvider {
                 throw splitError;
               }
             }
-            // Once valid tool_call(s) have been parsed and the model begins hallucinating
+            // Once valid output or tool_call(s) have been parsed and the model begins hallucinating
             // a fake [Caller tool result], stop upstream immediately instead of waiting
             // minutes for the model to finish generating discarded text.
-            if (!liveToolError && liveSplitter.suppressed && liveCalls.length > 0 && !downgrade && !outputShape.nativeRefusalPresent) {
+            if (!liveToolError && liveSplitter.suppressed && (liveCalls.length > 0 || liveContent.trim().length > 0) && !downgrade && !outputShape.nativeRefusalPresent) {
               note('early_stop_post_tool_hallucination', { calls: liveCalls.length });
               try { turn?.cancel(); } catch {}
-              readExit = 'suppressed_after_valid_call';
+              readExit = liveCalls.length > 0 ? 'suppressed_after_valid_call' : 'suppressed_after_valid_text';
+              ended = true;
+              modelComplete = true;
+              httpStatus = httpStatus ?? 200;
+              grpc = grpc ?? 0;
+              break;
+            }
+          }
+          if (!incremental && rawText.length > 0 && !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified()) {
+            const snap = probeFullRawText();
+            if (snap.kind === 'closed_tool_error' && snap.error?.toolProtocolReason === 'hallucinated_caller_result') {
+              liveToolError = snap.error;
+              note('early_stop_post_tool_error', { code: liveToolError.code, bytes: Buffer.byteLength(rawText) });
+              try { turn?.cancel(); } catch {}
+              readExit = 'deferred_tool_error';
+              break;
+            }
+            if (snap.suppressed) {
+              note('early_stop_post_tool_hallucination', { calls: snap.calls?.length ?? 0 });
+              try { turn?.cancel(); } catch {}
+              readExit = snap.hasCalls ? 'suppressed_after_valid_call' : 'suppressed_after_valid_text';
               ended = true;
               modelComplete = true;
               httpStatus = httpStatus ?? 200;
@@ -874,7 +897,7 @@ export class NativeDirectProvider {
     } catch (error) {
       const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
       if (incremental && !liveToolError && modeVerified && !sinkFailed) {
-        try { await publish(liveSplitter.flush()); }
+        try { await publish(liveSplitter.flush({ interrupted: true })); }
         catch (flushError) {
           if (sinkFailed) error = flushError;
           /* Otherwise (e.g. TRUNCATED_TOOL_CALL / parse error): retain already-published text without releasing an invalid/incomplete tool body. */

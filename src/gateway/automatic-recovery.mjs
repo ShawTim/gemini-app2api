@@ -22,7 +22,9 @@ export function toolRecoveryInstruction(code, reason = null) {
   if (TOOL_ERRORS.has(code)) {
     const jsonHint = code === 'INVALID_TOOL_JSON'
       ? (JSON_REASON_HINTS[reason] ?? ' The previous tool_call block failed strict JSON parsing: double-escape all backslashes (\\\\) and quotes (\\") inside shell/code strings, use \\n instead of raw newlines inside strings, avoid trailing commas, and never put multiple JSON objects inside one tool_call fence (use a separate ```tool_call block per call).')
-      : '';
+      : (code === 'MALFORMED_TOOL_CALL' && reason === 'hallucinated_caller_result')
+        ? ' The previous attempt echoed a synthetic [Caller tool result] transcript block instead of answering or invoking a tool: never emit [Caller tool result]; either answer the user directly or emit a real ```tool_call block.'
+        : '';
     return '[Gateway automatic recovery: regenerate this turn; the previous response was not delivered and no caller tool was executed.]\n' +
       'Answer the latest user request using the complete history. If a tool is needed and permitted, emit a complete tool_call block with exactly the keys "name" and "arguments" as valid JSON. Emit one strict JSON object per tool_call block with properly escaped strings (no raw newlines, invalid escapes, or trailing commas).' +
       jsonHint +

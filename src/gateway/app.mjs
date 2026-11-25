@@ -210,7 +210,7 @@ export function errorPayload(error) {
   const previousRequestId = typeof error?.previousRequestId === "string" && /^req_[A-Za-z0-9_-]{1,80}$/.test(error.previousRequestId) ? error.previousRequestId : null;
   const toolReason = error?.nativeEvidence?.toolProtocolReason ?? error?.toolProtocolReason;
   const toolProtocolReason = (code === 'MALFORMED_TOOL_CALL' || previousCode === 'MALFORMED_TOOL_CALL') &&
-    ['opening_fence', 'closing_fence'].includes(toolReason) ? toolReason : null;
+    ['opening_fence', 'closing_fence', 'hallucinated_caller_result'].includes(toolReason) ? toolReason : null;
   const terminal = code === 'GENERATION_FAILED' && error?.terminalNoOutput === true;
   const param =
     typeof error?.param === "string" &&
@@ -220,6 +220,7 @@ export function errorPayload(error) {
   return {
     error: {
       message: terminal ? 'Generation ended without output. Gateway recovery is exhausted; this turn has failed.'
+        : code === 'MALFORMED_TOOL_CALL' && toolProtocolReason === 'hallucinated_caller_result' ? `${code}: upstream emitted a synthetic caller tool result marker. No tool call was released.`
         : code === 'MALFORMED_TOOL_CALL' && toolProtocolReason ? `${code}: invalid ${toolProtocolReason} layout. No tool call was released.`
         : code === 'UNSUPPORTED_PARAMETER' && param ? `UNSUPPORTED_PARAMETER: ${param}`
         : code === 'UNSUPPORTED_MODEL' ? 'UNSUPPORTED_MODEL: supported models are gemini-neon, gemini-hydrogen, gemini-flash-lite (alias: gemini-argon -> gemini-neon)'

@@ -6,6 +6,7 @@ const bounded = (value, min, max) =>
 const TOOL_PROTOCOL_REASONS = new Set([
   'opening_fence',
   'closing_fence',
+  'hallucinated_caller_result',
   'multiple_root_values',
   'raw_newline_in_string',
   'control_char_in_string',

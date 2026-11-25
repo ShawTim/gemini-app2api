@@ -205,6 +205,58 @@ export function flattenMessages(messages = [], { maxChars = 3_500_000 } = {}) {
 
 const CALLER_RESULT_MARKER = '[Caller tool result]';
 
+// Single source of truth for classifying an unquoted buffer against the internal
+// `[Caller tool result]` + `{"tool_call_id":` wire format (supporting spaces, tabs, LF, and CRLF).
+// Returns:
+// - 'match'   : confirmed synthetic wire block prefix
+// - 'pending' : valid prefix that could still become a 'match' with more bytes
+// - 'none'    : definitely ordinary text (safe to stream immediately)
+function classifyCallerResultWire(str, { jsonOnly = false } = {}) {
+  let i = 0;
+  const skipIndent = () => {
+    let spaces = 0;
+    while (i < str.length && spaces < 3 && str[i] === ' ') { i++; spaces++; }
+  };
+  const matchLiteral = literal => {
+    const rem = str.length - i;
+    if (rem <= 0) return 'pending';
+    if (rem < literal.length) return literal.startsWith(str.slice(i)) ? 'pending' : 'none';
+    if (!str.startsWith(literal, i)) return 'none';
+    i += literal.length;
+    return 'ok';
+  };
+  if (!jsonOnly) {
+    skipIndent();
+    if (i >= str.length) return 'pending';
+    const m = matchLiteral(CALLER_RESULT_MARKER);
+    if (m !== 'ok') return m;
+    let sawSep = false;
+    while (i < str.length && (str[i] === ' ' || str[i] === '\t')) { i++; sawSep = true; }
+    if (i < str.length && str[i] === '\r') {
+      i++;
+      if (i === str.length) return 'pending';
+      if (str[i] !== '\n') return 'none';
+      i++;
+      sawSep = true;
+      skipIndent();
+    } else if (i < str.length && str[i] === '\n') {
+      i++;
+      sawSep = true;
+      skipIndent();
+    }
+    if (i === str.length) return 'pending';
+    if (!sawSep) return 'none';
+  } else {
+    skipIndent();
+    if (i >= str.length) return 'pending';
+  }
+  const j = matchLiteral('{"tool_call_id"');
+  if (j !== 'ok') return j;
+  while (i < str.length && (str[i] === ' ' || str[i] === '\t')) i++;
+  if (i === str.length) return 'pending';
+  return str[i] === ':' ? 'match' : 'none';
+}
+
 // Returns the safe prefix length before a full or trailing partial CALLER_RESULT_MARKER.
 // Because CALLER_RESULT_MARKER contains '[' only at index 0, any partial prefix at the end
 // of `str` must start at the last '[' within the trailing slice.
@@ -222,15 +274,44 @@ function callerResultPreviewCut(str) {
  * become call events; preview exposes ordinary pending text, never a tool body.
  * Once at least one real tool_call has been emitted, any unquoted hallucinated
  * `[Caller tool result]` continuation and everything after it is suppressed so
- * the caller receives only the real tool calls. */
+ * the caller receives only the real tool calls. Even before any tool_call, an
+ * unquoted wire-format `[Caller tool result]` + `{"tool_call_id":...}` block is
+ * rejected as recoverable MALFORMED_TOOL_CALL when leading (no prior visible
+ * text) or suppressed when trailing after real visible text. */
 export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBytes(12).toString('hex'), policy = compileToolPolicy([]) } = {}) {
   let pending = '', scanned = 0, seen = 0, closed = false, suppressed = false, bytes = 0, consumedChars = 0;
   let mode = 'text', marker = '`', fenceLength = 3, toolBody = '', toolBytes = 0, headerBytes = 0, inlineTicks = 0;
+  let hasVisibleContent = false, leadingWhitespace = '', heldMarkerLine = null, heldMarkerOffset = 0;
   const ids = new Set();
-  const malformed = reason => {
+  const pushContent = (events, chunk) => {
+    if (!chunk) return;
+    if (!hasVisibleContent && seen === 0) {
+      if (!chunk.trim().length) {
+        leadingWhitespace += chunk;
+        return;
+      }
+      hasVisibleContent = true;
+      events.push({ type: 'content', text: leadingWhitespace + chunk });
+      leadingWhitespace = '';
+      return;
+    }
+    if (chunk.trim().length > 0) hasVisibleContent = true;
+    events.push({ type: 'content', text: chunk });
+  };
+  const malformed = (reason, offset = undefined) => {
     const error = protocolError('MALFORMED_TOOL_CALL', 502);
     error.toolProtocolReason = reason;
+    if (offset !== undefined) error.postFenceOffset = offset;
     throw error;
+  };
+  const handleZeroCallHallucination = offset => {
+    heldMarkerLine = null;
+    heldMarkerOffset = 0;
+    if (!hasVisibleContent) {
+      leadingWhitespace = '';
+      malformed('hallucinated_caller_result', offset);
+    }
+    suppressed = true;
   };
   const emitCall = events => {
     const parsed = parseBoundedJson(toolBody.trim(), { status: 502 });
@@ -240,30 +321,30 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     const id = newId();
     if (typeof id !== 'string' || !/^call_[A-Za-z0-9_-]{1,200}$/.test(id) || ids.has(id)) fail('INVALID_TOOL_CALL_ID', 502);
     ids.add(id);
+    if (leadingWhitespace) {
+      events.push({ type: 'content', text: leadingWhitespace });
+      leadingWhitespace = '';
+    }
     events.push({ type: 'call', call: { id, type: 'function', function: { name: parsed.name, arguments: JSON.stringify(parsed.arguments) } } });
   };
-  const inlineText = (text, raw, eol, events) => {
-    if (/^(?: {4}|\t| {0,3}(?:>|[-+*][ \t]|\d+[.)][ \t]))/.test(text)) {
-      inlineTicks = 0;
-      if (seen > 0) {
-        const idx = text.indexOf(CALLER_RESULT_MARKER);
-        if (idx >= 0) {
-          if (idx > 0) events.push({ type: 'content', text: text.slice(0, idx) });
+  const scanInlineText = (text, raw, eol, events, { interrupted = false, allowToolFence = true, persistTicks = true } = {}) => {
+    let ticks = persistTicks ? inlineTicks : 0;
+    let lastBacktickRun = null;
+    for (let i = 0; i < text.length;) {
+      if (seen > 0 && !ticks) {
+        if (text.startsWith(CALLER_RESULT_MARKER, i)) {
+          if (i) pushContent(events, text.slice(0, i));
           suppressed = true;
+          if (persistTicks) inlineTicks = 0;
+          return;
+        }
+        if (interrupted && text[i] === '[' && CALLER_RESULT_MARKER.startsWith(text.slice(i))) {
+          if (i) pushContent(events, text.slice(0, i));
+          if (persistTicks) inlineTicks = 0;
           return;
         }
       }
-      events.push({ type: 'content', text: raw });
-      return;
-    }
-    if (!text.trim()) inlineTicks = 0;
-    for (let i = 0; i < text.length;) {
-      if (seen > 0 && !inlineTicks && text.startsWith(CALLER_RESULT_MARKER, i)) {
-        if (i) events.push({ type: 'content', text: text.slice(0, i) });
-        suppressed = true;
-        return;
-      }
-      if (text[i] === '\\' && !inlineTicks) {
+      if (text[i] === '\\' && !ticks) {
         i += 2;
         while (text[i] === '`' && text[i - 1] === '`') i++;
         continue;
@@ -273,21 +354,56 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
       const length = end - i;
       // Historical successful responses may append an actual block after prose.
       // It still needs an exact label/newline and cannot be inside inline code.
-      if (!inlineTicks && length >= 3 && eol && /^[ \t]*tool_call[ \t]*$/.test(text.slice(end))) {
-        if (i) events.push({ type: 'content', text: text.slice(0, i) });
+      if (allowToolFence && !ticks && length >= 3 && eol && /^[ \t]*tool_call[ \t]*$/.test(text.slice(end))) {
+        if (i) pushContent(events, text.slice(0, i));
         mode = 'tool'; fenceLength = length; headerBytes = Buffer.byteLength(text.slice(i) + eol);
+        if (persistTicks) inlineTicks = 0;
         return;
       }
-      if (!inlineTicks) inlineTicks = length;
-      else if (inlineTicks === length) inlineTicks = 0;
+      if (!ticks) {
+        if (!persistTicks) {
+          if (lastBacktickRun === null) {
+            lastBacktickRun = new Map();
+            for (let j = i; j < text.length;) {
+              if (text[j] !== '`') { j++; continue; }
+              let runEnd = j;
+              while (text[runEnd] === '`') runEnd++;
+              lastBacktickRun.set(runEnd - j, j);
+              j = runEnd;
+            }
+          }
+          if ((lastBacktickRun.get(length) ?? -1) >= end) ticks = length;
+        } else {
+          ticks = length;
+        }
+      } else if (ticks === length) ticks = 0;
       i = end;
     }
-    events.push({ type: 'content', text: raw });
+    if (persistTicks) inlineTicks = ticks;
+    pushContent(events, raw);
   };
-  const line = (raw, final, events, lineStartOffset = consumedChars) => {
+  const inlineText = (text, raw, eol, events, interrupted = false) => {
+    if (/^(?: {4}|\t| {0,3}(?:>|[-+*][ \t]|\d+[.)][ \t]))/.test(text)) {
+      inlineTicks = 0;
+      scanInlineText(text, raw, eol, events, { interrupted, allowToolFence: false, persistTicks: false });
+      return;
+    }
+    if (!text.trim()) inlineTicks = 0;
+    scanInlineText(text, raw, eol, events, { interrupted, allowToolFence: true, persistTicks: true });
+  };
+  const line = (raw, final, events, lineStartOffset = consumedChars, interrupted = false) => {
     if (suppressed) return;
     const eol = /\r?\n$/.exec(raw)?.[0] ?? '';
     const text = eol ? raw.slice(0, -eol.length) : raw;
+    if (heldMarkerLine !== null) {
+      if (mode === 'text' && !inlineTicks && seen === 0 && classifyCallerResultWire(text, { jsonOnly: true }) === 'match') {
+        handleZeroCallHallucination(heldMarkerOffset);
+        return;
+      }
+      pushContent(events, heldMarkerLine);
+      heldMarkerLine = null;
+      heldMarkerOffset = 0;
+    }
     // Prefix-only matching avoids backtracking across long untrusted lines.
     const opening = /^ {0,3}(`{3,}|~{3,})/.exec(text);
     const run = opening?.[1], info = opening ? text.slice(opening[0].length) : '';
@@ -303,14 +419,8 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
         }
         mode = 'text'; toolBody = ''; toolBytes = 0; inlineTicks = 0;
         if (info.trim()) {
-          const markerIdx = info.indexOf(CALLER_RESULT_MARKER);
-          if (markerIdx >= 0) {
-            if (markerIdx > 0) events.push({ type: 'content', text: info.slice(0, markerIdx) });
-            suppressed = true;
-            return;
-          }
-          events.push({ type: 'content', text: info + eol });
-        } else if (eol) events.push({ type: 'content', text: eol });
+          scanInlineText(info, info + eol, eol, events, { interrupted, allowToolFence: false, persistTicks: false });
+        } else if (eol) pushContent(events, eol);
         return;
       }
       if (run?.[0] === '`' && info.trim()) malformed('closing_fence');
@@ -319,12 +429,24 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
       return;
     }
     if (mode === 'ordinary') {
-      events.push({ type: 'content', text: raw });
+      pushContent(events, raw);
       if (run?.[0] === marker && run.length >= fenceLength && /^[ \t]*$/.test(info)) mode = 'text';
       return;
     }
     if (!opening || (run[0] === '`' && info.includes('`'))) {
-      inlineText(text, raw, eol, events); return;
+      if (seen === 0 && !inlineTicks) {
+        const wireState = classifyCallerResultWire(raw);
+        if (wireState === 'match') {
+          handleZeroCallHallucination(lineStartOffset);
+          return;
+        }
+        if (!final && wireState === 'pending' && eol) {
+          heldMarkerLine = raw;
+          heldMarkerOffset = lineStartOffset;
+          return;
+        }
+      }
+      inlineText(text, raw, eol, events, interrupted); return;
     }
     const label = info.trim();
     if (label === 'tool_call' && run[0] === '`') {
@@ -335,12 +457,12 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     if (label.startsWith('tool_call')) malformed('opening_fence');
     if (final && !eol && label && 'tool_call'.startsWith(label)) fail('TRUNCATED_TOOL_CALL', 502);
     mode = 'ordinary'; inlineTicks = 0; marker = run[0]; fenceLength = run.length;
-    events.push({ type: 'content', text: raw });
+    pushContent(events, raw);
   };
-  const drain = final => {
+  const drain = (final, { interrupted = false } = {}) => {
     const events = []; let consumed = 0, from = scanned;
-    const runLine = (raw, isFinal, lineStartOffset) => {
-      try { line(raw, isFinal, events, lineStartOffset); }
+    const runLine = (raw, isFinal, lineStartOffset, isInterrupted = false) => {
+      try { line(raw, isFinal, events, lineStartOffset, isInterrupted); }
       catch (err) {
         if (err && typeof err === 'object' && err.postFenceOffset === undefined) {
           err.postFenceOffset = lineStartOffset + raw.length;
@@ -358,18 +480,79 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     }
     if (consumed) { consumedChars += consumed; pending = pending.slice(consumed); }
     scanned = pending.length;
+    if (!final && !suppressed && mode === 'text' && !inlineTicks && seen === 0 && pending) {
+      if (heldMarkerLine !== null) {
+        if (classifyCallerResultWire(pending, { jsonOnly: true }) === 'match') {
+          handleZeroCallHallucination(heldMarkerOffset);
+          if (suppressed) { consumedChars += pending.length; pending = ''; scanned = 0; return events; }
+        } else if (classifyCallerResultWire(pending) === 'match') {
+          pushContent(events, heldMarkerLine);
+          heldMarkerLine = null;
+          heldMarkerOffset = 0;
+          handleZeroCallHallucination(consumedChars);
+          if (suppressed) { consumedChars += pending.length; pending = ''; scanned = 0; return events; }
+        }
+      } else if (classifyCallerResultWire(pending) === 'match') {
+        handleZeroCallHallucination(consumedChars);
+        if (suppressed) { consumedChars += pending.length; pending = ''; scanned = 0; return events; }
+      }
+    }
     if (final && pending) {
-      const lineStartOffset = consumedChars;
-      runLine(pending, true, lineStartOffset);
-      consumedChars += pending.length;
-      pending = ''; scanned = 0;
-      if (suppressed) return events;
+      // On transport interruption (not a normal completed EOF), never release an unresolved
+      // `[Caller tool result]` wire prefix or held marker line as visible content.
+      // (For `seen > 0`, `inlineText()` handles per-character backtick-aware partial-marker trimming.)
+      if (interrupted && mode === 'text' && !inlineTicks && seen === 0) {
+        if (heldMarkerLine !== null) {
+          if (classifyCallerResultWire(pending, { jsonOnly: true }) !== 'none') {
+            heldMarkerLine = null;
+            heldMarkerOffset = 0;
+            pending = ''; scanned = 0;
+            return events;
+          }
+          // heldMarkerLine is confirmed prose; still guard pending if it starts a new wire prefix.
+          if (classifyCallerResultWire(pending) !== 'none') {
+            pushContent(events, heldMarkerLine);
+            heldMarkerLine = null;
+            heldMarkerOffset = 0;
+            pending = ''; scanned = 0;
+            return events;
+          }
+        } else if (classifyCallerResultWire(pending) !== 'none') {
+          pending = ''; scanned = 0;
+          return events;
+        }
+      }
+      if (pending) {
+        const lineStartOffset = consumedChars;
+        runLine(pending, true, lineStartOffset, interrupted);
+        consumedChars += pending.length;
+        pending = ''; scanned = 0;
+        if (suppressed) return events;
+      }
+    }
+    if (final && heldMarkerLine !== null) {
+      if (!interrupted) pushContent(events, heldMarkerLine);
+      heldMarkerLine = null;
+      heldMarkerOffset = 0;
+    }
+    if (final && leadingWhitespace) {
+      if (!interrupted) events.push({ type: 'content', text: leadingWhitespace });
+      leadingWhitespace = '';
     }
     if (mode === 'tool') {
       if (headerBytes + toolBytes + Buffer.byteLength(pending) > TOOL_LIMITS.bytes) fail('TOOL_SIZE_LIMIT', 502);
       if (final) fail('TRUNCATED_TOOL_CALL', 502);
     }
     return events;
+  };
+  const safePendingPreview = str => {
+    let safe = str;
+    const tick = safe.indexOf('`');
+    if (tick >= 0) {
+      if (tick <= 3 && /^ *$/.test(safe.slice(0, tick))) return '';
+      safe = safe.slice(0, tick);
+    }
+    return safe;
   };
   return {
     push(text) {
@@ -379,25 +562,32 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
       pending += text;
       return drain(false);
     },
-    flush() {
+    flush({ interrupted = false } = {}) {
       if (closed) fail('SPLITTER_CLOSED', 502);
       closed = true;
       if (suppressed) return [];
-      return drain(true);
+      return drain(true, { interrupted });
     },
     preview() {
       if (suppressed || mode === 'tool') return '';
       if (mode === 'ordinary') return pending;
-      if (!pending.trim() && pending.length <= 3) return '';
-      let safe = pending;
-      const tick = safe.indexOf('`');
-      if (tick >= 0) {
-        if (tick <= 3 && /^ *$/.test(safe.slice(0, tick))) return '';
-        safe = safe.slice(0, tick);
+      if (heldMarkerLine !== null) {
+        if (classifyCallerResultWire(pending, { jsonOnly: true }) !== 'none') return '';
+        const safe = (!inlineTicks && classifyCallerResultWire(pending) !== 'none') ? '' : safePendingPreview(pending);
+        return (!hasVisibleContent && seen === 0) ? (leadingWhitespace + heldMarkerLine + safe) : (heldMarkerLine + safe);
       }
+      if (!pending.trim() && pending.length <= 3) return '';
+      if (!hasVisibleContent && seen === 0 && !pending.trim()) return '';
+      let safe = safePendingPreview(pending);
       if (seen > 0) {
         const cut = callerResultPreviewCut(safe);
         if (cut >= 0) safe = safe.slice(0, cut);
+      } else if (!inlineTicks && classifyCallerResultWire(pending) !== 'none') {
+        return '';
+      }
+      if (!hasVisibleContent && seen === 0) {
+        if (!safe.trim()) return '';
+        return leadingWhitespace + safe;
       }
       return safe;
     },
