@@ -546,13 +546,25 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     return events;
   };
   const safePendingPreview = str => {
-    let safe = str;
-    const tick = safe.indexOf('`');
-    if (tick >= 0) {
-      if (tick <= 3 && /^ *$/.test(safe.slice(0, tick))) return '';
-      safe = safe.slice(0, tick);
+    let ticks = inlineTicks;
+    for (let i = 0; i < str.length;) {
+      if (str[i] === '\\' && !ticks) {
+        i += 2;
+        while (str[i] === '`' && str[i - 1] === '`') i++;
+        continue;
+      }
+      if (str[i] !== '`') { i++; continue; }
+      let end = i;
+      while (str[end] === '`') end++;
+      const length = end - i;
+      const atLineOpen = i <= 3 && /^ *$/.test(str.slice(0, i));
+      if (length >= 3 && (atLineOpen || !ticks)) return atLineOpen ? '' : str.slice(0, i);
+      if (end === str.length && (atLineOpen || !ticks)) return atLineOpen ? '' : str.slice(0, i);
+      if (!ticks) ticks = length;
+      else if (ticks === length) ticks = 0;
+      i = end;
     }
-    return safe;
+    return str;
   };
   return {
     push(text) {

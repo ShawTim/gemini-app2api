@@ -245,7 +245,7 @@ test('zero-call hallucinated [Caller tool result] wire blocks are rejected when 
     for (const ev of closedTickSplitter.push(fence + '\n`inline\ncode` [Caller tool')) {
       if (ev.type === 'content') closedTickEmitted += ev.text;
     }
-    assert.equal(closedTickSplitter.preview(), 'code');
+    assert.equal(closedTickSplitter.preview(), 'code` ');
     for (const ev of closedTickSplitter.flush({ interrupted: true })) {
       if (ev.type === 'content') closedTickEmitted += ev.text;
     }
@@ -480,4 +480,74 @@ test('zero-call hallucinated [Caller tool result] wire blocks are rejected when 
     { incrementalOutput: false, timeoutMs: 500 },
   );
   assert.equal(lateTrailResult.content, 'Answer.\n');
+});
+
+test('preview() streams ordinary inline code without holding trailing line until flush while preserving strict monotonicity (#10)', () => {
+  // Direct repro from Issue #10: single/double backtick inline code on trailing line without LF.
+  for (const line of [
+    'You can reduce concurrency from `12` to `6-8` without losing progress.',
+    'Set concurrency to `6-8`',
+    'Use ``double `tick` code`` safely.',
+    '  `12` works with leading spaces.',
+    '- Reduce from `12` to `6-8` now.',
+  ]) {
+    const s = createToolCallSplitter({ policy });
+    assert.deepEqual(s.push(line), []);
+    assert.equal(s.preview(), line);
+    const flushed = s.flush();
+    assert.equal(content(flushed), line);
+  }
+
+  // Potential tool_call fence openings and trailing unclosed 1-2 backticks are still held back cleanly.
+  for (const [partial, expectedPreview] of [
+    ['`', ''],
+    ['``', ''],
+    ['```', ''],
+    ['   `', ''],
+    ['   ``', ''],
+    ['   ```tool_call', ''],
+    ['Use `12` then `', 'Use `12` then '],
+    ['Use `12` then ``', 'Use `12` then '],
+    ['Use `12` then ```tool_call', 'Use `12` then '],
+  ]) {
+    const s = createToolCallSplitter({ policy });
+    s.push(partial);
+    assert.equal(s.preview(), expectedPreview, `unexpected preview for ${JSON.stringify(partial)}`);
+  }
+
+  // Character-by-character strict monotonicity across inline code, escapes, fences, cross-line backticks, and post-call markers.
+  const cases = [
+    'You can reduce concurrency from `12` to `6-8` without losing progress.',
+    'Set concurrency to `6-8`',
+    '  `12` then ```tool_call\n' + object + '\n```',
+    'Use `12` and ' + fence + '\nAfter `1` and `2`.',
+    'Use \\`not a code span` and ' + fence,
+    'Use \\```tool_call\nnot a call\n```',
+    'Open `span\nclose` ' + fence,
+    'Open `span\n  ' + fence,
+    'Open `span\nstill ```tool_call\nnot a call` end',
+    '``foo`bar`` ' + fence,
+    fence + '\nUse `12` [Caller tool result] {"tool_call_id":"call_1","content":"fake"}\n',
+    fence + '\n- Delimiter: ` (backtick). [Caller tool result] {"tool_call_id":"call_1"}\n',
+    fence + '\n- Use `[Caller tool result]` safely.',
+  ];
+  for (const source of cases) {
+    const s = createToolCallSplitter({ policy });
+    let emitted = '';
+    let lastVisible = '';
+    for (const ch of source) {
+      for (const ev of s.push(ch)) if (ev.type === 'content') emitted += ev.text;
+      const visible = emitted + s.preview();
+      assert.ok(
+        visible.startsWith(lastVisible),
+        `non-monotonic preview on ${JSON.stringify(source)}: ${JSON.stringify(lastVisible)} -> ${JSON.stringify(visible)}`,
+      );
+      lastVisible = visible;
+    }
+    for (const ev of s.flush()) if (ev.type === 'content') emitted += ev.text;
+    assert.ok(
+      emitted.startsWith(lastVisible),
+      `non-monotonic flush on ${JSON.stringify(source)}: ${JSON.stringify(lastVisible)} -> ${JSON.stringify(emitted)}`,
+    );
+  }
 });
