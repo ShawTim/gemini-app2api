@@ -1,6 +1,6 @@
 {
   "name": "openclaw-gemini-app",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Zero-dependency native Google Gemini HTTP/2 provider plugin for OpenClaw (Gemini Neon, Hydrogen, Flash Lite, Auto) using your Google Gemini subscription via OAuth.",
   "license": "MIT",
   "author": "shawtim",

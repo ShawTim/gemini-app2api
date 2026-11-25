@@ -2,6 +2,19 @@
 
 Release notes for Gemini App2API.
 
+## 1.8.3 — 2026-11-26
+
+### Streaming Tool-Call Revision Rebasing (Fixes #11), Instant Inline-Backtick Streaming Preview (Fixes #10), and Zero-Call Hallucinated Tool-Result Recovery (`pi-gemini-app@0.1.14`, `openclaw-gemini-app@0.1.10`, `opencode-gemini-app@0.1.6`, `mcp-gemini-app@0.1.5`)
+- **Deferred Tool-Call Emission & Same-ID Snapshot Revision Rebasing (Fixes #11)** (`src/native-provider.mjs`, `src/gateway/app.mjs`, `extensions/pi/stream.js`, `extensions/opencode/fetch.js`, `test/gateway-response-revisions.test.mjs`, `test/nonmonotonic-commit-boundary-offline.mjs`):
+  - Added `deferToolCalls: true` across the HTTP Gateway, Pi/OpenClaw (`extensions/pi/stream.js`), and OpenCode (`extensions/opencode/fetch.js`) so parsed caller tool calls are held until the turn finishes cleanly (`END_STREAM` / `modelComplete`), hits a verified `postToolIdleStall` / `NATIVE_TURN_TIMEOUT`, or salvages already-validated calls before a trailing `TOOL_ERRORS` block. Because clients never execute tool calls before turn completion, deferring adds zero turn latency while preventing draft no-op calls from executing.
+  - Added `tryRebaseLive()` for same-`responseId` cumulative snapshot revisions that preserve already-delivered visible text and published calls, replacing retracted draft tool calls cleanly instead of failing with `NON_MONOTONIC_NATIVE_RESPONSE` — while keeping revisions of already-shown text or missing/changed `responseId` strictly fail-closed.
+  - Hardened edge transitions: bound `modelComplete` and deferred call release strictly to accepted snapshots (`snapshotAccepted`), salvaged already-validated Call A when a trailing Call B has broken JSON followed by reset/timeout, and deferred temporary mid-revision `TOOL_ERRORS` inside `tryRebaseLive()` when the delivered prefix remains intact so a subsequent same-ID frame can repair it cleanly.
+- **Immediate Inline-Backtick Streaming Preview & Incremental $O(n)$ Scanner (Fixes #10)** (`src/tool-protocol.mjs`, `native-wire/test/tool-protocol.test.mjs`):
+  - Fixed `safePendingPreview()` holding back trailing lines without `\n` at the first single backtick `` ` `` (which previously froze visible text before inline code for up to 45 seconds during `postOutputToolIdleMs` waits). Ordinary 1–2 backtick inline code now streams immediately while potential `tool_call` fence openings (` ``` `) remain safely held.
+  - Replaced repeated per-chunk trailing-line rescans with a localized $O(n)$ incremental cursor inside `safePendingPreview()` (64 KiB single-line stress benchmarks reduced from ~174–230 ms to ~3.5–5.6 ms).
+- **Zero-Call Hallucinated `[Caller tool result]` Wire-Block Guard & Automatic Recovery** (`src/tool-protocol.mjs`, `src/native-provider.mjs`, `src/gateway/automatic-recovery.mjs`, `extensions/pi/stream.js`, `extensions/opencode/fetch.js`):
+  - Unified `classifyCallerResultWire()` with `leadingWhitespace` buffering and `flush({ interrupted })` so models that echo synthetic `[Caller tool result] {"tool_call_id":...}` blocks with zero prior `tool_call` fences are caught immediately, cancelled upstream, and automatically recovered via targeted `MALFORMED_TOOL_CALL` (`hallucinated_caller_result`) guidance instead of leaking synthetic transcript text and halting agent loops.
+
 ## 1.8.2 — 2026-11-25
 
 ### Hotfix: Restore `hasText` Guard on `post_complete` Grace Timer (`pi-gemini-app@0.1.13`, `openclaw-gemini-app@0.1.9`, `opencode-gemini-app@0.1.5`, `mcp-gemini-app@0.1.4`)
