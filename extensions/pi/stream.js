@@ -438,6 +438,7 @@ export function createGeminiStreamHandler({
 
             const turnResult = await provider.runTurn('pi-session', body, onDelta, {
               incrementalOutput: true,
+              deferToolCalls: true,
               signal: options?.signal,
               recoveryCode,
               recoveryReason,

@@ -435,9 +435,58 @@ export class NativeDirectProvider {
       return context.outputMode === 'buffered' ? { publishedBytes: 0, toolCallCount: 0 }
         : { publishedBytes: Buffer.byteLength(publishedContent), toolCallCount: publishedCalls };
     };
-    const publish = async items => {
+    // Gemini App may revise a same-id snapshot mid-stream, including inside tool_call
+    // bodies. With deferToolCalls, calls (and any text after the first call) are held
+    // until the turn is final so callers never receive draft calls that upstream rewrites.
+    const deferCalls = incremental && context.deferToolCalls === true;
+    const visibleText = (items, content, splitter, final) => {
+      if (!deferCalls || final) return content + splitter.preview();
+      let text = '';
+      for (const item of items) {
+        if (item.type === 'call') return text;
+        text += item.text;
+      }
+      return text + splitter.preview();
+    };
+    // Same-id revision after output was committed: accept it only if replaying the new
+    // snapshot reproduces everything already delivered (visible text prefix + identical calls).
+    const tryRebaseLive = nextText => {
+      const splitter = createToolCallSplitter({ policy });
+      let items;
+      try { items = splitter.push(nextText); } catch { return false; }
+      let content = '';
+      const calls = [];
+      for (const item of items) {
+        if (item.type === 'content') content += item.text;
+        else calls.push(item.call);
+      }
+      if (calls.length < publishedCalls) return false;
+      for (let i = 0; i < publishedCalls; i++) {
+        if (calls[i].function.name !== liveCalls[i].function.name || calls[i].function.arguments !== liveCalls[i].function.arguments) return false;
+      }
+      if (!visibleText(items, content, splitter, false).startsWith(publishedContent)) return false;
+      // Preserve IDs of calls that were already delivered.
+      let callIndex = 0;
+      for (const item of items) {
+        if (item.type === 'call') {
+          if (callIndex < publishedCalls) item.call = liveCalls[callIndex];
+          calls[callIndex] = item.call;
+          callIndex++;
+        }
+      }
+      liveSplitter = splitter;
+      liveItems = items;
+      liveContent = content;
+      liveCalls = calls;
+      liveSyncedLength = nextText.length;
+      liveToolError = null;
+      liveToolErrorTailStart = 0;
+      liveToolErrorDeadline = null;
+      return true;
+    };
+    const publish = async (items, { final = false } = {}) => {
       for (const item of items) { liveItems.push(item); if (item.type === 'content') liveContent += item.text; else liveCalls.push(item.call); }
-      const text = liveContent + liveSplitter.preview();
+      const text = visibleText(liveItems, liveContent, liveSplitter, final);
       if (!text.startsWith(publishedContent)) {
         const committed = committedOutput();
         if (snapshotId === null || committed.publishedBytes || committed.toolCallCount) failWithEvidence('NON_MONOTONIC_NATIVE_RESPONSE', {
@@ -452,7 +501,7 @@ export class NativeDirectProvider {
         await deliver({ content, response: { ...identity, thinkingLevel: observedThinking } });
         publishedContent = text;
       }
-      while (publishedCalls < liveCalls.length) {
+      while ((!deferCalls || final) && publishedCalls < liveCalls.length) {
         if (body.parallel_tool_calls === false && publishedCalls >= 1) fail('PARALLEL_TOOL_CALLS_DISABLED');
         const call = liveCalls[publishedCalls];
         await deliver({ call, response: { ...identity, thinkingLevel: observedThinking } });
@@ -677,6 +726,7 @@ export class NativeDirectProvider {
           }
           if (outputShape.nativeRefusalPresent) fail('NATIVE_RESPONSE_REFUSED', 422);
           let textProgressed = false;
+          let rebased = false;
           if (info.text !== null) {
             const id = info.responseId || null;
             if (this.allowTextSnapshotReplacement && !id) fail('INVALID_NATIVE_RESPONSE');
@@ -689,11 +739,14 @@ export class NativeDirectProvider {
                 phase: 'decode', nonMonotonicSite: 'snapshot_identity', sameResponseIdentity: false,
                 snapshotPriorBytes: Buffer.byteLength(rawText), snapshotNextBytes: Buffer.byteLength(info.text),
                 snapshotCommonPrefixBytes: commonPrefixBytes(rawText, info.text), ...committed });
-              if (incremental) {
-                if (committed.publishedBytes || committed.toolCallCount) failWithEvidence('NON_MONOTONIC_NATIVE_RESPONSE', {
+              if (incremental && (committed.publishedBytes || committed.toolCallCount)) {
+                if (!tryRebaseLive(info.text)) failWithEvidence('NON_MONOTONIC_NATIVE_RESPONSE', {
                   phase: 'decode', nonMonotonicSite: 'snapshot_stream', sameResponseIdentity: true,
                   snapshotPriorBytes: Buffer.byteLength(rawText), snapshotNextBytes: Buffer.byteLength(info.text),
                   snapshotCommonPrefixBytes: commonPrefixBytes(rawText, info.text), ...committed });
+                note('snapshot_rebase', { priorBytes: Buffer.byteLength(rawText), nextBytes: Buffer.byteLength(info.text) });
+                rebased = true;
+              } else if (incremental) {
                 if (liveSyncedLength > 0) await deliver({ reset: true, sameResponseIdentity: true, response: identity });
                 liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0; liveToolError = null; liveToolErrorTailStart = 0; liveToolErrorDeadline = null;
               }
@@ -738,21 +791,25 @@ export class NativeDirectProvider {
               allowThoughtRebase = false;
             }
           }
-          if (incremental && !liveToolError && modeMatches(observedMode) && attributionVerified() && liveSyncedLength < rawText.length) {
-            const delta = rawText.slice(liveSyncedLength);
-            liveSyncedLength = rawText.length;
-            try {
-              await publish(liveSplitter.push(delta));
-            } catch (splitError) {
-              // Defer recoverable tool-protocol errors briefly until stream completion so
-              // upstream completion/downgrade/refusal evidence is fully verified and
-              // automatic tool_protocol recovery (or same-ID revision) can run cleanly.
-              if (!sinkFailed && TOOL_ERRORS.has(splitError?.code)) {
-                liveToolError = splitError;
-                liveToolErrorTailStart = Number.isInteger(splitError.postFenceOffset) ? splitError.postFenceOffset : rawText.length;
-                liveToolErrorDeadline = postToolIdleMs === null ? null : Date.now() + postToolIdleMs;
-              } else {
-                throw splitError;
+          if (incremental && !liveToolError && modeMatches(observedMode) && attributionVerified() && (rebased || liveSyncedLength < rawText.length)) {
+            if (rebased) {
+              await publish([]);
+            } else {
+              const delta = rawText.slice(liveSyncedLength);
+              liveSyncedLength = rawText.length;
+              try {
+                await publish(liveSplitter.push(delta));
+              } catch (splitError) {
+                // Defer recoverable tool-protocol errors briefly until stream completion so
+                // upstream completion/downgrade/refusal evidence is fully verified and
+                // automatic tool_protocol recovery (or same-ID revision) can run cleanly.
+                if (!sinkFailed && TOOL_ERRORS.has(splitError?.code)) {
+                  liveToolError = splitError;
+                  liveToolErrorTailStart = Number.isInteger(splitError.postFenceOffset) ? splitError.postFenceOffset : rawText.length;
+                  liveToolErrorDeadline = postToolIdleMs === null ? null : Date.now() + postToolIdleMs;
+                } else {
+                  throw splitError;
+                }
               }
             }
             // Once valid output or tool_call(s) have been parsed and the model begins hallucinating
@@ -863,7 +920,7 @@ export class NativeDirectProvider {
           liveSyncedLength = rawText.length;
           await publish(liveSplitter.push(delta));
         }
-        await publish(liveSplitter.flush());
+        await publish(liveSplitter.flush(), { final: true });
         items = liveItems;
       }
       else { const splitter = createToolCallSplitter({ policy }); items = [...splitter.push(rawText), ...splitter.flush()]; }
@@ -897,11 +954,22 @@ export class NativeDirectProvider {
     } catch (error) {
       const modeVerified = !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified();
       if (incremental && !liveToolError && modeVerified && !sinkFailed) {
-        try { await publish(liveSplitter.flush({ interrupted: true })); }
+        // A completed snapshot, post-tool idle stall, or turn timeout after validated calls
+        // were parsed means upstream finished or stopped progressing on a verified snapshot.
+        const releaseHeld = error?.postToolIdleStall === true || modelComplete || error?.code === 'NATIVE_TURN_TIMEOUT';
+        try { await publish(liveSplitter.flush({ interrupted: true }), { final: releaseHeld }); }
         catch (flushError) {
           if (sinkFailed) error = flushError;
+          else if (releaseHeld && deferCalls) {
+            try { await publish([], { final: true }); } catch (releaseError) { if (sinkFailed) error = releaseError; }
+          }
           /* Otherwise (e.g. TRUNCATED_TOOL_CALL / parse error): retain already-published text without releasing an invalid/incomplete tool body. */
         }
+      }
+      // Deferred tool-protocol errors surface only after the stream settled; release the
+      // already validated earlier calls so the caller can salvage them as before.
+      if (deferCalls && modeVerified && !sinkFailed && TOOL_ERRORS.has(error?.code) && publishedCalls < liveCalls.length) {
+        try { await publish([], { final: true }); } catch (releaseError) { if (sinkFailed) error = releaseError; }
       }
       if (incremental && error?.postToolIdleStall && publishedCalls === 0) delete error.postToolIdleStall;
       if (incremental && error?.postOutputIdleStall && !publishedContent.trim().length) delete error.postOutputIdleStall;

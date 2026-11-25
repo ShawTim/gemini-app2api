@@ -172,6 +172,7 @@ export function createOpenCodeFetch({
       try {
         return await provider.runTurn('opencode-session', payload, onDelta, {
           incrementalOutput: Boolean(payload.stream),
+          deferToolCalls: true,
           signal,
           recoveryCode,
           recoveryReason,

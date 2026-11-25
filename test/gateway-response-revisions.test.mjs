@@ -111,32 +111,47 @@ test('both APIs JSON/SSE replace a held same-ID text draft with the final call i
   assert.equal(attempts, 4);
 });
 
-for (const route of ['chat/completions', 'responses']) test(`${route}: a committed validated tool call survives a later rewrite and never triggers another generation`, async t => {
+for (const route of ['chat/completions', 'responses']) test(`${route}: deferred draft tool call revised under same response ID delivers only the final call cleanly`, async t => {
   const f = await fixture({ allowFailover: false, allowAutomaticRecovery: true }); t.after(f.close); let attempts = 0;
-  // The trailing newline closes the fence line, so the splitter commits and publishes the first call before the rewrite arrives.
-  f.app.provider.openTurn = () => { attempts++; return turn([snapshot(call('already delivered') + '\n'), snapshot(call('replacement'), { complete: true }), end]); };
+  f.app.provider.openTurn = () => { attempts++; return turn([snapshot(call('draft call') + '\n'), snapshot(call('replacement'), { complete: true }), end]); };
   const body = route === 'responses' ? { model: request.model, input: 'Continue.', tools: responseTools, stream: true } : { ...request, stream: true };
   const response = await f.api('/v1/' + route, { method: 'POST', body }); assert.equal(response.status, 200);
-  const wire = await response.text(); assert.match(wire, /already delivered/); assert.doesNotMatch(wire, /replacement|synthetic-private-response-id/);
+  const wire = await response.text(); assert.match(wire, /replacement/); assert.doesNotMatch(wire, /draft call|synthetic-private-response-id/);
   const events = wire.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
   if (route === 'responses') {
     const terminal = events.find(e => e.type === 'response.completed');
-    assert.equal(terminal.incomplete, true); assert.equal(terminal.response.incomplete, true); assert.equal(terminal.response.status, 'completed');
+    assert.ok(terminal); assert.equal(terminal.incomplete, undefined); assert.equal(terminal.response.status, 'completed');
     assert.equal(terminal.response.error, null);
-    assert.equal(terminal.response.incomplete_details.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
     const calls = terminal.response.output.filter(x => x.type === 'function_call'); assert.equal(calls.length, 1);
-    assert.equal(calls[0].arguments, '{"key":"already delivered"}');
+    assert.equal(calls[0].arguments, '{"key":"replacement"}');
     assert.ok(events.some(e => e.type === 'response.function_call_arguments.done'));
-    assert.ok(!events.some(e => e.type === 'response.incomplete' || e.type === 'response.failed'));
   } else {
-    const terminal = events.find(e => e.incomplete); assert.equal(terminal.choices[0].finish_reason, 'tool_calls');
-    assert.equal(terminal.incomplete_details.code, 'NON_MONOTONIC_NATIVE_RESPONSE'); assert.match(wire, /\[DONE\]/);
-    assert.equal(events.flatMap(e => e.choices ?? []).flatMap(c => c.delta?.tool_calls ?? []).length, 1);
+    const terminal = events.find(e => e.choices?.[0]?.finish_reason === 'tool_calls');
+    assert.ok(terminal); assert.equal(terminal.incomplete, undefined); assert.match(wire, /\[DONE\]/);
+    const calls = events.flatMap(e => e.choices ?? []).flatMap(c => c.delta?.tool_calls ?? []);
+    assert.equal(calls.length, 1); assert.equal(calls[0].function.arguments, '{"key":"replacement"}');
   }
   assert.equal(attempts, 1); const row = f.app.overview().requests[0];
-  assert.equal(row.outputIncomplete, true); assert.equal(row.providerAttempts, 1); assert.equal(row.toolCalls, 1);
-  assert.equal(row.nativeEvidence.nonMonotonicSite, 'snapshot_stream');
-  // A validated call is data for the caller, not evidence of gateway execution.
+  assert.equal(row.outputIncomplete, undefined); assert.equal(row.providerAttempts, 1); assert.equal(row.toolCalls, 1);
+  assert.equal(row.nativeResponseRevisions, 1);
+});
+
+for (const route of ['chat/completions', 'responses']) test(`${route}: revising already-published >2KB prose still fails closed with NON_MONOTONIC_NATIVE_RESPONSE`, async t => {
+  const f = await fixture({ allowFailover: false, allowAutomaticRecovery: true }); t.after(f.close); let attempts = 0;
+  const publishedProse = 'Published prose sentence.\n'.repeat(100);
+  f.app.provider.openTurn = () => { attempts++; return turn([snapshot(publishedProse), snapshot('Completely different rewrite.\n' + publishedProse, { complete: true }), end]); };
+  const body = route === 'responses' ? { model: request.model, input: 'Continue.', tools: responseTools, stream: true } : { ...request, stream: true };
+  const response = await f.api('/v1/' + route, { method: 'POST', body }); assert.equal(response.status, 200);
+  const wire = await response.text(); assert.match(wire, /Published prose sentence/); assert.doesNotMatch(wire, /Completely different rewrite/);
+  const events = wire.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+  if (route === 'responses') {
+    const terminal = events.find(e => e.type === 'response.completed');
+    assert.equal(terminal.incomplete, true); assert.equal(terminal.response.incomplete_details.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
+  } else {
+    const terminal = events.find(e => e.incomplete); assert.equal(terminal.incomplete_details.code, 'NON_MONOTONIC_NATIVE_RESPONSE');
+  }
+  assert.equal(attempts, 1); const row = f.app.overview().requests[0];
+  assert.equal(row.outputIncomplete, true); assert.equal(row.nativeEvidence.nonMonotonicSite, 'snapshot_stream');
 });
 
 test('revision diagnostics expose only bounded counts and identity-checked state', async () => {

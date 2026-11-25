@@ -39,7 +39,7 @@ const cases = [
   { name: 'anonymous_append', snapshots: [{ text: 'old', id: null }, { text: 'old new', id: null, complete: true }], text: 'old new', revisions: 0 },
   { name: 'published_2048', snapshots: [{ text: oldLong }, { text: newLong, complete: true }], text: newLong, revisions: 1, streamingError: 'NON_MONOTONIC_NATIVE_RESPONSE', streamText: oldLong, site: 'snapshot_stream' },
   { name: 'utf8_published_2049', snapshots: [{ text: '中'.repeat(683) }, { text: revised, complete: true }], text: revised, revisions: 1, streamingError: 'NON_MONOTONIC_NATIVE_RESPONSE', streamText: '中'.repeat(683), site: 'snapshot_stream' },
-  { name: 'validated_call_replaced', tools: true, snapshots: [{ text: tool('old') }, { text: tool('new'), complete: true }], text: '\n', revisions: 1, callValue: 'new', streamCallValue: 'old', streamingError: 'NON_MONOTONIC_NATIVE_RESPONSE', streamText: '\n', site: 'snapshot_stream' },
+  { name: 'validated_call_replaced', tools: true, snapshots: [{ text: tool('old') }, { text: tool('new'), complete: true }], text: '\n', revisions: 1, callValue: 'new', streamCallValue: 'new' },
 ];
 let current, attempts = 0, passed = 0;
 const openTurn = () => { attempts++; return { cancel() {}, events: { async *[Symbol.asyncIterator]() {

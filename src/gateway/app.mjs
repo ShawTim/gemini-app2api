@@ -530,7 +530,7 @@ export function createGateway({
           if (providerFailures.length) res.setHeader('X-Gemini-Recovery-Errors', [...new Set(providerFailures.map(f => f.code))].join(','));
         }
         try { return await provider.runTurn(acc, canonical, event => delivery.accept(event), { ...context, timeoutMs: settings.timeoutMs,
-          incrementalOutput: true, outputMode: outputStreaming ? 'stream' : 'buffered',
+          incrementalOutput: true, deferToolCalls: true, outputMode: outputStreaming ? 'stream' : 'buffered',
           getOutputCommitState: delivery.outputCommitState,
           ...(attemptDiagnostic ? { nativeDiagnostic: attemptDiagnostic } : {}) }); }
         catch (error) {

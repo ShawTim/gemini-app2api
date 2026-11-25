@@ -2021,3 +2021,110 @@ test('pi-gemini-app automatically recovers when model leads with hallucinated [C
   assert.equal(textOut.includes('Caller tool result'), false);
   assert.deepEqual(msg.content.find((b) => b.type === 'toolCall')?.arguments, { key: 'real' });
 });
+
+test('pi-gemini-app defers tool calls and rebases same-id snapshot revisions without failing or leaking draft calls (#11)', async () => {
+  const model = { id: 'gemini-neon', provider: 'gemini-app', api: 'gemini-app-api' };
+  const editTools = [{ name: 'edit', description: 'Edit file', parameters: { type: 'object', properties: { path: { type: 'string' }, text: { type: 'string' } }, required: ['path', 'text'] } }];
+  const editContext = { messages: [{ role: 'user', content: 'Edit files', timestamp: 1 }], tools: editTools };
+  const editCall = (path, text) => '```tool_call\n' + JSON.stringify({ name: 'edit', arguments: { path, text } }) + '\n```\n';
+  const runFrames = async (frames) => {
+    let attempts = 0;
+    let cancelled = false;
+    const handler = createGeminiStreamHandler({
+      createAssistantMessageEventStream: () => new MockEventStream(),
+      ...systemHelpers,
+      openTurn: () => {
+        attempts++;
+        return {
+          events: (async function* () {
+            for (const [text, complete] of frames) yield { type: 'frame', bytes: buildNativeFrame(text, { complete }) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+          })(),
+          cancel() { cancelled = true; },
+        };
+      },
+    });
+    const result = await handler.streamSimple(model, editContext, { apiKey: 'fixture-token' }).result();
+    return { result, attempts, cancelled };
+  };
+  const callsOf = (result) => result.content.filter((b) => b.type === 'toolCall').map((b) => b.arguments);
+
+  // 1. Same-id draft -> final revision inside an already-parsed tool_call body delivers only the final call.
+  {
+    const { result, attempts } = await runFrames([
+      [editCall('a.ts', 'draft'), false],
+      [editCall('a.ts', 'draft') + '\n', false],
+      [editCall('a.ts', 'final'), false],
+      [editCall('a.ts', 'final'), true],
+    ]);
+    assert.equal(result.stopReason, 'toolUse', result.errorMessage);
+    assert.equal(attempts, 1);
+    assert.deepEqual(callsOf(result), [{ path: 'a.ts', text: 'final' }]);
+  }
+
+  // 2. Tail rewrite after multiple parsed calls keeps all calls cleanly.
+  {
+    const three = editCall('a.ts', '1') + '\n' + editCall('b.ts', '2') + '\n' + editCall('c.ts', '3') + '\n';
+    const { result } = await runFrames([
+      [three + 'STOPPING. Wait', false],
+      [three + 'Done, waiting for results.', false],
+      [three + 'Done, waiting for results.', true],
+    ]);
+    assert.equal(result.stopReason, 'toolUse', result.errorMessage);
+    assert.deepEqual(callsOf(result).map((c) => c.path), ['a.ts', 'b.ts', 'c.ts']);
+  }
+
+  // 3. Revision of a held call (or broken draft call) after >2KB of streamed prose rebases instead of failing.
+  {
+    const prose = 'Lorem ipsum dolor sit amet.\n'.repeat(120);
+    const { result } = await runFrames([
+      [prose + editCall('a.ts', 'draft'), false],
+      [prose + editCall('a.ts', 'final') + 'trailing', false],
+      [prose + editCall('a.ts', 'final'), true],
+    ]);
+    assert.equal(result.stopReason, 'toolUse', result.errorMessage);
+    assert.deepEqual(callsOf(result), [{ path: 'a.ts', text: 'final' }]);
+    const text = result.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+    assert.ok(text.startsWith(prose));
+
+    const brokenDraft = await runFrames([
+      [prose + '```tool_call\nnot valid json\n```\n', false],
+      [prose + editCall('a.ts', 'repaired'), true],
+    ]);
+    assert.equal(brokenDraft.result.stopReason, 'toolUse', brokenDraft.result.errorMessage);
+    assert.deepEqual(callsOf(brokenDraft.result), [{ path: 'a.ts', text: 'repaired' }]);
+  }
+
+  // 4. Rebased snapshot ending with hallucinated [Caller tool result] still triggers early-stop and releases valid calls.
+  {
+    const prose = 'Lorem ipsum dolor sit amet.\n'.repeat(120);
+    let cancelled = false;
+    const handler = createGeminiStreamHandler({
+      createAssistantMessageEventStream: () => new MockEventStream(),
+      ...systemHelpers,
+      openTurn: () => ({
+        events: (async function* () {
+          yield { type: 'frame', bytes: buildNativeFrame(prose + editCall('a.ts', 'draft'), { complete: false }) };
+          yield { type: 'frame', bytes: buildNativeFrame(prose + editCall('a.ts', 'final') + '[Caller tool result] {"tool_call_id":"call_1"}\n', { complete: false }) };
+          await new Promise(() => {});
+        })(),
+        cancel() { cancelled = true; },
+      }),
+    });
+    const res = await handler.streamSimple(model, editContext, { apiKey: 'fixture-token' }).result();
+    assert.equal(cancelled, true);
+    assert.equal(res.stopReason, 'toolUse');
+    assert.deepEqual(callsOf(res), [{ path: 'a.ts', text: 'final' }]);
+  }
+
+  // 5. Revising already-shown >2KB prose still fails closed with NON_MONOTONIC_NATIVE_RESPONSE.
+  {
+    const prose = 'Lorem ipsum dolor sit amet.\n'.repeat(120);
+    const { result } = await runFrames([
+      [prose + 'tail\n', false],
+      ['Completely different answer.\n' + prose, true],
+    ]);
+    assert.equal(result.stopReason, 'error');
+    assert.match(result.errorMessage, /NON_MONOTONIC_NATIVE_RESPONSE/);
+  }
+});
