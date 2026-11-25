@@ -124,6 +124,7 @@ const paths = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5',
   shield: 'M12 3l7 3v6c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6l7-3z',
   star: 'M12 2.75l2.86 5.79 6.39.93-4.62 4.5 1.09 6.36L12 17.33l-5.72 3 1.09-6.36-4.62-4.5 6.39-.93L12 2.75z',
+  github: 'M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4M9 18c-4.51 2-5-2-7-2',
   close: 'M18 6 6 18M6 6l12 12',
 };
 function el(tag, attrs = {}, ...children) {
@@ -446,14 +447,14 @@ function dismissStarPrompt() {
 function topbarStarControl() {
   return el('a', {
     id: 'topbar-github-star',
-    class: 'button quiet topbar-star',
+    class: 'button icon-button quiet topbar-github',
     href: GITHUB_REPO_URL,
     target: '_blank',
     rel: 'noopener noreferrer',
-    title: L('Star Gemini App2API on GitHub', '去 GitHub 畀星支持 Gemini App2API', '去 GitHub 点 Star 支持 Gemini App2API'),
-    'aria-label': L('Star Gemini App2API on GitHub', '去 GitHub 畀星支持 Gemini App2API', '去 GitHub 点 Star 支持 Gemini App2API'),
+    title: L('GitHub repository · Star Gemini App2API', 'GitHub 專案頁 · 畀星支持 Gemini App2API', 'GitHub 仓库 · 点 Star 支持 Gemini App2API'),
+    'aria-label': L('GitHub repository · Star Gemini App2API', 'GitHub 專案頁 · 畀星支持 Gemini App2API', 'GitHub 仓库 · 点 Star 支持 Gemini App2API'),
     onClick: () => { if (!S.starPromptDismissed) dismissStarPrompt(); },
-  }, icon('star'), el('span', { class: 'topbar-star-label' }, L('Star', '畀星', 'Star')));
+  }, icon('github'));
 }
 function starPromptBanner() {
   if (!shouldShowStarPrompt()) return null;

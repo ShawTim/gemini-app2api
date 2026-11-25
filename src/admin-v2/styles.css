@@ -541,26 +541,12 @@ svg.spark { width: 76px; height: 24px; display: block; }
   border-color: var(--border-strong);
   color: var(--text);
 }
-.topbar-star {
-  min-height: 30px;
-  padding: 4px 9px;
-  font-size: 12px;
-  font-weight: 560;
-  border-radius: 7px;
-  color: var(--muted);
+.topbar-github {
   text-decoration: none;
-  flex-shrink: 0;
 }
-.topbar-star svg {
-  width: 14px;
-  height: 14px;
-  color: var(--amber);
-  flex-shrink: 0;
-}
-.topbar-star:hover {
-  color: var(--text);
-  background: var(--amber-bg);
-  border-color: color-mix(in srgb, var(--amber) 34%, var(--border));
+.topbar-github svg {
+  width: 15.5px;
+  height: 15.5px;
 }
 .star-prompt-banner {
   display: flex;
@@ -2418,8 +2404,6 @@ dialog details > summary { cursor: pointer; min-height: 36px; display: list-item
 
 @media (max-width: 980px) {
   .topbar { gap: 12px; padding: 8px 18px; }
-  .topbar-star-label { display: none; }
-  .topbar-star { width: 32px; min-height: 32px; padding: 0; }
   .daily-nav a { padding: 5px 10px; }
   .daily-nav svg { display: none; }
   .pulse-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
