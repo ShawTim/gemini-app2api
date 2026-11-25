@@ -545,24 +545,75 @@ export function createToolCallSplitter({ newId = () => 'call_' + crypto.randomBy
     }
     return events;
   };
+  // Incremental O(n) preview scanner matching scanInlineText()'s backtick and escape rules.
+  // Resets automatically whenever pending advances to a new line (consumedChars changes).
+  let pLineOffset = -1, pIdx = 0, pTicks = 0, pHold = -1, pRunStart = -1, pEscTicks = false;
   const safePendingPreview = str => {
-    let ticks = inlineTicks;
-    for (let i = 0; i < str.length;) {
-      if (str[i] === '\\' && !ticks) {
-        i += 2;
-        while (str[i] === '`' && str[i - 1] === '`') i++;
+    if (pLineOffset !== consumedChars) {
+      pLineOffset = consumedChars;
+      pIdx = 0;
+      pTicks = inlineTicks;
+      pHold = -1;
+      pRunStart = -1;
+      pEscTicks = false;
+    }
+    if (pHold >= 0) return str.slice(0, pHold);
+    if (pEscTicks) {
+      while (pIdx < str.length && str[pIdx] === '`') pIdx++;
+      if (pIdx === str.length) return str;
+      pEscTicks = false;
+    }
+    if (pRunStart >= 0) {
+      while (pIdx < str.length && str[pIdx] === '`') pIdx++;
+      const length = pIdx - pRunStart;
+      const atLineOpen = pRunStart <= 3 && /^ *$/.test(str.slice(0, pRunStart));
+      if (length >= 3 && (atLineOpen || !pTicks)) {
+        pHold = atLineOpen ? 0 : pRunStart;
+        pRunStart = -1;
+        return str.slice(0, pHold);
+      }
+      if (pIdx === str.length) {
+        return (atLineOpen || !pTicks) ? (atLineOpen ? '' : str.slice(0, pRunStart)) : str;
+      }
+      if (!pTicks) pTicks = length;
+      else if (pTicks === length) pTicks = 0;
+      pRunStart = -1;
+    }
+    let i = pIdx;
+    while (i < str.length) {
+      if (str[i] === '\\' && !pTicks) {
+        if (i + 1 >= str.length) { pIdx = i; return str; }
+        let next = i + 2;
+        if (str[i + 1] === '`') {
+          while (next < str.length && str[next] === '`') next++;
+          pIdx = next;
+          if (next === str.length) { pEscTicks = true; return str; }
+          i = next;
+          continue;
+        }
+        i = next;
+        pIdx = i;
         continue;
       }
-      if (str[i] !== '`') { i++; continue; }
+      if (str[i] !== '`') { i++; pIdx = i; continue; }
       let end = i;
-      while (str[end] === '`') end++;
+      while (end < str.length && str[end] === '`') end++;
       const length = end - i;
       const atLineOpen = i <= 3 && /^ *$/.test(str.slice(0, i));
-      if (length >= 3 && (atLineOpen || !ticks)) return atLineOpen ? '' : str.slice(0, i);
-      if (end === str.length && (atLineOpen || !ticks)) return atLineOpen ? '' : str.slice(0, i);
-      if (!ticks) ticks = length;
-      else if (ticks === length) ticks = 0;
+      if (length >= 3 && (atLineOpen || !pTicks)) {
+        pHold = atLineOpen ? 0 : i;
+        pIdx = end;
+        return str.slice(0, pHold);
+      }
+      if (end === str.length) {
+        pRunStart = i;
+        pIdx = end;
+        return (atLineOpen || !pTicks) ? (atLineOpen ? '' : str.slice(0, i)) : str;
+      }
+      if (!pTicks) pTicks = length;
+      else if (pTicks === length) pTicks = 0;
       i = end;
+      pIdx = i;
     }
     return str;
   };
