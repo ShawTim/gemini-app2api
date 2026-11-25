@@ -135,4 +135,31 @@ for (const incrementalOutput of [false, true]) for (const incomplete of [false, 
   if (incomplete) { assert.equal(final.incomplete, true); assert.equal(final.error, null); assert.equal(final.incomplete_details.code, 'NATIVE_STREAM_CLOSED_EARLY'); assert.equal(target.incomplete, true); }
 }
 assert.equal(upstream, 3);
-console.log('PASS: offline namespace collision, history, choice, invalid inputs, provider JSON/SSE/incomplete roundtrips (3 synthetic turns)');
+// F4: /v1/responses stream:true + text.format + namespace tool call must preserve
+// { namespace, name } on every SSE event instead of leaking internal alias ns_0.
+const structuredNsBody = normalize({ text: { format: { type: 'json_object' } }, stream: true });
+const structuredNsWire = '```tool_call\n' + JSON.stringify({ name: names[1], arguments: { value: 'structured-sse' } }) + '\n```\n';
+const structuredFrame = m(1003, m(1, Buffer.concat([m(1, Buffer.concat([str(1, 'structured-ns'), m(2, str(1, structuredNsWire))])), v(9, 1), str(30, 'Used 4 Neon High model'), v(41, 3), v(42, 2)])));
+for (const stream of [false, true]) {
+  const provider = new NativeDirectProvider({ getValidAccessToken: async () => 'synthetic' }, { timeoutMs: 1000, openTurn: () => ({
+    cancel() {},
+    events: { async *[Symbol.asyncIterator]() {
+      yield { type: 'frame', bytes: structuredFrame };
+      yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+    } },
+  }) });
+  const target = new Sink();
+  const delivery = createResponseDelivery(target, { route: 'responses', stream, model: result.model });
+  const out = await provider.runTurn('synthetic', structuredNsBody, delivery.accept, { incrementalOutput: stream });
+  await delivery.complete(out);
+  if (stream) {
+    const evs = target.events();
+    for (const type of ['response.output_item.added', 'response.output_item.done']) {
+      assert.deepEqual(identities(evs.filter(e => e.type === type).map(e => e.item)), [{ namespace: 'alpha', name: 'echo' }]);
+    }
+    assert.deepEqual(identities(evs.at(-1).response.output), [{ namespace: 'alpha', name: 'echo' }]);
+  } else {
+    assert.deepEqual(identities(JSON.parse(target.text()).output), [{ namespace: 'alpha', name: 'echo' }]);
+  }
+}
+console.log('PASS: offline namespace collision, history, choice, invalid inputs, provider JSON/SSE/incomplete + structured SSE roundtrips');

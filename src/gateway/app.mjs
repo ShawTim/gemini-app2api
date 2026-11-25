@@ -5,6 +5,7 @@ import net from "node:net";
 import { TextDecoder } from "node:util";
 import * as protocol from "../native-provider.mjs";
 import { CANONICAL_PROMPT_CHARS, CANONICAL_IMAGE_COUNT } from "../openai-contract.mjs";
+import { RESPONSE_TOOL_IDENTITIES } from "../responses-tool-namespaces.mjs";
 import { Security } from "./security.mjs";
 import { openDirectTurn } from "./native-transport.mjs";
 import { Accounts } from "./accounts.mjs";
@@ -249,7 +250,7 @@ function json(res, value, status = 200) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(value));
 }
-async function readJson(req, limit, { distinguishNonObject = false } = {}) {
+async function readJson(req, limit, { distinguishNonObject = false, budget = null } = {}) {
   if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] ?? ""))
     throw fault("JSON_CONTENT_TYPE_REQUIRED", 415);
   const chunks = [];
@@ -259,6 +260,10 @@ async function readJson(req, limit, { distinguishNonObject = false } = {}) {
     if (length > limit) {
       req.resume();
       throw fault("REQUEST_TOO_LARGE", 413);
+    }
+    if (budget && !budget.reserve(chunk.length)) {
+      req.resume();
+      throw fault("GATEWAY_BUSY", 429);
     }
     chunks.push(chunk);
   }
@@ -306,6 +311,7 @@ export function createGateway({
   callbackPort = 18765,
   callbackHost = "127.0.0.1",
   keepaliveHeadersDelayMs = 45000,
+  maxInFlightBodyBytes = null,
 } = {}) {
   if (!store) throw new TypeError("store required");
   const normalizedProbeHosts = parseProbeHosts(probeHosts);
@@ -313,6 +319,7 @@ export function createGateway({
     requests = [],
     audit = [];
   let active = 0,
+    inFlightBodyBytes = 0,
     totalRequests = 0,
     totalErrors = 0,
     closing = false,
@@ -432,23 +439,24 @@ export function createGateway({
     req,
     res,
     body,
-    { owner, route, playground = false, mcp = false, accountTestId = null } = {},
+    { owner, route, playground = false, mcp = false, accountTestId = null, canonical: preNormalized = null, identity: preIdentity = null } = {},
   ) {
     if (req.aborted || res.destroyed) return;
     // A conversation can grow past the point where the upstream finishes the turn at all.
     // Rejecting it up front turns a 70-200 s dead wait into an immediate, explicit answer.
     // Disabled by default (0).
     assertPromptByteLimit(body);
-    const canonical =
-      route === "responses"
-        ? protocol.normalizeResponsesRequest(body).body
-        : protocol.normalizeChatRequest(body);
     const settings = store.settings();
+    if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
+    const canonical =
+      preNormalized ??
+      (route === "responses"
+        ? protocol.normalizeResponsesRequest(body).body
+        : protocol.normalizeChatRequest(body));
     if (settings.allowRemoteImages !== true && canonical.messages.some(message =>
       Array.isArray(message.content) && message.content.some(part =>
         part.type === "image_url" && /^https?:/i.test(part.image_url.url))))
       throw fault("REMOTE_IMAGES_DISABLED", 403);
-    if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
     const outputStreaming = !playground && body.stream === true;
     let hardDestroyTimer = null;
     const controller = new AbortController(),
@@ -474,6 +482,7 @@ export function createGateway({
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
       ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => canonical[key] !== undefined),
       includeUsage: body.stream_options?.include_usage === true, parallelToolCalls: canonical.parallel_tool_calls ?? true,
+      responseToolIdentities: canonical[RESPONSE_TOOL_IDENTITIES],
       promptChars: canonical[CANONICAL_PROMPT_CHARS] ?? 0, imageCount: canonical[CANONICAL_IMAGE_COUNT] ?? 0,
       deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
       signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000),
@@ -510,7 +519,7 @@ export function createGateway({
     if (req.aborted || res.destroyed) disconnect();
     try {
       const publicRequest = !accountTestId && !playground;
-      identity = publicRequest ? resolveSessionIdentity(req.headers, canonical) : { sessionId: undefined, source: "admin" };
+      identity = publicRequest ? (preIdentity ?? resolveSessionIdentity(req.headers, canonical)) : { sessionId: undefined, source: "admin" };
       const sid = identity.sessionId;
       description = describeRequest(canonical);
       if (publicRequest && canonical.model === 'gemini-neon' && !canonical.native_search)
@@ -530,7 +539,7 @@ export function createGateway({
           if (providerFailures.length) res.setHeader('X-Gemini-Recovery-Errors', [...new Set(providerFailures.map(f => f.code))].join(','));
         }
         try { return await provider.runTurn(acc, canonical, event => delivery.accept(event), { ...context, timeoutMs: settings.timeoutMs,
-          incrementalOutput: true, deferToolCalls: true, outputMode: outputStreaming ? 'stream' : 'buffered',
+          preNormalized: true, incrementalOutput: true, deferToolCalls: true, outputMode: outputStreaming ? 'stream' : 'buffered',
           getOutputCommitState: delivery.outputCommitState,
           ...(attemptDiagnostic ? { nativeDiagnostic: attemptDiagnostic } : {}) }); }
         catch (error) {
@@ -673,6 +682,37 @@ export function createGateway({
     }
   }
   const server = http.createServer(async (req, res) => {
+    let reservedBodyBytes = 0;
+    let transferredBodyBudget = false;
+    const bodyBudget = {
+      reserve(n) {
+        const limit = Number.isSafeInteger(maxInFlightBodyBytes) && maxInFlightBodyBytes > 0
+          ? maxInFlightBodyBytes
+          : Math.max(256 * 1024 * 1024, store.settings().maxBodyBytes * 2);
+        if (inFlightBodyBytes + n > limit) return false;
+        inFlightBodyBytes += n;
+        reservedBodyBytes += n;
+        return true;
+      },
+      release() {
+        if (!transferredBodyBudget && reservedBodyBytes > 0) {
+          inFlightBodyBytes = Math.max(0, inFlightBodyBytes - reservedBodyBytes);
+          reservedBodyBytes = 0;
+        }
+      },
+      transfer() {
+        if (transferredBodyBudget) return () => {};
+        transferredBodyBudget = true;
+        let held = reservedBodyBytes;
+        reservedBodyBytes = 0;
+        return () => {
+          if (held > 0) {
+            inFlightBodyBytes = Math.max(0, inFlightBodyBytes - held);
+            held = 0;
+          }
+        };
+      },
+    };
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "no-referrer");
@@ -1020,7 +1060,7 @@ export function createGateway({
           });
         }
         if (p === "/admin/api/playground" && req.method === "POST") {
-          const b = await readJson(req, store.settings().maxBodyBytes);
+          const b = await readJson(req, store.settings().maxBodyBytes, { budget: bodyBudget });
           if (req.aborted || res.destroyed) return;
           return await execute(req, res, b, {
             owner: "admin-playground",
@@ -1055,19 +1095,56 @@ export function createGateway({
           req.method === "POST" &&
           ["/v1/chat/completions", "/v1/responses"].includes(p)
         ) {
-          const body = await readJson(req, store.settings().maxBodyBytes);
+          const settings = store.settings();
+          const body = await readJson(req, settings.maxBodyBytes, { budget: bodyBudget });
           if (req.aborted || res.destroyed) return;
           assertPromptByteLimit(body);
           const route = p.endsWith('responses') ? 'responses' : 'chat';
-          if (allowAutomaticRecovery) {
-            const canonical = route === 'responses' ? protocol.normalizeResponsesRequest(body).body : protocol.normalizeChatRequest(body);
-            const { sessionId } = resolveSessionIdentity(req.headers, canonical);
-            if (sessionId !== undefined) return await resumption.run({ req, res, owner, sessionId, route, body }, async (input, output) => {
-              try { await execute(input, output, body, { owner, route }); }
+          // Check resumption followers before rejecting busy slots, and reject new
+          // overloaded requests before expensive schema/image normalization.
+          const explicitIdentity = resolveSessionIdentity(req.headers, null);
+          const runResumableLeader = (input, output, opts) => {
+            const releaseLeaderBody = bodyBudget.transfer();
+            return (async () => {
+              try { await execute(input, output, body, opts); }
               catch (error) { if (output.headersSent) { output.incomplete = true; output.end(); } else { output.discard(); json(output, errorPayload(error), Number.isInteger(error.status) ? error.status : 500); } }
-            });
+              finally { releaseLeaderBody(); }
+            })();
+          };
+          if (
+            allowAutomaticRecovery &&
+            resumption.size > 0 &&
+            explicitIdentity.sessionId !== undefined &&
+            resumption.has({ owner, sessionId: explicitIdentity.sessionId, route, body })
+          ) {
+            return await resumption.run({ req, res, owner, sessionId: explicitIdentity.sessionId, route, body }, (input, output) =>
+              runResumableLeader(input, output, { owner, route }));
           }
-          return await execute(req, res, body, { owner, route });
+          const maybePiResumptionFollower =
+            allowAutomaticRecovery &&
+            resumption.size > 0 &&
+            explicitIdentity.sessionId === undefined &&
+            typeof body.prompt_cache_key === 'string' &&
+            body.prompt_cache_key.length > 0 &&
+            resumption.hasBodyCandidate({ owner, route, body });
+          if (active >= settings.maxConcurrent && !maybePiResumptionFollower) {
+            throw fault("GATEWAY_BUSY", 429);
+          }
+          const canonical = route === 'responses'
+            ? protocol.normalizeResponsesRequest(body).body
+            : protocol.normalizeChatRequest(body);
+          const identity = explicitIdentity.sessionId !== undefined
+            ? explicitIdentity
+            : resolveSessionIdentity(req.headers, canonical);
+          if (allowAutomaticRecovery && identity.sessionId !== undefined) {
+            if (active >= settings.maxConcurrent && !resumption.has({ owner, sessionId: identity.sessionId, route, body })) {
+              throw fault("GATEWAY_BUSY", 429);
+            }
+            return await resumption.run({ req, res, owner, sessionId: identity.sessionId, route, body }, (input, output) =>
+              runResumableLeader(input, output, { owner, route, canonical, identity }));
+          }
+          if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);
+          return await execute(req, res, body, { owner, route, canonical, identity });
         }
         throw fault("UNSUPPORTED_ENDPOINT", 404);
       }
@@ -1095,7 +1172,7 @@ export function createGateway({
         }
         let rpcMessage;
         try {
-          rpcMessage = await readJson(req, store.settings().maxBodyBytes, { distinguishNonObject: true });
+          rpcMessage = await readJson(req, store.settings().maxBodyBytes, { distinguishNonObject: true, budget: bodyBudget });
         } catch (err) {
           if (err?.code === "INVALID_JSON") {
             return json(res, jsonRpcError(null, -32700, "Parse error"), 200);
@@ -1159,6 +1236,7 @@ export function createGateway({
             try {
               if (name === "ask_gemini") {
                 assertMcpPromptLimit();
+                if (active >= store.settings().maxConcurrent) throw fault("GATEWAY_BUSY", 429);
                 const chatPayload = normalizeAskGeminiArgs(args, {
                   allowedModels: protocol.NATIVE_MODELS,
                 });
@@ -1181,6 +1259,7 @@ export function createGateway({
               }
               if (name === "gemini_search") {
                 assertMcpPromptLimit();
+                if (active >= store.settings().maxConcurrent) throw fault("GATEWAY_BUSY", 429);
                 const chatPayload = normalizeGeminiSearchArgs(args);
                 const result = await runGatewayChatTool(chatPayload, signal);
                 const sourcesMd = formatMcpCitationsMarkdown(result.annotations);
@@ -1253,6 +1332,8 @@ export function createGateway({
           : 500;
       if (!res.headersSent) json(res, errorPayload(error), status);
       else res.end();
+    } finally {
+      bodyBudget.release();
     }
   });
   server.requestTimeout = 30000;

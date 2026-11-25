@@ -57,3 +57,36 @@ export function isVerifiedEmptyResponse(error, model, { allowAutoModel = false }
     e.http2ResetCode === undefined &&
     (isAuto || ((e.fallback === undefined || e.fallback === 0) && (e.downgradeReason === undefined || e.downgradeReason === 0)));
 }
+
+/**
+ * Shared terminal-outcome gate for interrupted turns across HTTP Gateway, Pi,
+ * OpenClaw, and OpenCode. Unverified output (refusal/downgrade/missing mode)
+ * and caller aborts NEVER qualify for partial-success completion.
+ */
+export function canCompleteInterruptedOutput({
+  error,
+  publishedBytes = 0,
+  callCount = 0,
+  hasVisibleText = false,
+  prefixBytes = 2048,
+  aborted = false,
+  allowPrefixPartialOnTransport = false,
+  salvageToolErrors = false,
+  toolErrors = null,
+} = {}) {
+  if (aborted || error?.unverifiedOutput === true) return false;
+  if (allowPrefixPartialOnTransport) {
+    return (
+      publishedBytes >= prefixBytes ||
+      callCount > 0 ||
+      (error?.postOutputIdleStall === true && hasVisibleText)
+    );
+  }
+  const usableTimeout =
+    error?.code === 'NATIVE_TURN_TIMEOUT' &&
+    (callCount > 0 || (error?.postOutputIdleStall === true && hasVisibleText));
+  const salvageValidatedCalls = Boolean(
+    salvageToolErrors && callCount > 0 && toolErrors?.has?.(error?.code),
+  );
+  return usableTimeout || salvageValidatedCalls;
+}

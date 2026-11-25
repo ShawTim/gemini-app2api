@@ -142,31 +142,63 @@ export function frameGrpcMessage(bytes) {
 export class GrpcMessageReader {
   constructor({ maxBytes = MAX_MESSAGE_BYTES } = {}) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_MESSAGE_BYTES) throw new RangeError('Invalid frame budget');
-    this.maxBytes = maxBytes; this.pending = Buffer.alloc(0); this.closed = false;
+    this.maxBytes = maxBytes;
+    this.header = Buffer.allocUnsafe(5);
+    this.headerBytes = 0;
+    this.expectedLength = null;
+    this.payloadChunks = [];
+    this.payloadBytes = 0;
+    this.closed = false;
   }
   push(bytes) {
     if (this.closed) throw new Error('Reader already closed');
     if (!Buffer.isBuffer(bytes)) throw new TypeError('Expected Buffer');
     const frames = [];
-    // Accept concatenated chunks without allowing an unbounded pending allocation.
     let offset = 0;
     while (offset < bytes.length) {
-      const needed = this.pending.length < 5 ? 5 - this.pending.length : 5 + this.pending.readUInt32BE(1) - this.pending.length;
+      if (this.expectedLength === null) {
+        const take = Math.min(5 - this.headerBytes, bytes.length - offset);
+        bytes.copy(this.header, this.headerBytes, offset, offset + take);
+        this.headerBytes += take;
+        offset += take;
+        if (this.headerBytes < 5) continue;
+        if (this.header[0] !== 0) throw new Error('Compressed gRPC messages not supported');
+        const length = this.header.readUInt32BE(1);
+        if (length > this.maxBytes) throw new RangeError('gRPC frame exceeds budget');
+        if (length === 0) {
+          frames.push(Buffer.alloc(0));
+          this.headerBytes = 0;
+          continue;
+        }
+        this.expectedLength = length;
+        continue;
+      }
+      const needed = this.expectedLength - this.payloadBytes;
       const take = Math.min(needed, bytes.length - offset);
-      this.pending = Buffer.concat([this.pending, bytes.subarray(offset, offset + take)]);
+      const slice = bytes.subarray(offset, offset + take);
       offset += take;
-      if (this.pending.length < 5) continue;
-      if (this.pending[0] !== 0) throw new Error('Compressed gRPC messages not supported');
-      const length = this.pending.readUInt32BE(1);
-      if (length > this.maxBytes) throw new RangeError('gRPC frame exceeds budget');
-      if (this.pending.length === length + 5) {
-        frames.push(this.pending.subarray(5)); this.pending = Buffer.alloc(0);
+      this.payloadBytes += take;
+      const owned = Buffer.from(slice);
+      if (this.payloadChunks.length === 0 && this.payloadBytes === this.expectedLength) {
+        frames.push(owned);
+        this.headerBytes = 0;
+        this.expectedLength = null;
+        this.payloadBytes = 0;
+        continue;
+      }
+      this.payloadChunks.push(owned);
+      if (this.payloadBytes === this.expectedLength) {
+        frames.push(Buffer.concat(this.payloadChunks, this.expectedLength));
+        this.headerBytes = 0;
+        this.expectedLength = null;
+        this.payloadChunks = [];
+        this.payloadBytes = 0;
       }
     }
     return frames;
   }
   finish() {
     this.closed = true;
-    if (this.pending.length) throw new Error('Truncated gRPC stream');
+    if (this.headerBytes > 0 || this.expectedLength !== null) throw new Error('Truncated gRPC stream');
   }
 }

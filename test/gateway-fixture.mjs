@@ -73,6 +73,7 @@ export async function fixture({
   termsAccept = async () => ({ status: "accepted", version: 1, legacyVersion: null, acceptedAt: new Date().toISOString() }),
   routingAccountIds = null,
   keepaliveHeadersDelayMs = 45000,
+  maxInFlightBodyBytes = null,
 } = {}) {
   const directory = fs.mkdtempSync(
     path.join(
@@ -124,6 +125,7 @@ export async function fixture({
     allowQuotaFailover,
     routingAccountIds,
     keepaliveHeadersDelayMs,
+    maxInFlightBodyBytes,
     downloadImages,
     // Explicitly synthetic uploads; fixture requests never contact Google.
     uploadImages: async (_token, images) => images.map((image, index) => ({ mimeType: image.mimeType, blobId: `synthetic_blob_${index}` })),

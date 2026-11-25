@@ -2128,3 +2128,47 @@ test('pi-gemini-app defers tool calls and rebases same-id snapshot revisions wit
     assert.match(result.errorMessage, /NON_MONOTONIC_NATIVE_RESPONSE/);
   }
 });
+
+test('F5: hard NATIVE_TURN_TIMEOUT after >2KB prose preserves partial text and reports error instead of silent done/stop', async () => {
+  const model = { id: 'gemini-neon', provider: 'gemini-app', api: 'gemini-app-api' };
+  const context = { messages: [{ role: 'user', content: 'Write a long answer', timestamp: 1 }] };
+  const prose = 'Long streamed paragraph content. '.repeat(90); // > 2048 B
+
+  // 1. Hard deadline timeout (postOutputIdleStall NOT set, no tool calls) -> stopReason: 'error' + preserved partial text.
+  class HardTimeoutProvider {
+    async runTurn(_sessionId, _body, onDelta) {
+      await onDelta({ content: prose, response: { id: 'resp_hard_to', thinkingLevel: 2 } });
+      throw Object.assign(new Error('overall turn deadline'), { code: 'NATIVE_TURN_TIMEOUT', status: 504 });
+    }
+  }
+  const hardHandler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    NativeDirectProvider: HardTimeoutProvider,
+  });
+  const hardEvents = [];
+  const hardStream = hardHandler.streamSimple(model, context, { apiKey: 'fixture-token' });
+  for await (const ev of hardStream) hardEvents.push(ev);
+  const hardResult = await hardStream.result();
+  assert.equal(hardResult.stopReason, 'error');
+  assert.match(hardResult.errorMessage, /timed out|timeout|NATIVE_TURN_TIMEOUT/i);
+  assert.equal(hardEvents.at(-1).type, 'error');
+  const preserved = hardResult.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+  assert.equal(preserved, prose);
+
+  // 2. Verified postOutputIdleStall timeout -> still finishes cleanly as stopReason: 'stop'.
+  class StallTimeoutProvider {
+    async runTurn(_sessionId, _body, onDelta) {
+      await onDelta({ content: prose, response: { id: 'resp_stall_to', thinkingLevel: 2 } });
+      throw Object.assign(new Error('idle stall'), { code: 'NATIVE_TURN_TIMEOUT', status: 504, postOutputIdleStall: true });
+    }
+  }
+  const stallHandler = createGeminiStreamHandler({
+    createAssistantMessageEventStream: () => new MockEventStream(),
+    ...systemHelpers,
+    NativeDirectProvider: StallTimeoutProvider,
+  });
+  const stallResult = await stallHandler.streamSimple(model, context, { apiKey: 'fixture-token' }).result();
+  assert.equal(stallResult.stopReason, 'stop');
+  assert.equal(stallResult.content.filter((b) => b.type === 'text').map((b) => b.text).join(''), prose);
+});

@@ -2,6 +2,7 @@ import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/nativ
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { NativeDirectProvider as DefaultNativeDirectProvider } from '../../src/native-provider.mjs';
 import { TOOL_ERRORS, automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
+import { canCompleteInterruptedOutput } from '../../src/gateway/output-recovery.mjs';
 import { buildChatPayload as defaultBuildChatPayload } from './transcript.js';
 import { estimateUsage as defaultEstimateUsage, measurePromptImagePayload } from '../../src/openai-usage.mjs';
 
@@ -452,11 +453,18 @@ export function createGeminiStreamHandler({
             }
             break;
           } catch (turnError) {
-            const usableTimeout =
-              turnError?.code === 'NATIVE_TURN_TIMEOUT' &&
-              (hasToolCalls || turnError?.postOutputIdleStall === true || publishedBytes >= PREFIX_BYTES);
-            const salvageValidatedCalls = hasToolCalls && TOOL_ERRORS.has(turnError?.code);
-            if (!options?.signal?.aborted && turnError?.unverifiedOutput !== true && (usableTimeout || salvageValidatedCalls)) {
+            if (
+              canCompleteInterruptedOutput({
+                error: turnError,
+                publishedBytes,
+                callCount: toolCallCount,
+                hasVisibleText: publishedBytes > 0 || textBuffer.trim().length > 0,
+                aborted: options?.signal?.aborted === true,
+                allowPrefixPartialOnTransport: false,
+                salvageToolErrors: true,
+                toolErrors: TOOL_ERRORS,
+              })
+            ) {
               break;
             }
             if (

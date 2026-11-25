@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { parse } from '../native-wire/protobuf.mjs';
 import { decodeClientGenerateResponse } from '../native-wire/robin-current.mjs';
 import { ProtocolError, protocolError, compileToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
-import { MODEL_ALIASES, MODEL_MODES, MODEL_SPECS, NATIVE_MODELS, PROMPT_MAX_BYTES, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
+import { MODEL_ALIASES, MODEL_MODES, MODEL_SPECS, NATIVE_MODELS, PROMPT_MAX_BYTES, CANONICAL_BUILT, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
 import { RESPONSE_TOOL_IDENTITIES } from './responses-tool-namespaces.mjs';
 import { safeNativeEvidence } from './gateway/native-evidence.mjs';
 import { decodePassiveQuota, mergeQuotaObservation } from './gateway/quota.mjs';
@@ -355,7 +355,11 @@ export class NativeDirectProvider {
       : this.maxPostOutputThoughtHoldMs !== undefined
         ? this.maxPostOutputThoughtHoldMs
         : (postOutputToolIdleMs === null ? null : Math.min(600_000, postOutputToolIdleMs * 3));
-    const body = normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
+    const body =
+      context.preNormalized === true &&
+      canonicalChatBody?.[CANONICAL_BUILT]?.allowAutoModel === this.allowAutoModel
+        ? canonicalChatBody
+        : normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
     if (body.native_search) return this.runNativeSearch(accountId, body, onDelta, { ...context, timeoutMs });
     const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode, context.recoveryReason);
     const appendRecovery = promptMessages => {
@@ -370,7 +374,7 @@ export class NativeDirectProvider {
     };
     if (this.allowTextSnapshotReplacement && body.tools.length) fail('NATIVE_TEXT_SNAPSHOT_TOOLS_FORBIDDEN', 400);
     const policy = compileToolPolicy(body.tools, body.tool_choice);
-    let { messages, images } = buildCanonicalPrompt(body);
+    let { messages, images } = body[CANONICAL_BUILT] ?? buildCanonicalPrompt(body);
     messages = appendRecovery(messages);
     const isAutoModel = this.allowAutoModel && body.model === 'gemini-auto';
     const modeCategory = isAutoModel ? null : MODEL_MODES[body.model];
@@ -980,7 +984,7 @@ export class NativeDirectProvider {
         nativeTextBytes: Buffer.byteLength(rawText), ...outputShape,
         nativeResponseRevisions: revisionCount, nativeResponseIdentityVerified: snapshotId !== null });
       phase = 'output';
-      if (!incremental) await deliverNonIncremental(items, content, calls);
+      if (!incremental) await deliverNonIncremental(items, content, calls, { includeMeta: context.incrementalOutput === true || calls.length > 0 });
       note('provider_success');
       return result;
     } catch (error) {

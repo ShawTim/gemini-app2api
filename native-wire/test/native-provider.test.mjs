@@ -393,3 +393,95 @@ test('gemini-hydrogen ignores unresolved legacy thinking heartbeats while failin
     if (!incrementalOutput) assert.equal(emitted, '');
   }
 });
+
+test('F7: GrpcMessageReader assembles fragmented, zero-length, and 1 MiB frames in linear O(n) time without quadratic copies', async () => {
+  const { GrpcMessageReader, frameGrpcMessage } = await import('../robin-current.mjs');
+  const reader = new GrpcMessageReader();
+  const emptyFrame = frameGrpcMessage(Buffer.alloc(0));
+  const smallPayload = Buffer.from('hello-grpc-world');
+  const smallFrame = frameGrpcMessage(smallPayload);
+  // Feed 1 byte at a time across header + empty + payload boundaries.
+  const combined = Buffer.concat([emptyFrame, smallFrame]);
+  const out = [];
+  for (let i = 0; i < combined.length; i++) {
+    out.push(...reader.push(combined.subarray(i, i + 1)));
+  }
+  reader.finish();
+  assert.equal(out.length, 2);
+  assert.equal(out[0].length, 0);
+  assert.deepEqual(out[1], smallPayload);
+
+  // 1 MiB frame split into 16 KiB HTTP/2 DATA chunks: must stay O(n) and exact.
+  const bigPayload = Buffer.alloc(1024 * 1024, 0x61);
+  const bigFramed = frameGrpcMessage(bigPayload);
+  const perfReader = new GrpcMessageReader();
+  const started = performance.now();
+  const bigOut = [];
+  for (let off = 0; off < bigFramed.length; off += 16384) {
+    bigOut.push(...perfReader.push(bigFramed.subarray(off, Math.min(off + 16384, bigFramed.length))));
+  }
+  perfReader.finish();
+  const elapsedMs = performance.now() - started;
+  assert.equal(bigOut.length, 1);
+  assert.equal(bigOut[0].length, bigPayload.length);
+  assert.equal(bigOut[0][0], 0x61);
+  assert.equal(bigOut[0][bigPayload.length - 1], 0x61);
+  assert.ok(elapsedMs < 200, `expected linear O(n) 1 MiB frame assembly, took ${elapsedMs.toFixed(2)}ms`);
+
+  // Error boundaries remain intact: compressed flag, budget overflow, truncated stream.
+  const badComp = new GrpcMessageReader();
+  assert.throws(() => badComp.push(Buffer.from([1, 0, 0, 0, 1, 0x41])), /Compressed/);
+  const smallBudget = new GrpcMessageReader({ maxBytes: 8 });
+  assert.throws(() => smallBudget.push(frameGrpcMessage(Buffer.alloc(9))), RangeError);
+  const trunc = new GrpcMessageReader();
+  trunc.push(bigFramed.subarray(0, 12));
+  assert.throws(() => trunc.finish(), /Truncated/);
+
+  // Buffer ownership: caller mutating/reusing the same scratch buffer between push() calls
+  // must never corrupt buffered fragments or returned frames (AB must not become BB).
+  const scratchReader = new GrpcMessageReader();
+  const scratch = Buffer.alloc(1);
+  for (const byte of [0, 0, 0, 0, 2, 0x41, 0x42]) {
+    scratch[0] = byte;
+    const emitted = scratchReader.push(scratch);
+    if (emitted.length) {
+      scratch[0] = 0x5a;
+      assert.equal(emitted[0].toString('utf8'), 'AB');
+    }
+  }
+  scratchReader.finish();
+  const singleScratch = Buffer.from([0, 0, 0, 0, 2, 0x43, 0x44]);
+  const singleReader = new GrpcMessageReader();
+  const singleOut = singleReader.push(singleScratch);
+  singleScratch.fill(0x5a);
+  assert.equal(singleOut.length, 1);
+  assert.equal(singleOut[0].toString('utf8'), 'CD');
+
+  // Direct runTurn() callers that mutate a normalized body must not reuse stale CANONICAL_BUILT.
+  const { normalizeChatRequest } = await import('../../src/openai-contract.mjs');
+  const seenPrompts = [];
+  const mutFixture = fixture([], {
+    openTurn: (_token, opts) => {
+      seenPrompts.push(opts.messages.map((msg) => msg.content).join('\n'));
+      return {
+        events: { async *[Symbol.asyncIterator]() {
+          yield event(frame('ok', { mode: 3, attribution: 'Used 4 Neon High model', complete: true }));
+          yield end();
+        } },
+        cancel() {},
+      };
+    },
+  });
+  const normalized = normalizeChatRequest({
+    model: 'gemini-neon',
+    messages: [{ role: 'user', content: 'original-marker' }],
+    tools: [{ type: 'function', function: { name: 'ping', parameters: { type: 'object', properties: {} } } }],
+    parallel_tool_calls: true,
+  });
+  normalized.messages[0].content = 'mutated-marker';
+  normalized.parallel_tool_calls = false;
+  await mutFixture.p.runTurn('a', normalized);
+  assert.equal(seenPrompts.length, 1);
+  assert.match(seenPrompts[0], /mutated-marker/);
+  assert.doesNotMatch(seenPrompts[0], /original-marker/);
+});

@@ -63,6 +63,7 @@ class SharedResponse extends EventEmitter {
 export class RequestResumption {
   #secret = crypto.randomBytes(32);
   #entries = new Map();
+  #bodyCounts = new Map();
   #bytes = 0;
   #resumed = 0;
   #detached = 0;
@@ -72,9 +73,22 @@ export class RequestResumption {
   #drop(key, entry) {
     if (this.#entries.get(key) !== entry) return;
     clearTimeout(entry.timer); this.#entries.delete(key); this.#bytes -= entry.bytes;
+    const count = (this.#bodyCounts.get(entry.bodyKey) ?? 0) - 1;
+    if (count > 0) this.#bodyCounts.set(entry.bodyKey, count);
+    else this.#bodyCounts.delete(entry.bodyKey);
   }
   #key(owner, sessionId, route, body) {
     return crypto.createHmac('sha256', this.#secret).update(JSON.stringify([owner, sessionId, route, body])).digest('hex');
+  }
+  #bodyKey(owner, route, body) {
+    return crypto.createHmac('sha256', this.#secret).update(JSON.stringify([owner, route, body])).digest('hex');
+  }
+  get size() { return this.#entries.size; }
+  has({ owner, sessionId, route, body }) {
+    return this.#entries.has(this.#key(owner, sessionId, route, body));
+  }
+  hasBodyCandidate({ owner, route, body }) {
+    return this.#bodyCounts.has(this.#bodyKey(owner, route, body));
   }
   snapshot() { return { pending: [...this.#entries.values()].filter(e => !e.settled).length,
     retained: this.#entries.size, retainedBytes: this.#bytes, resumed: this.#resumed, detached: this.#detached }; }
@@ -86,10 +100,14 @@ export class RequestResumption {
     if (!entry) {
       if (this.#entries.size >= this.maxEntries) throw fault('RESUMABLE_REQUEST_CAPACITY', 503);
       const response = new SharedResponse();
-      entry = { settled: false, attachments: new Set(), bytes: 0, timer: null, promise: null, response, delivered: false };
+      const bodyKey = this.#bodyKey(owner, route, body);
+      entry = { settled: false, attachments: new Set(), bytes: 0, timer: null, promise: null, response, delivered: false, bodyKey };
       this.#entries.set(key, entry);
+      this.#bodyCounts.set(bodyKey, (this.#bodyCounts.get(bodyKey) ?? 0) + 1);
       const request = new EventEmitter(); request.headers = { ...req.headers };
-      entry.promise = Promise.resolve().then(() => execute(request, response)).then(() => {
+      // Run execute's synchronous prefix immediately (e.g. body-budget ownership transfer)
+      // before awaiting Promise.race so a same-tick leader disconnect cannot release early.
+      entry.promise = (async () => execute(request, response))().then(() => {
         const result = response.snapshot();
         if (this.#entries.get(key) !== entry) return result;
         if (result.status >= 400 || result.incomplete) { this.#drop(key, entry); return result; }

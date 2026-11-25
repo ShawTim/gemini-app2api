@@ -3,8 +3,9 @@
 import crypto from 'node:crypto';
 import { writeChatResponse, writeResponsesResponse, toChatAnnotations } from '../openai-contract.mjs';
 import { protocolError as fault } from '../tool-protocol.mjs';
-import { responsesCallFields } from '../responses-tool-namespaces.mjs';
+import { responsesCallFields, RESPONSE_TOOL_IDENTITIES } from '../responses-tool-namespaces.mjs';
 import { toResponsesUsage, estimateUsage as estimateTokenUsage } from '../openai-usage.mjs';
+import { canCompleteInterruptedOutput } from './output-recovery.mjs';
 const MAX = 8 * 1024 * 1024;
 // Hold the very first text fragment instead of flushing it immediately. An
 // interrupted turn that produced only this tiny prefix has not shown the caller
@@ -41,7 +42,14 @@ export function classifyInterruptEnding({ route, wirePhase, publishedBytes, call
         : {}),
     ...(isTerminalNoOutput && error?.upstreamCode ? { upstream_code: error.upstreamCode, upstream_status: error.upstreamStatus } : {}),
   };
-  const usable = publishedBytes >= PREFIX_BYTES || callCount > 0 || (error?.postOutputIdleStall === true && content.trim().length > 0);
+  const usable = canCompleteInterruptedOutput({
+    error,
+    publishedBytes,
+    callCount,
+    hasVisibleText: content.trim().length > 0,
+    prefixBytes: PREFIX_BYTES,
+    allowPrefixPartialOnTransport: true,
+  });
   const needsStart = wirePhase !== 'events_started' && (route !== 'chat' || !keepaliveZeroOutput);
   return { detail, keepaliveZeroOutput, usable, needsStart };
 }
@@ -95,8 +103,9 @@ async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
     else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, ignoredTokenParameters = [], parallelToolCalls = true, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000 } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, ignoredTokenParameters = [], parallelToolCalls = true, responseToolIdentities = undefined, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000 } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
+    ...(responseToolIdentities ? { [RESPONSE_TOOL_IDENTITIES]: responseToolIdentities } : {}),
     requestedThinkingLevel: thinkingLevel,
     ...(reasoningEffort === undefined ? {} : { requestedReasoningEffort: reasoningEffort }),
     ...(Array.isArray(ignoredTokenParameters) && ignoredTokenParameters.length ? { ignoredTokenParameters: [...ignoredTokenParameters] } : {}) };
@@ -207,7 +216,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning: { effort: meta.requestedReasoningEffort } }) });
   const sendChat = (delta, finish_reason = null) => sendWire('data: ' + JSON.stringify({ ...chatBase(),
     ...(finish_reason && meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
-    choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: estimateUsage() } : {}) }) + '\n\n');
+    choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: null } : {}) }) + '\n\n');
   const sendResponse = (type, data) => sendWire('event: ' + type + '\ndata: ' + JSON.stringify({ type, sequence_number: sequence++, ...data }) + '\n\n');
   async function finishResponseItems() {
     for (const item of output) {
@@ -412,7 +421,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
           ...(meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
           choices: [{ index: 0, delta: {}, finish_reason: calls.length ? 'tool_calls' : 'stop' }],
           incomplete: true, incomplete_details: { reason: 'upstream_interrupted', code: detail.code },
-          ...(includeUsage ? { usage: estimateUsage() } : {}) }) + '\n\n');
+          ...(includeUsage ? { usage: null } : {}) }) + '\n\n');
         if (includeUsage) await sendWire('data: ' + JSON.stringify({ ...chatBase(), choices: [], usage: estimateUsage() }) + '\n\n');
         await sendWire('data: [DONE]\n\n');
       } else

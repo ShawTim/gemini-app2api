@@ -14,6 +14,7 @@ import { MAX_IMAGES, MAX_IMAGE_URL_BYTES, MAX_TOTAL_IMAGE_URL_BYTES, normalizeIm
 import { RESPONSE_TOOL_IDENTITIES, normalizeResponsesTools, responsesCallFields } from './responses-tool-namespaces.mjs';
 import { toResponsesUsage } from './openai-usage.mjs';
 
+export const CANONICAL_BUILT = Symbol('canonicalBuilt');
 const fail = (code, status = 400, param = null) => { throw protocolError(code, status, param); };
 export const NATIVE_MODELS = Object.freeze(['gemini-neon', 'gemini-hydrogen', 'gemini-flash-lite']);
 // Temporary compatibility alias while clients migrate from retired gemini-argon (mode 8) to gemini-neon (mode 3).
@@ -438,6 +439,15 @@ export function normalizeChatRequest(payload, { allowAutoModel = false, _imageCa
   const built = buildCanonicalPrompt(body, undefined, imageCache); // Validate budgets BEFORE any account reservation.
   body[CANONICAL_PROMPT_CHARS] = built.messages.reduce((sum, m) => sum + (typeof m?.content === 'string' ? m.content.length : 0), 0);
   body[CANONICAL_IMAGE_COUNT] = built.images.length;
+  Object.defineProperty(body, CANONICAL_BUILT, {
+    value: Object.freeze({
+      messages: built.messages,
+      images: built.images,
+      toolCount: built.toolCount,
+      allowAutoModel,
+    }),
+    enumerable: false,
+  });
   return body;
 }
 
@@ -688,7 +698,7 @@ export function writeChatResponse(res, result, { stream = false, includeUsage = 
     return;
   }
   res.writeHead(200, { ...streamHeaders, ...thinkingHeaders(result) });
-  const send = (delta, finish_reason = null) => res.write('data: ' + JSON.stringify({ ...base, ...(finish_reason && result.nativeSearch ? {native_search: result.nativeSearch} : {}), choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: result.usage ?? null } : {}) }) + '\n\n');
+  const send = (delta, finish_reason = null) => res.write('data: ' + JSON.stringify({ ...base, ...(finish_reason && result.nativeSearch ? {native_search: result.nativeSearch} : {}), choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: null } : {}) }) + '\n\n');
   send({ role: 'assistant' });
   if (result.content) send({ content: result.content });
   result.calls.forEach((call, index) => send({ tool_calls: [{ index, ...call }] }));

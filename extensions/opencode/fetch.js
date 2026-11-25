@@ -3,6 +3,7 @@ import { NativeDirectProvider } from '../../src/native-provider.mjs';
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { TOOL_ERRORS, automaticRecoveryKind as defaultAutomaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
+import { canCompleteInterruptedOutput } from '../../src/gateway/output-recovery.mjs';
 import { measurePromptImagePayload, estimateUsage } from '../../src/openai-usage.mjs';
 import { toChatAnnotations } from '../../src/openai-contract.mjs';
 import { normalizeOpenCodeModelId } from './models.js';
@@ -351,6 +352,7 @@ export function createOpenCodeFetch({
         created,
         model: effectiveModel,
         choices: [{ index: 0, delta, finish_reason: finishReason }],
+        ...(includeUsage ? { usage: null } : {}),
         ...extra,
       };
       pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -426,11 +428,18 @@ export function createOpenCodeFetch({
           streamClosed = true;
           return;
         }
-        const usableStall =
-          err?.code === 'NATIVE_TURN_TIMEOUT' &&
-          (toolCallCount > 0 || (err?.postOutputIdleStall === true && publishedBytes > 0));
-        const salvageValidatedCalls = toolCallCount > 0 && TOOL_ERRORS.has(err?.code);
-        if (!streamAbort.signal.aborted && err?.unverifiedOutput !== true && (usableStall || salvageValidatedCalls)) {
+        if (
+          canCompleteInterruptedOutput({
+            error: err,
+            publishedBytes,
+            callCount: toolCallCount,
+            hasVisibleText: publishedBytes > 0,
+            aborted: streamAbort.signal.aborted === true,
+            allowPrefixPartialOnTransport: false,
+            salvageToolErrors: true,
+            toolErrors: TOOL_ERRORS,
+          })
+        ) {
           sendDeltaChunk({}, toolCallCount > 0 ? 'tool_calls' : 'stop', { incomplete: true });
           if (includeUsage) {
             const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });

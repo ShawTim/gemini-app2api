@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { buildCanonicalPrompt } from '../openai-contract.mjs';
+import { CANONICAL_BUILT, buildCanonicalPrompt } from '../openai-contract.mjs';
 import { fault } from './state.mjs';
 
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -9,8 +9,9 @@ const headerValue = (headers, name) => {
   return key === undefined ? undefined : headers[key];
 };
 
-/** Resolve explicit session identity, with a narrowly-scoped PI cache-key fallback. */
-export function resolveSessionIdentity(headers, canonical) {
+/** Resolve explicit session identity, with a narrowly-scoped PI cache-key fallback.
+ * Passing canonical=null resolves explicit session headers only (no normalization needed). */
+export function resolveSessionIdentity(headers, canonical = null) {
   for (const name of ['x-session-id', 'x-session-affinity', 'session-id', 'session_id']) {
     const value = headerValue(headers, name);
     if (value !== undefined) {
@@ -37,7 +38,7 @@ export function resolveSessionIdentity(headers, canonical) {
 
 /** Diagnostics only. Failed requests never create a future admission block. */
 export function describeRequest(canonical) {
-  const built = buildCanonicalPrompt(canonical);
+  const built = canonical?.[CANONICAL_BUILT] ?? buildCanonicalPrompt(canonical);
   return {
     promptBytes: Buffer.byteLength(built.messages.map(message => message.content).join('\n'), 'utf8'),
     messageCount: Array.isArray(canonical.messages) ? canonical.messages.length : 0,

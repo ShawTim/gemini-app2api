@@ -245,3 +245,77 @@ test('incremental mode gate withholds deltas while observedMode is null and drop
   assert.equal(res.status, 502);
   assert.equal((await res.json()).error.code, 'MODEL_DOWNGRADE_REJECTED');
 });
+
+test('F1: mid-stream refusal or downgrade after committed >2KB prose or tool call never emits Chat stop/tool_calls or Responses completed', async t => {
+  const f = await fixture({ allowFailover: false });
+  t.after(f.close);
+  const bigVerifiedProse = 'Verified prose chunk before late refusal. '.repeat(70); // > 2048 B
+  const lateDowngradeFrame = wrap([m(1, Buffer.alloc(0)), v(11, 1), v(31, 5), v(41, 6), v(42, 1)]);
+  const lateRefusalFrame = wrap([m(1, Buffer.alloc(0)), m(13, Buffer.from('refused')), v(41, 3), v(42, 2)]);
+
+  for (const [label, lateFrame, expectedCode] of [
+    ['downgrade', lateDowngradeFrame, 'MODEL_DOWNGRADE_REJECTED'],
+    ['refusal', lateRefusalFrame, 'NATIVE_RESPONSE_REFUSED'],
+  ]) {
+    // Chat SSE after >2KB committed prose
+    f.app.provider.openTurn = () => ({
+      events: (async function* () {
+        yield {
+          type: 'frame',
+          bytes: wrap([
+            m(1, Buffer.concat([m(1, Buffer.from(`resp-chat-${label}`)), m(2, m(1, Buffer.from(bigVerifiedProse)))])),
+            m(30, Buffer.from('Used 4 Neon High model')),
+            v(9, 0),
+            v(41, 3),
+            v(42, 2),
+          ]),
+        };
+        yield { type: 'frame', bytes: lateFrame };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    });
+    const chatRes = await f.api('/v1/chat/completions', {
+      method: 'POST',
+      body: { model: 'gemini-argon', messages: request.messages, stream: true },
+    });
+    assert.equal(chatRes.status, 200);
+    const chatWire = await chatRes.text();
+    assert.equal(chatWire.includes('"finish_reason":"stop"'), false, `Chat ${label} must not emit finish_reason: stop`);
+    assert.equal(chatWire.includes('"finish_reason":"tool_calls"'), false, `Chat ${label} must not emit finish_reason: tool_calls`);
+    assert.equal(chatWire.includes('data: [DONE]'), false, `Chat ${label} must not emit [DONE]`);
+    const chatEvents = chatWire.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
+    assert.equal(chatEvents.at(-1).error?.code, expectedCode);
+    assert.equal(chatEvents.at(-1).incomplete, true);
+
+    // Responses SSE after >2KB committed prose
+    f.app.provider.openTurn = () => ({
+      events: (async function* () {
+        yield {
+          type: 'frame',
+          bytes: wrap([
+            m(1, Buffer.concat([m(1, Buffer.from(`resp-resp-${label}`)), m(2, m(1, Buffer.from(bigVerifiedProse)))])),
+            m(30, Buffer.from('Used 4 Neon High model')),
+            v(9, 0),
+            v(41, 3),
+            v(42, 2),
+          ]),
+        };
+        yield { type: 'frame', bytes: lateFrame };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    });
+    const respRes = await f.api('/v1/responses', {
+      method: 'POST',
+      body: { model: 'gemini-argon', input: 'synthetic', stream: true },
+    });
+    assert.equal(respRes.status, 200);
+    const respWire = await respRes.text();
+    assert.equal(respWire.includes('event: response.completed'), false, `Responses ${label} must not emit response.completed`);
+    const respEvents = respWire.split('\n').filter(l => l.startsWith('data: {')).map(l => JSON.parse(l.slice(6)));
+    assert.equal(respEvents.at(-1).type, 'response.incomplete');
+    assert.equal(respEvents.at(-1).response.status, 'incomplete');
+    assert.equal(respEvents.at(-1).response.error?.code, expectedCode);
+  }
+});

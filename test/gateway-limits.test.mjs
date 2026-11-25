@@ -582,3 +582,107 @@ test("post-complete and post-output upstream idle watchdogs stop hung streams wi
   assert.equal(text4.includes('"incomplete":true'), false);
   assert.match(text4, /data: \[DONE\]/);
 });
+
+test('F2 & F8: global in-flight body-byte budget, pre-decode GATEWAY_BUSY admission, and Chat SSE single-usage compliance', async (t) => {
+  // 1. Pre-decode admission: when maxConcurrent is saturated, a new request carrying an invalid
+  //    image_url is rejected immediately with 429 GATEWAY_BUSY (before normalization/image decoding),
+  //    and once idle the same request reaches normalization and returns 400.
+  const f = await fixture({ delay: 180, allowAutomaticRecovery: true });
+  t.after(f.close);
+  f.store.updateSettings({ maxConcurrent: 1 });
+  const inFlight = f.api('/v1/chat/completions', {
+    method: 'POST',
+    body,
+    headers: { 'X-Session-ID': 'slot-holder' },
+  });
+  while (!f.seen.length) await new Promise((r) => setTimeout(r, 5));
+  const badImagePayload = {
+    model: 'gemini-argon',
+    messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,!!!not-valid-base64!!!' } }] }],
+  };
+  const rejectedBusy = await f.api('/v1/chat/completions', { method: 'POST', body: badImagePayload });
+  assert.equal(rejectedBusy.status, 429);
+  assert.equal((await rejectedBusy.json()).error.code, 'GATEWAY_BUSY');
+  // Unrelated request with a spoofed prompt_cache_key must ALSO be rejected with 429 GATEWAY_BUSY before decoding images.
+  const rejectedSpoofedCacheKey = await f.api('/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'User-Agent': 'pi/1.5.2 (darwin; node/v24; arm64)' },
+    body: { ...badImagePayload, prompt_cache_key: 'unrelated-key' },
+  });
+  assert.equal(rejectedSpoofedCacheKey.status, 429);
+  assert.equal((await rejectedSpoofedCacheKey.json()).error.code, 'GATEWAY_BUSY');
+  // HTTP /mcp ask_gemini must also reject with GATEWAY_BUSY before decoding images when full.
+  const rejectedMcp = await f.api('/mcp', {
+    method: 'POST',
+    body: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'ask_gemini',
+        arguments: {
+          prompt: 'describe',
+          images: [{ data_url: 'data:image/png;base64,!!!not-valid-base64!!!' }],
+        },
+      },
+    },
+  });
+  assert.equal(rejectedMcp.status, 200);
+  const mcpJson = await rejectedMcp.json();
+  assert.equal(mcpJson.result?.isError, true);
+  assert.match(mcpJson.result?.content?.[0]?.text || '', /GATEWAY_BUSY/);
+  assert.equal((await inFlight).status, 200);
+  const rejectedAfterIdle = await f.api('/v1/chat/completions', { method: 'POST', body: badImagePayload });
+  assert.equal(rejectedAfterIdle.status, 400);
+
+  // 2. Chat SSE include_usage=true through gateway delivery: intermediate chunks have usage:null,
+  //    and only the final choices:[] chunk carries non-null usage.
+  const sseRes = await f.api('/v1/chat/completions', {
+    method: 'POST',
+    body: { ...body, stream: true, stream_options: { include_usage: true } },
+  });
+  assert.equal(sseRes.status, 200);
+  const sseText = await sseRes.text();
+  const packets = sseText.split('\n').filter((l) => l.startsWith('data: {')).map((l) => JSON.parse(l.slice(6)));
+  assert.ok(packets.length >= 4);
+  for (const p of packets.slice(0, -1)) {
+    assert.equal(p.usage, null, 'gateway intermediate Chat SSE chunks must emit usage: null');
+  }
+  assert.deepEqual(packets.at(-1).choices, []);
+  assert.equal(typeof packets.at(-1).usage?.prompt_tokens, 'number');
+  assert.ok(packets.at(-1).usage.prompt_tokens > 0);
+
+  // 3. Global in-flight body-bytes budget sheds oversized concurrent body before completing read,
+  //    retains the reservation across a detached resumable leader until execution finishes,
+  //    and releases cleanly afterwards.
+  const fBudget = await fixture({ delay: 180, allowAutomaticRecovery: true, maxInFlightBodyBytes: 6000 });
+  t.after(fBudget.close);
+  const mediumPayload = JSON.stringify({ model: 'gemini-argon', messages: [{ role: 'user', content: 'a'.repeat(4000) }] });
+  const detachCtrl = new AbortController();
+  const detachedLeader = fetch(fBudget.base + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + fBudget.key.key, 'Content-Type': 'application/json', 'X-Session-ID': 'budget-leader' },
+    body: mediumPayload,
+    signal: detachCtrl.signal,
+  }).catch(() => null);
+  while (!fBudget.seen.length) await new Promise((r) => setTimeout(r, 5));
+  detachCtrl.abort();
+  await detachedLeader;
+  // Leader disconnected, but its resumable turn is still running -> body budget stays reserved!
+  assert.equal(fBudget.app.overview().metrics.active, 1);
+  const secondBig = await fetch(fBudget.base + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + fBudget.key.key, 'Content-Type': 'application/json' },
+    body: mediumPayload,
+  });
+  assert.equal(secondBig.status, 429);
+  assert.equal((await secondBig.json()).error.code, 'GATEWAY_BUSY');
+  while (fBudget.app.overview().metrics.active > 0) await new Promise((r) => setTimeout(r, 10));
+  // After background leader settles, budget is released and a new mediumPayload succeeds.
+  const thirdBig = await fetch(fBudget.base + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + fBudget.key.key, 'Content-Type': 'application/json' },
+    body: mediumPayload,
+  });
+  assert.equal(thirdBig.status, 200);
+});

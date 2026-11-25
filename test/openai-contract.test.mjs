@@ -148,6 +148,17 @@ test('Chat JSON/SSE model/id/tool indices and finish semantics agree; usage stay
   assert.deepEqual(chunks.flatMap(c => c.choices[0]?.delta?.tool_calls ?? []).map(c => c.index), [0, 1]);
   assert.equal(chunks.at(-2).choices[0].finish_reason, 'tool_calls'); assert.deepEqual(chunks.at(-1).choices, []);
   assert.equal(chunks.at(-1).usage, null); assert.ok(streamed.text().endsWith('data: [DONE]\n\n'));
+  // F8: include_usage=true must emit usage:null on intermediate chunks and non-null usage ONLY on the final choices:[] chunk.
+  const usageSample = { prompt_tokens: 115, completion_tokens: 24, total_tokens: 139 };
+  const streamedWithUsage = response();
+  writeChatResponse(streamedWithUsage, { ...verified, usage: usageSample }, { stream: true, includeUsage: true });
+  const usageChunks = events(streamedWithUsage);
+  assert.ok(usageChunks.length >= 4);
+  for (const chunk of usageChunks.slice(0, -1)) {
+    assert.equal(chunk.usage, null, 'intermediate Chat SSE chunks must carry usage: null');
+  }
+  assert.deepEqual(usageChunks.at(-1).choices, []);
+  assert.deepEqual(usageChunks.at(-1).usage, usageSample);
   const plain = response(); writeChatResponse(plain, { ...verified, calls: [] });
   assert.equal(JSON.parse(plain.text()).choices[0].finish_reason, 'stop');
 });
