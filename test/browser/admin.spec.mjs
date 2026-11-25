@@ -1806,5 +1806,45 @@ test("demo mode computes ready dynamically across mutations and scenarios while 
   await expect(page.locator("#overview-status")).toContainText("Local routing available");
   await expect(page.locator("#overview-status")).toContainText("1 routable accounts");
 
+  // Demo mode keeps the topbar star link but never shows the dismissible star prompt banner.
+  await expect(page.locator("#topbar-github-star")).toHaveAttribute("href", "https://github.com/ShawTim/gemini-app2api");
+  await expect(page.locator("#star-prompt-banner")).toHaveCount(0);
+
   expect(f.seen).toHaveLength(0);
+});
+
+test("GitHub star topbar link and dismissible prompt banner render trilingually with zero overflow and persist dismissal", async ({ page, context }) => {
+  await context.route("https://**", (r) => r.abort());
+  await login(page);
+  const topbarStar = page.locator("#topbar-github-star");
+  await expect(topbarStar).toBeVisible();
+  await expect(topbarStar).toHaveAttribute("href", "https://github.com/ShawTim/gemini-app2api");
+  await expect(topbarStar).toHaveAttribute("target", "_blank");
+  await expect(topbarStar).toHaveAttribute("rel", "noopener noreferrer");
+
+  const banner = page.locator("#star-prompt-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("GitHub star");
+  await expect(page.locator("#star-prompt-cta")).toHaveAttribute("href", "https://github.com/ShawTim/gemini-app2api");
+
+  // Check zh-HK, zh-CN, and mobile 390px zero overflow in dark and light themes.
+  await page.locator("#lang-zh-HK").click();
+  await expect(banner).toContainText("去 GitHub 畀粒星");
+  await page.locator("#lang-zh-CN").click();
+  await expect(banner).toContainText("去 GitHub 点个 Star");
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 860 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.locator("#theme-toggle").click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Dismissing hides banner permanently across reloads while topbar star link stays available.
+  await page.locator("#star-prompt-dismiss").click();
+  await expect(banner).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("gemini_star_prompt_dismissed"))).toBe("1");
+  await page.reload();
+  await expect(page.locator('[data-page="accounts"]')).toBeVisible();
+  await expect(banner).toHaveCount(0);
+  await expect(topbarStar).toBeVisible();
 });

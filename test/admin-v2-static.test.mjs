@@ -39,7 +39,7 @@ function fixture(demo = false, fetchImpl = () => { throw Error('Unexpected netwo
     window: { addEventListener() {} }, localStorage: { getItem: () => null, setItem() {} }, fetch: fetchImpl,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, requestMetadata, isNormalRequest, presetSnippetText, snippet, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, toZhCN, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
+  vm.runInContext(source.replace(/\nboot\(\);\s*$/, '\n') + '\nglobalThis.subject = { api, versionTag, shouldShowStarPrompt, dismissStarPrompt, hasSignedInAccountOrActivity, GITHUB_REPO_URL, requestMetadata, isNormalRequest, presetSnippetText, snippet, sanitizeDiagnostics, safeError, makeDemo, demoApi, setDemoScenario, syncDemoState, formatBytes, overviewModelTelemetry, accountModelTelemetryView, S, words, I18N, t, toZhCN, reasonLabel, modelStateLabel, accountCoolingDown, accountNeedsSignIn, accountRoutingEligible, accountRoutingLabel, accountAttentionReasons, accountHasAttention, poolCurrentWindowSummary, filteredAccounts, editableSettings, filteredRequests, addAccount, modelEvidence, localRoutingState, readableMilliseconds, quotaRowIdentity, applyRouteFromHash, openAccountDrawer, closeAccountDrawer, renderAccountDrawer, refresh, focusRouteTarget, copyApiKey, toggleRevealKey, revealedKeys, expireSession };', context, { timeout: 2000 });
   return { ...sandbox.subject, nodesById, createdTexts, location: sandbox.location };
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -914,4 +914,31 @@ test('admin-v2 supports /mcp path metadata, mcpEnabled editable setting, and MCP
   assert.equal(stdioMcp.mcpServers['gemini-app'].args[1], 'mcp');
   assert.match(source, /推荐双模型配置预设：/);
   assert.match(source, /客户端预设/);
+});
+
+test('GitHub star prompt shows only for real active workspaces and stays permanently dismissed', () => {
+  const f = fixture(false);
+  assert.equal(f.GITHUB_REPO_URL, 'https://github.com/ShawTim/gemini-app2api');
+  // Hidden before overview loads or on empty workspace with no signed-in accounts / activity
+  f.S.overview = null;
+  assert.equal(f.shouldShowStarPrompt(), false);
+  f.S.overview = { accounts: [], metrics: { totalRequests: 0 }, requests: [] };
+  f.S.accounts = [];
+  assert.equal(f.shouldShowStarPrompt(), false);
+  // Shown once an account is signed in (ready)
+  f.S.accounts = [{ id: 'acc-1', status: 'ready' }];
+  assert.equal(f.shouldShowStarPrompt(), true);
+  // Shown even with no ready account if gateway has served requests
+  f.S.accounts = [{ id: 'acc-1', status: 'login_required' }];
+  f.S.overview = { accounts: f.S.accounts, metrics: { totalRequests: 3 }, requests: [] };
+  assert.equal(f.shouldShowStarPrompt(), true);
+  // Dismissing hides permanently
+  f.dismissStarPrompt();
+  assert.equal(f.S.starPromptDismissed, true);
+  assert.equal(f.shouldShowStarPrompt(), false);
+  // Demo mode never shows the star prompt banner
+  const demo = fixture(true);
+  demo.S.overview = demo.makeDemo();
+  demo.S.accounts = demo.S.overview.accounts;
+  assert.equal(demo.shouldShowStarPrompt(), false);
 });

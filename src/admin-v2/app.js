@@ -22,7 +22,9 @@ const S = {
   configCopied: false, lastInspectedRequestId: '', accountNotice: '', loginAcceptTerms: false,
   enterRoute: true, pendingRouteFocus: false, deepLink: {}, diagnosticsOpen: false, capabilitiesOpen: false, folds: {}, accountCategory: '',
   accountQuickFilter: '', selectedAccountId: '', pendingAccountLookup: '', preset: 'codex', drawerReturnFocus: null,
+  starPromptDismissed: pref('gemini_star_prompt_dismissed') === '1',
 };
+const GITHUB_REPO_URL = 'https://github.com/ShawTim/gemini-app2api';
 const revealedKeys = new Map();
 const ZH_CN_PHRASES = [
   ['工作階段', '会话'], ['登入階段', '登录会话'], ['中繼資料', '元数据'], ['重新整理', '刷新'],
@@ -121,6 +123,8 @@ const paths = {
   eyeOff: 'M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a16.8 16.8 0 0 1-3.2 4.3M6.2 6.2C3.7 8 2 12 2 12s3.5 7 10 7a10.6 10.6 0 0 0 4.6-1',
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5',
   shield: 'M12 3l7 3v6c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6l7-3z',
+  star: 'M12 2.75l2.86 5.79 6.39.93-4.62 4.5 1.09 6.36L12 17.33l-5.72 3 1.09-6.36-4.62-4.5 6.39-.93L12 2.75z',
+  close: 'M18 6 6 18M6 6l12 12',
 };
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -423,6 +427,67 @@ function desktopNavigation() {
 function gatewayBaseUrl() { return location.protocol === 'file:' ? 'http://127.0.0.1:18989/v1' : `${location.origin}/v1`; }
 function gatewayMcpUrl() { return location.protocol === 'file:' ? 'http://127.0.0.1:18989/mcp' : `${location.origin}/mcp`; }
 function mcpEndpointEnabled() { return (S.settings?.mcpEnabled ?? S.overview?.settings?.mcpEnabled) !== false; }
+function hasSignedInAccountOrActivity() {
+  const accounts = Array.isArray(S.accounts) ? S.accounts : Array.isArray(S.overview?.accounts) ? S.overview.accounts : [];
+  const hasSignedIn = accounts.some(a => a && (a.status === 'ready' || a.authenticationStatus === 'ready' || a.authenticationStatus === 'signed_in'));
+  const totalReq = S.overview?.metrics?.totalRequests;
+  const hasActivity = (typeof totalReq === 'number' && totalReq > 0) || (Array.isArray(S.overview?.requests) && S.overview.requests.length > 0);
+  return hasSignedIn || hasActivity;
+}
+function shouldShowStarPrompt() {
+  return !DEMO && !S.starPromptDismissed && Boolean(S.overview) && hasSignedInAccountOrActivity();
+}
+function dismissStarPrompt() {
+  if (S.starPromptDismissed) return;
+  S.starPromptDismissed = true;
+  savePref('gemini_star_prompt_dismissed', '1');
+  render();
+}
+function topbarStarControl() {
+  return el('a', {
+    id: 'topbar-github-star',
+    class: 'button quiet topbar-star',
+    href: GITHUB_REPO_URL,
+    target: '_blank',
+    rel: 'noopener noreferrer',
+    title: L('Star Gemini App2API on GitHub', '去 GitHub 畀星支持 Gemini App2API', '去 GitHub 点 Star 支持 Gemini App2API'),
+    'aria-label': L('Star Gemini App2API on GitHub', '去 GitHub 畀星支持 Gemini App2API', '去 GitHub 点 Star 支持 Gemini App2API'),
+    onClick: () => { if (!S.starPromptDismissed) dismissStarPrompt(); },
+  }, icon('star'), el('span', { class: 'topbar-star-label' }, L('Star', '畀星', 'Star')));
+}
+function starPromptBanner() {
+  if (!shouldShowStarPrompt()) return null;
+  return el('aside', {
+    id: 'star-prompt-banner',
+    class: 'star-prompt-banner',
+    'aria-label': L('Support Gemini App2API on GitHub', '喺 GitHub 支持 Gemini App2API', '在 GitHub 支持 Gemini App2API'),
+  },
+    el('div', { class: 'star-prompt-copy' },
+      el('span', { class: 'star-prompt-icon', 'aria-hidden': true }, icon('star')),
+      el('span', {}, L(
+        'Finding Gemini App2API useful? A GitHub star helps more developers discover the project.',
+        '覺得 Gemini App2API 好用？去 GitHub 畀粒星，幫更多人發現呢個開源項目。',
+        '觉得 Gemini App2API 好用？去 GitHub 点个 Star，帮助更多开发者发现这个开源项目。',
+      )),
+    ),
+    el('div', { class: 'star-prompt-actions' },
+      el('a', {
+        id: 'star-prompt-cta',
+        class: 'button compact star-prompt-cta',
+        href: GITHUB_REPO_URL,
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        onClick: dismissStarPrompt,
+      }, icon('star'), el('span', {}, L('Star on GitHub ↗', '去 GitHub 畀星 ↗', '去 GitHub 点 Star ↗'))),
+      btn(icon('close'), dismissStarPrompt, {
+        id: 'star-prompt-dismiss',
+        class: 'icon-button compact quiet',
+        'aria-label': L('Dismiss GitHub star reminder', '關閉 GitHub 畀星提示', '关闭 GitHub Star 提示'),
+        title: t('close'),
+      }),
+    ),
+  );
+}
 function render() {
   const savedFocus = captureFocus(); applyPreferences();
   if (!S.authenticated) { closeAccountDrawer(false); renderLogin(); restoreFocus(savedFocus); return; }
@@ -433,11 +498,14 @@ function render() {
     btn([icon('models'), L('Client setup', '客戶端設定')], () => goto('models'), { id: 'shortcut-models', class: `topbar-shortcut quiet${S.route === 'models' ? ' is-active' : ''}` }),
     btn([icon('playground'), t('playground')], () => goto('playground'), { id: 'shortcut-playground', class: `topbar-shortcut quiet${S.route === 'playground' ? ' is-active' : ''}` }),
     settingsDirty() && S.route !== 'settings' && link('settings', L('Unsaved settings draft', '有未儲存設定草稿'), { class: 'draft-indicator', id: 'settings-draft-indicator' }),
+    topbarStarControl(),
     preferenceControls(),
     S.authRequired && btn(icon('logout'), logout, { id: 'logout', class: 'icon-button quiet', 'aria-label': t('logout') })));
   const demoBanner = DEMO && el('div', { class: 'demo-banner', id: 'demo-banner' }, badge(L('DEMO', '示範')), el('span', {}, L('Synthetic data · simulated refresh · no provider traffic.', '合成資料 · 模擬更新 · 不會連接供應商。')), el('label', { class: 'demo-scenario row' }, L('Scenario', '情境'), select('demo-scenario', [['sample', L('Sample activity', '活動樣本')], ['empty', L('Empty workspace', '空白工作區')], ['auth', L('Account errors', '帳戶錯誤')], ['quota', L('Quota fixture', '配額範例')], ['failure', L('API error fixture', 'API 錯誤範例')]], S.demoScenario, setDemoScenario)), el('a', { href: exitDemo.href }, L('Exit demo ↗', '離開示範 ↗')));
   const main = el('main', { id: 'main', class: 'main', tabindex: '-1' }, el('div', { class: 'page-heading' }, el('div', {}, el('h1', { id: 'page-title', tabindex: '-1' }, t(S.route)), el('p', {}, descriptions[S.route]())), el('div', { class: 'actions' }, routeActions())),
-    el('div', { id: 'page-error', hidden: !S.error, role: 'alert', class: 'notice rose page-error' }, el('span', {}, S.error), btn(t('retry'), () => refresh())), el('div', { id: 'page-content', 'data-page': S.route, 'aria-busy': String(S.loading) }, renderPage()));
+    el('div', { id: 'page-error', hidden: !S.error, role: 'alert', class: 'notice rose page-error' }, el('span', {}, S.error), btn(t('retry'), () => refresh())),
+    starPromptBanner(),
+    el('div', { id: 'page-content', 'data-page': S.route, 'aria-busy': String(S.loading) }, renderPage()));
   $('app').replaceChildren(el('div', { class: 'shell' }, el('div', { class: 'workspace' }, topbar, demoBanner, main)));
   renderAccountDrawer();
   restoreFocus(savedFocus);
