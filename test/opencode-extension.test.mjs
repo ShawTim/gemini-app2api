@@ -817,7 +817,7 @@ test('OpenCode V2 plugin enforces free-tier model gating and reloads on credenti
       refresh: 'r-free',
       access: 'a-free',
       expires: Date.now() + 600_000,
-      metadata: { tier: 'free' },
+      metadata: { tier: 'free', tierRpc: 'GetUserStatus' },
     },
   });
   const cleanup = await plugin.setup(mock.ctx);
@@ -831,7 +831,7 @@ test('OpenCode V2 plugin enforces free-tier model gating and reloads on credenti
       refresh: 'r-pro',
       access: 'a-pro',
       expires: Date.now() + 600_000,
-      metadata: { tier: 'pro' },
+      metadata: { tier: 'pro', tierRpc: 'GetUserStatus' },
     });
     mock.emitEvent({ type: 'credential.switched', data: { integrationID: PROVIDER_ID } });
     await new Promise((r) => setTimeout(r, 30));
@@ -893,7 +893,7 @@ test('OpenCode V2: first-time Free OAuth login reloads models and secondary meth
       refresh: 'r-pro-active',
       access: 'a-pro-active',
       expires: Date.now() + 600_000,
-      metadata: { tier: 'pro' },
+      metadata: { tier: 'pro', tierRpc: 'GetUserStatus' },
     });
     mock.emitEvent({ type: 'credential.switched', data: { integrationID: PROVIDER_ID } });
     await new Promise((r) => setTimeout(r, 30));
@@ -916,8 +916,8 @@ test('OpenCode V2: first-time Free OAuth login reloads models and secondary meth
 
 test('OpenCode V2: active()/resolve() race rejects stale Account A lookup instead of sending old token after switch to B', async () => {
   const credsByConn = new Map([
-    ['conn-a', { type: 'oauth', methodID: OPENCODE_V2_OAUTH_METHOD_ID, refresh: 'r-a', access: 'token-A', expires: Date.now() + 600_000, metadata: { tier: 'pro' } }],
-    ['conn-b', { type: 'oauth', methodID: OPENCODE_V2_OAUTH_METHOD_ID, refresh: 'r-b', access: 'token-B', expires: Date.now() + 600_000, metadata: { tier: 'pro' } }],
+    ['conn-a', { type: 'oauth', methodID: OPENCODE_V2_OAUTH_METHOD_ID, refresh: 'r-a', access: 'token-A', expires: Date.now() + 600_000, metadata: { tier: 'pro', tierRpc: 'GetUserStatus' } }],
+    ['conn-b', { type: 'oauth', methodID: OPENCODE_V2_OAUTH_METHOD_ID, refresh: 'r-b', access: 'token-B', expires: Date.now() + 600_000, metadata: { tier: 'pro', tierRpc: 'GetUserStatus' } }],
   ]);
   let activeConnId = 'conn-a';
   let releaseResolveA = null;
@@ -1023,7 +1023,7 @@ test('OpenCode V2 bridge: 413 on keep-alive socket closes cleanly without poison
       refresh: 'r-ka',
       access: 'a-ka',
       expires: Date.now() + 600_000,
-      metadata: { tier: 'pro' },
+      metadata: { tier: 'pro', tierRpc: 'GetUserStatus' },
     },
   });
   const cleanup = await plugin.setup(mock.ctx);
@@ -1185,6 +1185,57 @@ test('OpenCode V2: shared tier probe/refresh decouples caller abort, does not pe
     await method.authorize({});
     await cleanup();
     assert.equal(loginSessionClosed, true, 'cleanup() must close active OAuth loopback login sessions');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('OpenCode V2: legacy metadata.tier without tierRpc triggers GetUserStatus re-probe and corrects stale pro to free', async () => {
+  let subProbeCalls = 0;
+  let seenSmart = null;
+  const plugin = createGeminiAppOpenCodeV2Plugin({
+    fetchGoogleSubscription: async () => {
+      subProbeCalls++;
+      return { payload: Buffer.alloc(0) };
+    },
+    decodeSubscription: () => ({ tier: 'free' }),
+    openTurn: (_tok, opts) => {
+      seenSmart = Boolean(opts.smartModelSelection);
+      return {
+        cancel() {},
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeFrame('ok-free') };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
+    },
+  });
+
+  const mock = createMockOpenCodeV2Context({
+    initialCred: {
+      type: 'oauth',
+      methodID: OPENCODE_V2_OAUTH_METHOD_ID,
+      refresh: 'r-legacy-pro',
+      access: 'a-legacy-pro',
+      expires: Date.now() + 600_000,
+      metadata: { tier: 'pro' }, // legacy GetUsageInfo metadata without tierRpc
+    },
+  });
+  const cleanup = await plugin.setup(mock.ctx);
+  try {
+    const providerEntry = mock.providers.get(PROVIDER_ID);
+    const res = await fetch(`${providerEntry.info.settings.baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [BRIDGE_TOKEN_HEADER]: providerEntry.info.headers[BRIDGE_TOKEN_HEADER],
+      },
+      body: JSON.stringify({ model: 'gemini-neon', stream: false, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(subProbeCalls, 1, 'legacy metadata without tierRpc must trigger fresh GetUserStatus probe');
+    assert.equal(seenSmart, true, 're-probed free account must route to gemini-auto');
+    assert.deepEqual(mock.evaluateEnabledModels(), ['gemini-auto']);
   } finally {
     await cleanup();
   }

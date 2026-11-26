@@ -1698,17 +1698,28 @@ test('auth.login and auth.refresh detect subscriptionTier via GetUserStatus with
 
   const freeCred = await loginPromise;
   assert.equal(freeCred.subscriptionTier, 'free');
+  assert.equal(freeCred.subscriptionRpc, 'GetUserStatus');
   assert.ok(notifications.some((e) => e.type === 'progress' && e.message.includes('Free account (gemini-auto enabled)')));
 
   // Refresh upgrades detected tier to pro
   currentTierWire = 2;
   const proCred = await auth.refresh(freeCred, new AbortController().signal);
   assert.equal(proCred.subscriptionTier, 'pro');
+  assert.equal(proCred.subscriptionRpc, 'GetUserStatus');
 
-  // Refresh outage preserves prior subscriptionTier cleanly
+  // Refresh outage preserves prior GetUserStatus-verified subscriptionTier cleanly
   failUsage = true;
   const keptCred = await auth.refresh(proCred, new AbortController().signal);
   assert.equal(keptCred.subscriptionTier, 'pro');
+  assert.equal(keptCred.subscriptionRpc, 'GetUserStatus');
+
+  // Refresh outage drops legacy un-provenanced subscriptionTier (no subscriptionRpc)
+  const droppedLegacy = await auth.refresh(
+    { type: 'oauth', refresh: 'ref-tier', access: 'old', expires: 0, subscriptionTier: 'pro' },
+    new AbortController().signal,
+  );
+  assert.equal('subscriptionTier' in droppedLegacy, false);
+  assert.equal('subscriptionRpc' in droppedLegacy, false);
 
   // Login outage does not fail sign-in and omits unknown subscriptionTier
   let authUrl2;

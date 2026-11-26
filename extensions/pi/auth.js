@@ -182,7 +182,7 @@ export function createGeminiOAuthAuth({
       refresh: scoped.refreshToken || tokens.refreshToken,
       access: scoped.accessToken,
       expires: computeExpiresAtMs(scoped.expiresInSeconds ?? tokens.expiresInSeconds),
-      ...(subscriptionTier !== 'unknown' ? { subscriptionTier } : {}),
+      ...(subscriptionTier !== 'unknown' ? { subscriptionTier, subscriptionRpc: 'GetUserStatus' } : {}),
     };
   }
 
@@ -193,14 +193,16 @@ export function createGeminiOAuthAuth({
     const config = resolveOAuthConfig({ defaultProfile, env });
     const refreshed = await refreshNativeCredential(config, credential.refresh, { signal });
     const detectedTier = await detectSubscriptionTier(refreshed.accessToken, { signal });
-    const subscriptionTier = detectedTier !== 'unknown' ? detectedTier : credential.subscriptionTier;
+    const verifiedPrior = credential.subscriptionRpc === 'GetUserStatus' ? credential.subscriptionTier : undefined;
+    const subscriptionTier = detectedTier !== 'unknown' ? detectedTier : verifiedPrior;
+    const { subscriptionTier: _oldTier, subscriptionRpc: _oldRpc, ...rest } = credential;
     return {
-      ...credential,
+      ...rest,
       type: 'oauth',
       refresh: refreshed.refreshToken || credential.refresh,
       access: refreshed.accessToken,
       expires: computeExpiresAtMs(refreshed.expiresInSeconds),
-      ...(subscriptionTier ? { subscriptionTier } : {}),
+      ...(subscriptionTier ? { subscriptionTier, subscriptionRpc: 'GetUserStatus' } : {}),
     };
   }
 

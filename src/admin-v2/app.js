@@ -752,10 +752,11 @@ function latencyChart(requests, compact = false) {
 const quotaPending = new Set();
 const quotaPercentLabel = (q, row) => q.source === 'official' && q.provider === 'google-robin' && row.percentMeaning === 'used' ? L('Used', '已用') : L('Provider percentage (meaning unspecified)', '供應商百分比（未指明含義）');
 const quotaTimestampLabel = (q, row) => q.source === 'official' && q.provider === 'google-robin' && row.timestampMeaning === 'window_refresh' ? L('Usage window refreshes: ', '用量視窗更新時間：') : L('Google quota time: ', 'Google 配額時間：');
+const isQuotaRefreshError = id => quotaRefreshErrors.has(id) && quotaRefreshErrors.get(id)?.code !== 'QUOTA_REFRESH_THROTTLED';
 function quotaView(account, detailed = false) {
   if (detailed) return accountQuotaView(account);
   const q = account.quota || {}, rows = (q.usageRows || []).slice(0, 2), budgets = (q.budgets || []).slice(0, 1), known = q.source === 'official';
-  const failed = q.status === 'error' || quotaRefreshErrors.has(account.id);
+  const failed = q.status === 'error' || isQuotaRefreshError(account.id);
   return el('div', { class: 'overview-quota', 'data-quota': account.id },
     el('div', { class: 'overview-quota-head' }, el('strong', {}, L('Usage', '用量')), failed && el('span', { class: 'help' }, L('Update failed', '更新失敗'))),
     el('p', { class: 'help' }, known ? L('Raw provider values; not inferred remaining balances.', '供應商原始數值，不會推算為剩餘額度。') : L('No provider quota snapshot. Local counts remain separate.', '未有供應商配額快照。本地計數會分開顯示。')),
@@ -1082,7 +1083,7 @@ function accountAttentionReasons(a) {
   if (a.status === 'auth_error' || a.authenticationStatus === 'auth_error') reasons.push({ key: 'auth', label: L('Authentication error', '驗證失敗'), tone: 'rose' });
   else if (a.status === 'login_required' || a.authenticationStatus === 'login_required') reasons.push({ key: 'auth', label: L('Sign-in required', '需要重新登入'), tone: 'amber' });
   if (accountCoolingDown(a)) reasons.push({ key: 'cooldown', label: L('Routing cooldown', '路由冷卻中'), tone: 'amber' });
-  const hasQuotaError = a.quota?.status === 'error' || (quotaRefreshErrors.has(a.id) && quotaRefreshErrors.get(a.id)?.code !== 'QUOTA_REFRESH_THROTTLED');
+  const hasQuotaError = a.quota?.status === 'error' || isQuotaRefreshError(a.id);
   if (hasQuotaError) reasons.push({ key: 'quota', label: L('Quota refresh failed', '額度更新失敗'), tone: 'amber' });
   const rejected = Object.values(a.modelStates || {}).filter(s => ['rejected', 'blocked'].includes(s.state)).length;
   if (rejected) reasons.push({ key: 'models', label: L(`${rejected} previous upstream rejection${rejected === 1 ? '' : 's'}`, `${rejected} 個過往上游拒絕紀錄`), tone: 'rose' });
@@ -1116,7 +1117,7 @@ function dailyQuota(a) {
       el('strong', { class: 'daily-value number' }, pct !== null ? `${num(row.providerPercent)}%` : t('unknown'), el('small', {}, pct !== null ? L(' used', ' 已用') : '')),
       pct !== null && el('div', { class: 'daily-bar', 'aria-hidden': true }, el('span', { class: barTone || null, style: `width:${pct}%` })),
       row?.providerTimestamp && row.timestampMeaning === 'window_refresh' && el('small', { class: 'daily-window' }, L('Updates ', '額度更新 '), el('time', { datetime: row.providerTimestamp, title: L('Update time does not guarantee a full refill.', '額度更新時間唔代表一定補滿。') }, new Intl.DateTimeFormat(S.lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(row.providerTimestamp)))));
-  }), el('small', { class: 'daily-data-time', 'data-usage-observed-at': dataAt || '' }, ((quotaRefreshErrors.has(a.id) && quotaRefreshErrors.get(a.id)?.code !== 'QUOTA_REFRESH_THROTTLED') || q.status === 'error') ? rows.length ? L('Update failed · showing saved data', '更新失敗 · 顯示已儲存資料') : L('Update failed · no saved usage', '更新失敗 · 尚未有已儲存用量') : q.status === 'missing' && rows.length ? L('No newer usage · showing saved data', '未有新用量 · 顯示已儲存資料') : dataAt ? L('Data ', '資料 ') + date(dataAt) : L('No usage data yet', '尚未有用量資料')));
+  }), el('small', { class: 'daily-data-time', 'data-usage-observed-at': dataAt || '' }, (isQuotaRefreshError(a.id) || q.status === 'error') ? rows.length ? L('Update failed · showing saved data', '更新失敗 · 顯示已儲存資料') : L('Update failed · no saved usage', '更新失敗 · 尚未有已儲存用量') : q.status === 'missing' && rows.length ? L('No newer usage · showing saved data', '未有新用量 · 顯示已儲存資料') : dataAt ? L('Data ', '資料 ') + date(dataAt) : L('No usage data yet', '尚未有用量資料')));
 }
 function relativeTime(value) {
   if (!value) return '—';

@@ -465,6 +465,12 @@ export function createGeminiAppOpenCodeV2Plugin(deps = {}) {
         }
       }
 
+      function verifiedMetaTier(metadata) {
+        return metadata?.tierRpc === 'GetUserStatus' && typeof metadata?.tier === 'string' && metadata.tier
+          ? metadata.tier
+          : null;
+      }
+
       // Pure credential builder — NEVER mutates activeTier/tierState directly, because the login or
       // refreshed credential may belong to a secondary saved account or precede credential.switched.
       async function finalizeOAuthCredential(config, tokens, previousMetadata = {}) {
@@ -487,15 +493,12 @@ export function createGeminiAppOpenCodeV2Plugin(deps = {}) {
           detectAccountId(scoped.accessToken),
         ]);
         const refresh = scoped.refreshToken || tokens.refreshToken;
-        const resolvedTier = tier !== 'unknown'
-          ? tier
-          : typeof previousMetadata?.tier === 'string' && previousMetadata.tier
-            ? previousMetadata.tier
-            : 'unknown';
+        const priorTier = verifiedMetaTier(previousMetadata);
+        const resolvedTier = tier !== 'unknown' ? tier : (priorTier || 'unknown');
         const resolvedEmail = accountId || (typeof previousMetadata?.email === 'string' ? previousMetadata.email : undefined);
         const metadata = {
           ...(resolvedEmail ? { email: resolvedEmail } : {}),
-          ...(resolvedTier !== 'unknown' ? { tier: resolvedTier } : {}),
+          ...(resolvedTier !== 'unknown' ? { tier: resolvedTier, tierRpc: 'GetUserStatus' } : {}),
         };
         return {
           type: 'oauth',
@@ -565,9 +568,7 @@ export function createGeminiAppOpenCodeV2Plugin(deps = {}) {
               tierState = { identity: null, tier: 'unknown' };
               accountEpoch++;
             }
-            const metaTier = typeof snap.cred.metadata?.tier === 'string' && snap.cred.metadata.tier
-              ? snap.cred.metadata.tier
-              : null;
+            const metaTier = verifiedMetaTier(snap.cred.metadata);
             if (metaTier) {
               activeTier = metaTier;
               tierState = { identity: snap.cred.refresh, tier: metaTier };
@@ -680,7 +681,7 @@ export function createGeminiAppOpenCodeV2Plugin(deps = {}) {
         }
         const activeEpoch = accountEpoch;
         const startGen = switchGeneration;
-        const metaTier = typeof cred.metadata?.tier === 'string' ? cred.metadata.tier : null;
+        const metaTier = verifiedMetaTier(cred.metadata);
 
         if (!forceRefresh) {
           const useForced =
@@ -865,16 +866,15 @@ export function createGeminiAppOpenCodeV2Plugin(deps = {}) {
                 detectSubscriptionTier(refreshed.accessToken, { signal: eventAbort.signal }),
                 detectAccountId(refreshed.accessToken),
               ]);
-              const resolvedTier = tier !== 'unknown'
-                ? tier
-                : typeof credential?.metadata?.tier === 'string' && credential.metadata.tier
-                  ? credential.metadata.tier
-                  : 'unknown';
+              const priorTier = verifiedMetaTier(credential?.metadata);
+              const resolvedTier = tier !== 'unknown' ? tier : (priorTier || 'unknown');
               const resolvedEmail = accountId || (typeof credential?.metadata?.email === 'string' ? credential.metadata.email : undefined);
+              const { tier: _oldTier, tierRpc: _oldRpc, ...restMeta } =
+                credential?.metadata && typeof credential.metadata === 'object' ? credential.metadata : {};
               const metadata = {
-                ...(credential?.metadata && typeof credential.metadata === 'object' ? credential.metadata : {}),
+                ...restMeta,
                 ...(resolvedEmail ? { email: resolvedEmail } : {}),
-                ...(resolvedTier !== 'unknown' ? { tier: resolvedTier } : {}),
+                ...(resolvedTier !== 'unknown' ? { tier: resolvedTier, tierRpc: 'GetUserStatus' } : {}),
               };
               const nextRefresh = refreshed.refreshToken || credential.refresh;
               // Do NOT mutate activeTier/tierState here: credential may be a secondary account.

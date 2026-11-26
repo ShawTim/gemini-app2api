@@ -147,6 +147,7 @@ export function createOpenClawAuthHandlers({
           expires,
           ...(email ? { email } : {}),
           subscriptionTier,
+          ...(subscriptionTier !== 'unknown' ? { subscriptionRpc: 'GetUserStatus' } : {}),
         };
         const defaultModel =
           subscriptionTier === 'free'
@@ -193,18 +194,21 @@ export function createOpenClawAuthHandlers({
       throw new Error('OAuth refresh did not return an access token');
     }
     const detectedTier = await detectSubscriptionTier(refreshed.accessToken);
-    const subscriptionTier =
-      detectedTier !== 'unknown'
-        ? detectedTier
-        : (typeof cred.subscriptionTier === 'string' && cred.subscriptionTier ? cred.subscriptionTier : 'unknown');
+    const verifiedPrior =
+      cred.subscriptionRpc === 'GetUserStatus' && typeof cred.subscriptionTier === 'string' && cred.subscriptionTier
+        ? cred.subscriptionTier
+        : 'unknown';
+    const subscriptionTier = detectedTier !== 'unknown' ? detectedTier : verifiedPrior;
+    const { subscriptionRpc: _oldRpc, ...rest } = cred;
     return {
-      ...cred,
+      ...rest,
       type: 'oauth',
       provider: cred.provider || PROVIDER_ID,
       access: refreshed.accessToken,
       refresh: refreshed.refreshToken || cred.refresh,
       expires: computeExpiresAtMs(refreshed.expiresInSeconds),
       subscriptionTier,
+      ...(subscriptionTier !== 'unknown' ? { subscriptionRpc: 'GetUserStatus' } : {}),
     };
   }
 

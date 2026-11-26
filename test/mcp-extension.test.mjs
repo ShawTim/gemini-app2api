@@ -250,6 +250,7 @@ test('ask_gemini, gemini_search, and gemini_quota work in direct mode, free-tier
       };
     },
     fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('mock') }),
+    fetchGoogleSubscription: async () => ({ payload: Buffer.from('mock-sub') }),
     decodeUsageInfo: () => ({
       usageRows: [{ label: 'Daily limit', providerPercent: 25, percentMeaning: 'used' }],
     }),
@@ -571,4 +572,75 @@ test('MCP CLI --version, --help, and unknown command return expected exit codes'
   const bad = await run(['bogus']);
   assert.equal(bad.code, 2);
   assert.match(bad.err, /Unknown command/);
+});
+
+test('MCP gemini_quota retries GetUserStatus once on SUBSCRIPTION_AUTH_REJECTED and auth refresh drops un-provenanced legacy tier on outage', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-sub-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const authPath = path.join(dir, 'auth.json');
+
+  // 1. Legacy auth.json with subscriptionTier: 'pro' (no subscriptionRpc) drops stale tier on refresh outage,
+  //    while GetUserStatus-verified tier IS preserved.
+  writeStoredCredential(authPath, { refresh: 'ref-leg', access: 'stale', expires: 1, subscriptionTier: 'pro' });
+  const outageAuth = createMcpAuthManager({
+    authPath,
+    env: {},
+    refreshNativeCredential: async () => ({ accessToken: 'tok-fresh', expiresInSeconds: 3600 }),
+    fetchGoogleSubscription: async () => { throw new Error('subscription down'); },
+  });
+  const afterLegacy = await outageAuth.getValidCredential();
+  assert.equal(afterLegacy.subscriptionTier, 'unknown');
+  assert.equal(afterLegacy.subscriptionRpc, undefined);
+
+  writeStoredCredential(authPath, {
+    refresh: 'ref-ver',
+    access: 'stale',
+    expires: 1,
+    subscriptionTier: 'free',
+    subscriptionRpc: 'GetUserStatus',
+  });
+  const afterVerified = await outageAuth.getValidCredential();
+  assert.equal(afterVerified.subscriptionTier, 'free');
+  assert.equal(afterVerified.subscriptionRpc, 'GetUserStatus');
+
+  // 2. gemini_quota retries fetchGoogleSubscription once via forceRefresh when GetUsageInfo succeeds
+  //    but GetUserStatus rejects auth, preserving usageInfo rows without re-fetching GetUsageInfo.
+  let usageCalls = 0;
+  let subCalls = 0;
+  let forceRefreshCalls = 0;
+  const quotaHandlers = createMcpToolHandlers({
+    authManager: {
+      getValidCredential: async ({ forceRefresh } = {}) => {
+        if (forceRefresh) {
+          forceRefreshCalls++;
+          return { access: 'tok-refreshed', subscriptionTier: 'free', accountEpoch: 1 };
+        }
+        return { access: 'tok-initial', subscriptionTier: 'free', accountEpoch: 1 };
+      },
+    },
+    env: {},
+    fetchGoogleUsageInfo: async (tok) => {
+      usageCalls++;
+      assert.equal(tok, 'tok-initial');
+      return { payload: Buffer.from('usage-ok') };
+    },
+    fetchGoogleSubscription: async (tok) => {
+      subCalls++;
+      if (tok === 'tok-initial') {
+        throw Object.assign(new Error('auth rejected'), { code: 'SUBSCRIPTION_AUTH_REJECTED', status: 401 });
+      }
+      assert.equal(tok, 'tok-refreshed');
+      return { payload: Buffer.from('sub-ok') };
+    },
+    decodeUsageInfo: () => ({ usageRows: [{ label: 'Daily limit', providerPercent: 10, percentMeaning: 'used' }] }),
+    decodeSubscription: () => ({ tier: 'free' }),
+  });
+
+  const qRes = await quotaHandlers.callTool('gemini_quota', {});
+  assert.equal(qRes.isError, undefined, qRes.content?.[0]?.text);
+  assert.equal(usageCalls, 1);
+  assert.equal(subCalls, 2);
+  assert.equal(forceRefreshCalls, 1);
+  assert.match(qRes.content[0].text, /Subscription: Free/);
+  assert.match(qRes.content[0].text, /Daily limit/);
 });

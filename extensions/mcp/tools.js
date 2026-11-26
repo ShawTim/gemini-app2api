@@ -340,29 +340,50 @@ export function createMcpToolHandlers({
     }
 
     const cred = await authManager.getValidCredential({ signal });
-    const fetchOnce = async (accessToken) => {
-      const [usageRes, subRes] = await Promise.all([
-        usageFetch(accessToken, { signal, timeoutMs: 10_000 }),
-        subFetch ? subFetch(accessToken, { signal, timeoutMs: 10_000 }).catch(() => null) : Promise.resolve(null),
-      ]);
-      const usageInfo = decodeUsageInfo(usageRes.payload);
-      let subscriptionInfo = null;
+    const fetchSubOnly = async (accessToken) => {
+      if (!subFetch) return { subscriptionInfo: null, subAuthRejected: false };
       try {
-        const subPayload = subFetch ? subRes?.payload : usageRes.payload;
-        if (subPayload) subscriptionInfo = decodeSubscription(subPayload);
-      } catch {}
-      return { usageInfo, subscriptionInfo };
+        const res = await subFetch(accessToken, { signal, timeoutMs: 10_000 });
+        if (res?.payload) {
+          try {
+            return { subscriptionInfo: decodeSubscription(res.payload), subAuthRejected: false };
+          } catch {}
+        }
+        return { subscriptionInfo: null, subAuthRejected: false };
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        return { subscriptionInfo: null, subAuthRejected: err?.code === 'SUBSCRIPTION_AUTH_REJECTED' };
+      }
+    };
+    const fetchOnce = async (accessToken) => {
+      const [usageResult, subOutcome] = await Promise.all([
+        usageFetch(accessToken, { signal, timeoutMs: 10_000 }).then(
+          (value) => ({ ok: true, value }),
+          (error) => ({ ok: false, error }),
+        ),
+        fetchSubOnly(accessToken),
+      ]);
+      if (!usageResult.ok) throw usageResult.error;
+      const usageInfo = decodeUsageInfo(usageResult.value.payload);
+      return { usageInfo, subscriptionInfo: subOutcome.subscriptionInfo, subAuthRejected: subOutcome.subAuthRejected };
     };
     let quota;
+    let refreshedOnce = false;
     try {
       quota = await fetchOnce(cred.access);
     } catch (err) {
       if (err?.code === 'QUOTA_AUTH_REJECTED' && !signal?.aborted) {
+        refreshedOnce = true;
         const refreshed = await authManager.getValidCredential({ signal, forceRefresh: true });
         quota = await fetchOnce(refreshed.access);
       } else {
         throw err;
       }
+    }
+    if (quota.subAuthRejected && !refreshedOnce && !signal?.aborted) {
+      const refreshed = await authManager.getValidCredential({ signal, forceRefresh: true });
+      const retrySub = await fetchSubOnly(refreshed.access);
+      quota = { ...quota, subscriptionInfo: retrySub.subscriptionInfo };
     }
     const tierLabel = SUBSCRIPTION_LABELS[quota.subscriptionInfo?.tier] || quota.subscriptionInfo?.tier || 'Unknown';
     const text = formatQuotaDisplay(quota.usageInfo, quota.subscriptionInfo);

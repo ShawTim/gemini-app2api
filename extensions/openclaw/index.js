@@ -154,10 +154,11 @@ export function createGeminiAppOpenClawPlugin(deps = {}) {
               ]);
               const usageInfo = decodeUsageInfo(usageRes.payload);
               let subInfo = null;
-              try {
-                const subPayload = fetchGoogleSubscription ? subRes?.payload : usageRes.payload;
-                if (subPayload) subInfo = decodeSubscription(subPayload);
-              } catch {}
+              if (fetchGoogleSubscription && subRes?.payload) {
+                try {
+                  subInfo = decodeSubscription(subRes.payload);
+                } catch {}
+              }
               return { text: formatQuotaDisplay(usageInfo, subInfo) };
             } catch (err) {
               return {

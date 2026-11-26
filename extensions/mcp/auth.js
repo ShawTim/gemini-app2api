@@ -258,6 +258,7 @@ export function readStoredCredential(authPath) {
     access: typeof entry.access === 'string' ? entry.access : '',
     expires: Number.isFinite(entry.expires) ? entry.expires : 0,
     subscriptionTier: typeof entry.subscriptionTier === 'string' && entry.subscriptionTier ? entry.subscriptionTier : 'unknown',
+    ...(entry.subscriptionRpc === 'GetUserStatus' ? { subscriptionRpc: 'GetUserStatus' } : {}),
     updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : null,
     readOnlyExternal: !managed,
   };
@@ -273,6 +274,7 @@ function formatManagedAuthPayload(credential) {
       access: credential.access,
       expires: credential.expires,
       subscriptionTier: credential.subscriptionTier || 'unknown',
+      ...(credential.subscriptionRpc === 'GetUserStatus' ? { subscriptionRpc: 'GetUserStatus' } : {}),
       updatedAt: new Date().toISOString(),
     },
     null,
@@ -507,12 +509,17 @@ export function createMcpAuthManager({
               code: 'OAUTH_ACCOUNT_CHANGED',
             });
           }
+          const verifiedPrior =
+            (credential.subscriptionRpc === 'GetUserStatus' ? credential.subscriptionTier : null) ||
+            (currentStored.subscriptionRpc === 'GetUserStatus' ? currentStored.subscriptionTier : null);
+          const resolvedTier = subscriptionTier !== 'unknown' ? subscriptionTier : (verifiedPrior || 'unknown');
           const next = {
             type: 'oauth',
             refresh: refreshed.refreshToken || startRefresh,
             access: refreshed.accessToken,
             expires: computeExpiresAtMs(refreshed.expiresInSeconds),
-            subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentStored.subscriptionTier || 'unknown'),
+            subscriptionTier: resolvedTier,
+            ...(resolvedTier !== 'unknown' ? { subscriptionRpc: 'GetUserStatus' } : {}),
             readOnlyExternal: true,
           };
           // Never write or create lockfiles next to an external/read-only auth file.
@@ -537,14 +544,19 @@ export function createMcpAuthManager({
               pinnedFd,
               pinnedStat,
               startDiskRefresh,
-              (currentRaw) => ({
-                type: 'oauth',
-                refresh: refreshed.refreshToken || startRefresh,
-                access: refreshed.accessToken,
-                expires: computeExpiresAtMs(refreshed.expiresInSeconds),
-                subscriptionTier: subscriptionTier !== 'unknown' ? subscriptionTier : (currentRaw.subscriptionTier || 'unknown'),
-                readOnlyExternal: false,
-              }),
+              (currentRaw) => {
+                const verifiedPrior = currentRaw.subscriptionRpc === 'GetUserStatus' ? currentRaw.subscriptionTier : null;
+                const resolvedTier = subscriptionTier !== 'unknown' ? subscriptionTier : (verifiedPrior || 'unknown');
+                return {
+                  type: 'oauth',
+                  refresh: refreshed.refreshToken || startRefresh,
+                  access: refreshed.accessToken,
+                  expires: computeExpiresAtMs(refreshed.expiresInSeconds),
+                  subscriptionTier: resolvedTier,
+                  ...(resolvedTier !== 'unknown' ? { subscriptionRpc: 'GetUserStatus' } : {}),
+                  readOnlyExternal: false,
+                };
+              },
             );
           } catch (err) {
             if (err?.code === 'OAUTH_ACCOUNT_CHANGED') {
@@ -666,6 +678,7 @@ export function createMcpAuthManager({
         access: scoped.accessToken,
         expires: computeExpiresAtMs(scoped.expiresInSeconds ?? tokens.expiresInSeconds),
         subscriptionTier,
+        ...(subscriptionTier !== 'unknown' ? { subscriptionRpc: 'GetUserStatus' } : {}),
       };
       authGeneration++;
       accountEpoch++;

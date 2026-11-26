@@ -204,10 +204,11 @@ export function registerGeminiAppExtension(pi, dependencies = {}) {
         ]);
         const decoded = decodeUsage(usageRes.payload);
         let subscription = null;
-        try {
-          const subPayload = fetchSub ? subRes?.payload : usageRes.payload;
-          if (subPayload) subscription = decodeSub(subPayload);
-        } catch {}
+        if (fetchSub && subRes?.payload) {
+          try {
+            subscription = decodeSub(subRes.payload);
+          } catch {}
+        }
         const formatted = formatQuotaDisplay(decoded, subscription);
         ctx.ui?.notify?.(formatted, 'info');
       } catch (err) {

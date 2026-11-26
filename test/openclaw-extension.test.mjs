@@ -298,7 +298,8 @@ test('createStreamFn rejects without falling back to stale apiKey when requestAu
 
 test('fetchUsageSnapshot maps GetUsageInfo rows and subscription tier to ProviderUsageSnapshot', async () => {
   const provider = buildGeminiAppOpenClawProvider({
-    fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('synthetic') }),
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('synthetic-usage') }),
+    fetchGoogleSubscription: async () => ({ payload: Buffer.from('synthetic-sub') }),
     decodeUsageInfo: () => ({
       usageRows: [
         { label: 'Current usage', providerPercent: 24.6, providerTimestamp: '2026-11-20T12:00:00Z' },
@@ -317,6 +318,43 @@ test('fetchUsageSnapshot maps GetUsageInfo rows and subscription tier to Provide
   assert.equal(snap.windows[0].usedPercent, 25);
   assert.equal(typeof snap.windows[0].resetAt, 'number');
   assert.equal(snap.windows[1].usedPercent, 52);
+
+  // Injecting only fetchGoogleUsageInfo must NOT mis-decode GetUsageInfo payload as GetUserStatus tier
+  const usageOnlyProvider = buildGeminiAppOpenClawProvider({
+    fetchGoogleUsageInfo: async () => ({ payload: Buffer.from('synthetic-usage-only') }),
+    decodeUsageInfo: () => ({ usageRows: [{ label: 'Current usage', providerPercent: 10, providerTimestamp: null }] }),
+    decodeSubscription: () => ({ tier: 'ultra' }),
+  });
+  const usageOnlySnap = await usageOnlyProvider.fetchUsageSnapshot({ token: 'tok_ok', timeoutMs: 5000 });
+  assert.equal(usageOnlySnap.plan, undefined);
+  assert.equal(usageOnlySnap.windows.length, 1);
+
+  // refreshOAuth drops legacy un-provenanced subscriptionTier on outage, but keeps GetUserStatus-verified tier
+  const outageProvider = buildGeminiAppOpenClawProvider({
+    refreshNativeCredential: async () => ({ accessToken: 'tok_refreshed', expiresInSeconds: 3600 }),
+    fetchGoogleSubscription: async () => { throw new Error('network down'); },
+  });
+  const fromLegacy = await outageProvider.refreshOAuth({
+    type: 'oauth',
+    provider: 'gemini-app',
+    refresh: 'ref_1',
+    access: 'old',
+    expires: 0,
+    subscriptionTier: 'pro',
+  });
+  assert.equal(fromLegacy.subscriptionTier, 'unknown');
+  assert.equal(fromLegacy.subscriptionRpc, undefined);
+  const fromVerified = await outageProvider.refreshOAuth({
+    type: 'oauth',
+    provider: 'gemini-app',
+    refresh: 'ref_1',
+    access: 'old',
+    expires: 0,
+    subscriptionTier: 'free',
+    subscriptionRpc: 'GetUserStatus',
+  });
+  assert.equal(fromVerified.subscriptionTier, 'free');
+  assert.equal(fromVerified.subscriptionRpc, 'GetUserStatus');
 });
 
 test('failover and context-overflow classifiers map native Gemini errors accurately', () => {

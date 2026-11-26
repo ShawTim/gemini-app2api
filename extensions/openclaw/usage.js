@@ -42,10 +42,11 @@ export function createOpenClawUsageFetcher({
       ]);
       const usageInfo = decodeUsageInfo(usageRes.payload);
       let subscription = null;
-      try {
-        const subPayload = subFetch ? subRes?.payload : usageRes.payload;
-        if (subPayload) subscription = decodeSubscription(subPayload);
-      } catch {}
+      if (subFetch && subRes?.payload) {
+        try {
+          subscription = decodeSubscription(subRes.payload);
+        } catch {}
+      }
       const tier = subscription?.tier;
       const plan = tier && tier !== 'unknown' ? SUBSCRIPTION_LABELS[tier] || tier : undefined;
       const windows = (usageInfo?.usageRows || [])
