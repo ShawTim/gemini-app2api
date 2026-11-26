@@ -189,53 +189,66 @@ function readRegularFileBounded(filePath, maxBytes, label, { strictUtf8 = false 
   }
 }
 
-// Writes atomically via an exclusive sibling temp file inside a trusted local
-// directory, refusing symlinks, non-regular files (directories/FIFOs/devices),
-// and multi-linked hard links.
+// Writes atomically via an exclusive sibling temp file inside the resolved
+// parent directory, refusing symlink targets, non-regular files (directories/
+// FIFOs/devices), and multi-linked hard links while allowing symlinked system
+// parent directories such as `/tmp` -> `private/tmp` on macOS.
 function writeOutputFileSafe(filePath, content) {
   const resolved = path.resolve(filePath);
-  const existing = fs.lstatSync(resolved, { throwIfNoEntry: false });
-  if (existing) {
-    if (existing.isSymbolicLink()) {
+  const assertSafeTarget = (target) => {
+    const st = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (!st) return;
+    if (st.isSymbolicLink()) {
       throw Object.assign(new Error(`Refusing to write to symlink output path: ${filePath}`), {
         code: 'UNSAFE_OUTPUT_PATH',
       });
     }
-    if (!existing.isFile()) {
+    if (!st.isFile()) {
       throw Object.assign(new Error(`Output path is not a regular file: ${filePath}`), {
         code: 'UNSAFE_OUTPUT_PATH',
       });
     }
-    if (existing.nlink > 1) {
+    if (st.nlink > 1) {
       throw Object.assign(new Error(`Refusing to overwrite hard-linked output path: ${filePath}`), {
         code: 'UNSAFE_OUTPUT_PATH',
       });
     }
-  }
+  };
+  assertSafeTarget(resolved);
+
   const dir = path.dirname(resolved);
-  const dirStat = fs.lstatSync(dir, { throwIfNoEntry: false });
-  if (dirStat?.isSymbolicLink()) {
-    throw Object.assign(new Error(`Refusing symlinked output directory: ${dir}`), {
+  const dirLstat = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (!dirLstat) {
+    fs.mkdirSync(dir, { recursive: true });
+  } else if (dirLstat.isSymbolicLink() && !fs.existsSync(dir)) {
+    throw Object.assign(new Error(`Refusing dangling symlink output directory: ${dir}`), {
       code: 'UNSAFE_OUTPUT_PATH',
     });
   }
-  if (!dirStat) {
-    fs.mkdirSync(dir, { recursive: true });
+  const canonicalDir = fs.realpathSync(dir);
+  if (!fs.statSync(canonicalDir).isDirectory()) {
+    throw Object.assign(new Error(`Output parent path is not a directory: ${dir}`), {
+      code: 'UNSAFE_OUTPUT_PATH',
+    });
   }
-  const tempPath = path.join(dir, `.${path.basename(resolved)}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`);
-  const fd = fs.openSync(tempPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o644);
+  const canonicalTarget = path.join(canonicalDir, path.basename(resolved));
+  assertSafeTarget(canonicalTarget);
+
+  const tempPath = path.join(
+    canonicalDir,
+    `.${path.basename(canonicalTarget)}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`,
+  );
+  let fd = fs.openSync(tempPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o644);
   try {
     fs.writeFileSync(fd, content, 'utf8');
     fs.closeSync(fd);
-    const beforeRename = fs.lstatSync(resolved, { throwIfNoEntry: false });
-    if (beforeRename && (beforeRename.isSymbolicLink() || !beforeRename.isFile() || beforeRename.nlink > 1)) {
-      throw Object.assign(new Error(`Refusing unsafe output target: ${filePath}`), {
-        code: 'UNSAFE_OUTPUT_PATH',
-      });
-    }
-    fs.renameSync(tempPath, resolved);
+    fd = null;
+    assertSafeTarget(canonicalTarget);
+    fs.renameSync(tempPath, canonicalTarget);
   } catch (err) {
-    try { fs.closeSync(fd); } catch {}
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
     try { fs.unlinkSync(tempPath); } catch {}
     throw err;
   }
@@ -682,6 +695,7 @@ export async function runGeminiCli(
   else externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
   let handlers = null;
+  let lastStreamedChar = '';
   try {
     const auth = authManager ?? createCliAuthManager({ env });
     handlers =
@@ -793,7 +807,6 @@ export async function runGeminiCli(
       const reqTimeoutMs = parsed.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS;
 
       let result;
-      let lastStreamedChar = '';
 
       if (parsed.tools) {
         const gateway = resolveGatewayConfig(env);
@@ -884,7 +897,7 @@ export async function runGeminiCli(
         if (responseFormat) {
           try { parsedSchemaValue = JSON.parse(result.content); } catch {}
         }
-        stdout.write(
+        const jsonOut =
           JSON.stringify(
             {
               ok: true,
@@ -897,8 +910,12 @@ export async function runGeminiCli(
             },
             null,
             2,
-          ) + '\n',
-        );
+          ) + '\n';
+        if (parsed.output) {
+          writeOutputFileSafe(parsed.output, jsonOut);
+        } else {
+          stdout.write(jsonOut);
+        }
         return 0;
       }
 
@@ -960,7 +977,7 @@ export async function runGeminiCli(
       }
 
       if (parsed.json) {
-        stdout.write(
+        const jsonOut =
           JSON.stringify(
             {
               ok: true,
@@ -971,8 +988,12 @@ export async function runGeminiCli(
             },
             null,
             2,
-          ) + '\n',
-        );
+          ) + '\n';
+        if (parsed.output) {
+          writeOutputFileSafe(parsed.output, jsonOut);
+        } else {
+          stdout.write(jsonOut);
+        }
         return 0;
       }
 
@@ -989,6 +1010,9 @@ export async function runGeminiCli(
 
     return 2;
   } catch (err) {
+    if (!parsed.json && lastStreamedChar && lastStreamedChar !== '\n') {
+      stdout.write('\n');
+    }
     if (USAGE_ERROR_CODES.has(err?.code)) {
       emitCliError(stderr, err, { json: parsed.json });
       return err.exitCode || 2;

@@ -1309,3 +1309,165 @@ test('read-only tools harden glob/grep termination, case-folded & cwd-root secre
     assert.deepEqual(JSON.parse(cap.out), { ok: true });
   }
 });
+
+test('Carbon review regressions: src/**/*.ts glob, emoji grep truncation, symlinked parent -o, --json -o, budget edge, and call ID sanitization', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-carbon-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  fs.mkdirSync(path.join(dir, 'src', 'a', 'b'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'src_other'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'index.ts'), 'export const root = 1;\n');
+  fs.writeFileSync(path.join(dir, 'src', 'a', 'b', 'deep.ts'), 'export const deep = 2;\n');
+  fs.writeFileSync(path.join(dir, 'src_other', 'nope.ts'), 'export const nope = 3;\n');
+  fs.writeFileSync(path.join(dir, '..notes.txt'), 'leading double-dot regular file\n');
+  // Put an emoji surrogate pair right across UTF-16 index 299..300 so naive slice(0, 300) splits it
+  fs.writeFileSync(path.join(dir, 'emoji.txt'), `${'x'.repeat(299)}😀${'y'.repeat(40)} MATCH_ME\n`);
+  // Large text file to test cumulative 256 KiB budget edge without deadlock
+  fs.writeFileSync(path.join(dir, 'big.txt'), `${'z'.repeat(200)}\n`.repeat(200));
+
+  // Symlinked parent directory (like macOS /tmp -> private/tmp)
+  const realOutDir = path.join(dir, 'real-out');
+  fs.mkdirSync(realOutDir, { recursive: true });
+  const symOutDir = path.join(dir, 'sym-out');
+  fs.symlinkSync(realOutDir, symOutDir, 'dir');
+
+  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
+
+  // 1. src/**/*.ts matches both src/index.ts and src/a/b/deep.ts; emoji grep stays well-formed; call:bad normalized; ..notes.txt allowed
+  {
+    const seen = [];
+    const handlers = createMcpToolHandlers({
+      authManager: createCliAuthManager({ env }),
+      env,
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      fetchImpl: async (_url, init) => {
+        seen.push(JSON.parse(init.body));
+        if (seen.length === 1) {
+          return makeJsonResponse({
+            model: 'gemini-neon',
+            choices: [{
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  { id: 'call:bad/id', type: 'function', function: { name: 'find', arguments: '{"pattern":"src/**/*.ts"}' } },
+                  { id: 'c_rel', type: 'function', function: { name: 'find', arguments: '{"pattern":"./src/**/*.ts"}' } },
+                  { id: 'c_emoji', type: 'function', function: { name: 'grep', arguments: '{"pattern":"MATCH_ME","path":"emoji.txt"}' } },
+                  { id: 'c_dot', type: 'function', function: { name: 'read', arguments: '{"path":"..notes.txt"}' } },
+                ],
+              },
+            }],
+          });
+        }
+        return makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{ message: { role: 'assistant', content: 'verified' } }],
+        });
+      },
+    });
+    const outJsonPath = path.join(symOutDir, 'report.json');
+    const cap = makeCapture();
+    const code = await runGeminiCli(
+      ['ask', '--tools', 'readonly', '--cwd', dir, '--json', '-o', outJsonPath, 'Check all'],
+      {
+        env,
+        stdin: makeStdin('', { isTTY: true }),
+        stdout: cap.stdout,
+        stderr: cap.stderr,
+        toolHandlers: handlers,
+      },
+    );
+    assert.equal(code, 0, cap.err);
+    // --json -o writes to file inside symlinked parent dir and keeps stdout empty
+    assert.equal(cap.out, '');
+    const written = JSON.parse(fs.readFileSync(outJsonPath, 'utf8'));
+    assert.equal(written.ok, true);
+    assert.equal(written.content, 'verified');
+
+    const turn2 = seen[1].messages;
+    const assistantCalls = turn2.find((m) => m.role === 'assistant').tool_calls;
+    assert.match(assistantCalls[0].id, /^[A-Za-z0-9_-]{1,256}$/);
+    const findOut = turn2.find((m) => m.tool_call_id === assistantCalls[0].id).content;
+    assert.match(findOut, /src\/index\.ts/);
+    assert.match(findOut, /src\/a\/b\/deep\.ts/);
+    assert.doesNotMatch(findOut, /src_other\/nope\.ts/);
+    assert.equal(turn2.find((m) => m.tool_call_id === 'c_rel').content, findOut);
+
+    const emojiOut = turn2.find((m) => m.tool_call_id === 'c_emoji').content;
+    assert.equal(emojiOut.isWellFormed(), true);
+    assert.equal(Buffer.from(emojiOut).toString('utf8'), emojiOut);
+
+    const dotOut = turn2.find((m) => m.tool_call_id === 'c_dot').content;
+    assert.match(dotOut, /leading double-dot regular file/);
+  }
+
+  // 2. Cumulative 256 KiB budget cleanly switches to budgetExhaustedNotice (never deadlocks to empty string)
+  {
+    const seen = [];
+    const handlers = createMcpToolHandlers({
+      authManager: createCliAuthManager({ env }),
+      env,
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      fetchImpl: async (_url, init) => {
+        seen.push(JSON.parse(init.body));
+        if (seen.length === 1) {
+          // 12 reads of ~32 KiB each exceeds 256 KiB cumulative budget
+          const calls = Array.from({ length: 12 }, (_, idx) => ({
+            id: `r_${idx}`,
+            type: 'function',
+            function: { name: 'read', arguments: '{"path":"big.txt","offset":1,"limit":200}' },
+          }));
+          return makeJsonResponse({
+            model: 'gemini-neon',
+            choices: [{ message: { role: 'assistant', content: null, tool_calls: calls } }],
+          });
+        }
+        return makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{ message: { role: 'assistant', content: 'budget-handled' } }],
+        });
+      },
+    });
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '--tools', 'read', '--cwd', dir, 'Read lots'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    const toolResults = seen[1].messages.filter((m) => m.role === 'tool').map((m) => m.content);
+    assert.ok(toolResults.every((txt) => txt.length > 0), 'No tool result may deadlock to empty string');
+    assert.ok(toolResults.some((txt) => txt.includes('cumulative read-only tool output budget reached')));
+  }
+
+  // 3. search --json -o writes structured JSON to file
+  {
+    const searchOut = path.join(symOutDir, 'search.json');
+    const handlers = createMcpToolHandlers({
+      authManager: createCliAuthManager({ env }),
+      env,
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      fetchImpl: async () =>
+        makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{ message: { role: 'assistant', content: 'Found it', annotations: [] } }],
+        }),
+    });
+    const cap = makeCapture();
+    const code = await runGeminiCli(['search', '--json', '-o', searchOut, 'test query'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    assert.equal(cap.out, '');
+    assert.equal(JSON.parse(fs.readFileSync(searchOut, 'utf8')).content, 'Found it');
+  }
+});

@@ -430,6 +430,15 @@ export function createMcpToolHandlers({
     };
     if (effectiveModel === 'gemini-auto') delete effectivePayload.thinking_level;
     const effectiveTimeout = reqTimeoutMs ?? timeoutMs;
+    const deadlineAt = effectiveTimeout > 0 ? Date.now() + effectiveTimeout : null;
+    const remainingTimeoutMs = () => {
+      if (deadlineAt === null) return effectiveTimeout;
+      const left = deadlineAt - Date.now();
+      if (left <= 0) {
+        throw Object.assign(new Error('Direct Gemini request timed out'), { code: 'REQUEST_TIMEOUT' });
+      }
+      return Math.max(1, left);
+    };
     const hasTools = Array.isArray(effectivePayload.tools) && effectivePayload.tools.length > 0;
     const wantStream =
       typeof onTextDelta === 'function' &&
@@ -439,6 +448,7 @@ export function createMcpToolHandlers({
     let publishedToCallback = false;
 
     const invoke = async (accessToken, { recoveryCode, recoveryReason } = {}) => {
+      const attemptTimeout = remainingTimeoutMs();
       let textBuffer = '';
       let pendingSurrogate = '';
       let committed = false;
@@ -494,7 +504,7 @@ export function createMcpToolHandlers({
           blobCache: imageBlobCache,
           modelAlias: effectiveModel,
           allowAutoModel: effectiveModel === 'gemini-auto',
-          timeoutMs: effectiveTimeout,
+          timeoutMs: attemptTimeout,
         },
       );
       const turnResult = await provider.runTurn(clientLabel, effectivePayload, onDelta, {
@@ -509,7 +519,7 @@ export function createMcpToolHandlers({
           : {}),
         ...(recoveryCode ? { recoveryCode, recoveryReason } : {}),
         signal,
-        timeoutMs: effectiveTimeout,
+        timeoutMs: attemptTimeout,
       });
       const content = typeof turnResult?.content === 'string' ? turnResult.content : '';
       const toolCalls = Array.isArray(turnResult?.calls) ? turnResult.calls : [];

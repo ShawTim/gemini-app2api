@@ -14,9 +14,11 @@ const MAX_TOOL_CALLS_PER_TURN = 32;
 const MAX_LS_LIMIT = 200;
 const MAX_FIND_RESULTS = 200;
 const MAX_GREP_MATCHES = 100;
+const MAX_GREP_SCAN_BYTES = 16 * 1024 * 1024;
 const MAX_WALK_ENTRIES = 5_000;
 const MAX_GREP_LINE_CHARS = 300;
 const MAX_GLOB_CHARS = 128;
+const CALL_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 
 const SKIPPED_WALK_DIRS = new Set(['.git', 'node_modules']);
 const PROTECTED_SECRET_BASENAMES = new Set([
@@ -125,8 +127,20 @@ function truncateUtf8(text, maxBytes, suffix = '') {
   return { text: combined, truncated: true };
 }
 
+function sliceUtf16Safe(str, maxChars) {
+  if (str.length <= maxChars) return str.isWellFormed() ? str : str.toWellFormed();
+  let cut = maxChars;
+  // Avoid splitting a UTF-16 surrogate pair across the truncation boundary.
+  const last = str.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    cut -= 1;
+  }
+  const head = str.slice(0, cut);
+  return head.isWellFormed() ? head : head.toWellFormed();
+}
+
 /**
- * Polynomial-time non-backtracking glob matcher supporting `*`, `**`, and `?`.
+ * Polynomial-time non-backtracking glob matcher supporting `*`, `**`, `** /`, and `?`.
  * Runs in O(pattern.length * target.length) worst-case with zero RegExp backtracking.
  */
 function matchGlobLinear(pattern, target) {
@@ -141,9 +155,21 @@ function matchGlobLinear(pattern, target) {
     const ch = pattern[i];
     if (ch === '*') {
       const isDouble = pattern[i + 1] === '*';
-      if (isDouble) i += 1;
-      if (isDouble) {
+      if (isDouble && pattern[i + 2] === '/') {
+        // `**/` matches zero directory segments OR any prefix ending at `/`.
+        i += 2;
+        let matched = false;
+        for (let j = 0; j <= tLen; j++) {
+          if (prev[j]) {
+            matched = true;
+            curr[j] = 1;
+          } else if (matched && j > 0 && target[j - 1] === '/') {
+            curr[j] = 1;
+          }
+        }
+      } else if (isDouble) {
         // `**` matches any sequence including `/`.
+        i += 1;
         let matched = false;
         for (let j = 0; j <= tLen; j++) {
           if (prev[j]) matched = true;
@@ -176,20 +202,18 @@ function matchGlobLinear(pattern, target) {
 
 function compileGlob(pattern) {
   if (typeof pattern !== 'string' || !pattern.trim()) return null;
-  const trimmed = pattern.trim().replace(/\\/g, '/');
+  let trimmed = pattern.trim().replace(/\\/g, '/');
+  while (trimmed.startsWith('./')) trimmed = trimmed.slice(2);
+  if (!trimmed) return null;
   if (trimmed.length > MAX_GLOB_CHARS) {
     throw new Error(`Glob pattern too long (max ${MAX_GLOB_CHARS} chars)`);
   }
-  // Collapse `**/` into `**` fallback match on both root and nested paths.
   const hasSlash = trimmed.includes('/');
   const normalized = trimmed.replace(/\*{3,}/g, '**');
-  const stripLeadingDoubleSlash = normalized.startsWith('**/') ? normalized.slice(3) : null;
   return {
     match(relPosix) {
       const target = hasSlash ? relPosix : path.posix.basename(relPosix);
-      if (matchGlobLinear(normalized, target)) return true;
-      if (stripLeadingDoubleSlash && matchGlobLinear(stripLeadingDoubleSlash, target)) return true;
-      return false;
+      return matchGlobLinear(normalized, target);
     },
   };
 }
@@ -221,7 +245,7 @@ function resolveContainedTarget(rootReal, rawTarget = '.') {
   }
   const candidate = path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(rootReal, trimmed);
   const rel = path.relative(rootReal, candidate);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     throw new Error(`Path escapes workspace root: ${rawTarget}`);
   }
   const relPosix = rel ? rel.split(path.sep).join('/') : '.';
@@ -393,16 +417,36 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
     const offset = clampInt(args.offset, 1, 1, Math.max(1, totalLines));
     const limit = clampInt(args.limit, DEFAULT_READ_LIMIT, 1, MAX_READ_LIMIT);
     const slice = lines.slice(offset - 1, offset - 1 + limit);
-    const numbered = slice.map((line, idx) => `L${offset + idx}: ${line}`).join('\n');
-    const endLine = offset + slice.length - 1;
+    const outLines = [];
+    let usedBytes = 0;
+    let lastIncludedLine = offset - 1;
+    let byteTruncated = false;
+    const reserveOverhead = 160;
+    const maxBodyBytes = MAX_TOOL_OUTPUT_BYTES - reserveOverhead;
+    for (let idx = 0; idx < slice.length; idx++) {
+      const formatted = `L${offset + idx}: ${slice[idx]}`;
+      const lineBytes = Buffer.byteLength(formatted, 'utf8') + (outLines.length ? 1 : 0);
+      if (outLines.length > 0 && usedBytes + lineBytes > maxBodyBytes) {
+        byteTruncated = true;
+        break;
+      }
+      outLines.push(formatted);
+      usedBytes += lineBytes;
+      lastIncludedLine = offset + idx;
+      if (usedBytes >= maxBodyBytes && idx + 1 < slice.length) {
+        byteTruncated = true;
+        break;
+      }
+    }
+    const endLine = Math.max(offset, lastIncludedLine);
     const header = `${relPosix} (lines ${offset}-${endLine} of ${totalLines})`;
     const suffix = `\n... [truncated; use offset=${endLine + 1} to read more]`;
-    const body = `${header}\n${numbered}`;
-    const { text, truncated } = truncateUtf8(body, MAX_TOOL_OUTPUT_BYTES, suffix);
-    if (!truncated && endLine < totalLines) {
+    const body = `${header}\n${outLines.join('\n')}`;
+    const needsMore = byteTruncated || endLine < totalLines;
+    if (needsMore) {
       return truncateUtf8(`${body}${suffix}`, MAX_TOOL_OUTPUT_BYTES, suffix).text;
     }
-    return text;
+    return truncateUtf8(body, MAX_TOOL_OUTPUT_BYTES, suffix).text;
   }
 
   function execLs(args) {
@@ -498,21 +542,30 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
     const { absPath, relPosix, stat } = resolveContainedTarget(rootReal, args?.path ?? '.');
     const matches = [];
     let visited = 0;
+    let scannedBytes = 0;
+    let truncatedByWalk = false;
+    let truncatedByBytes = false;
 
     const scanFile = (fileAbs, fileRel) => {
       if (globMatcher && !globMatcher.match(fileRel)) return;
+      if (scannedBytes >= MAX_GREP_SCAN_BYTES) {
+        truncatedByBytes = true;
+        return;
+      }
       let text;
       try {
-        text = readContainedTextFile(fileAbs, fileRel, MAX_READ_FILE_BYTES);
+        const remainingScan = Math.min(MAX_READ_FILE_BYTES, MAX_GREP_SCAN_BYTES - scannedBytes);
+        text = readContainedTextFile(fileAbs, fileRel, remainingScan);
       } catch {
         return;
       }
+      scannedBytes += Buffer.byteLength(text, 'utf8');
       const lines = text.split(/\r?\n/);
       for (let i = 0; i < lines.length; i++) {
         if (testLine(lines[i])) {
           const snippet = lines[i].length > MAX_GREP_LINE_CHARS
-            ? `${lines[i].slice(0, MAX_GREP_LINE_CHARS)}...`
-            : lines[i];
+            ? `${sliceUtf16Safe(lines[i], MAX_GREP_LINE_CHARS)}...`
+            : sliceUtf16Safe(lines[i], lines[i].length);
           matches.push(`${fileRel}:${i + 1}: ${snippet}`);
           if (matches.length >= maxMatches) return;
         }
@@ -523,7 +576,7 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
       scanFile(absPath, relPosix);
     } else if (stat.isDirectory()) {
       const queue = [{ abs: absPath, rel: relPosix === '.' ? '' : relPosix }];
-      while (queue.length > 0 && matches.length < maxMatches && visited < MAX_WALK_ENTRIES) {
+      while (queue.length > 0 && matches.length < maxMatches && !truncatedByWalk && !truncatedByBytes) {
         const current = queue.shift();
         let dirents;
         try {
@@ -534,7 +587,10 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
         dirents.sort((a, b) => a.name.localeCompare(b.name));
         for (const d of dirents) {
           visited++;
-          if (visited > MAX_WALK_ENTRIES) break;
+          if (visited > MAX_WALK_ENTRIES) {
+            truncatedByWalk = true;
+            break;
+          }
           if (d.isSymbolicLink()) continue;
           if (d.isDirectory() && SKIPPED_WALK_DIRS.has(d.name.toLowerCase())) continue;
           const childAbs = path.join(current.abs, d.name);
@@ -544,7 +600,7 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
             queue.push({ abs: childAbs, rel: childRel });
           } else if (d.isFile()) {
             scanFile(childAbs, childRel);
-            if (matches.length >= maxMatches) break;
+            if (matches.length >= maxMatches || truncatedByBytes) break;
           }
         }
       }
@@ -552,9 +608,15 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
       throw new Error(`Unsupported target type: ${relPosix}`);
     }
 
-    if (!matches.length) return '(no matches)';
-    if (matches.length >= maxMatches) {
-      matches.push(`... [matches capped at ${maxMatches}]`);
+    const partialReasons = [];
+    if (matches.length >= maxMatches) partialReasons.push(`matches capped at ${maxMatches}`);
+    if (truncatedByWalk) partialReasons.push(`walk limit ${MAX_WALK_ENTRIES} reached`);
+    if (truncatedByBytes) partialReasons.push(`scan byte limit ${MAX_GREP_SCAN_BYTES} reached`);
+    if (!matches.length) {
+      return partialReasons.length ? `(no matches; partial scan: ${partialReasons.join(', ')})` : '(no matches)';
+    }
+    if (partialReasons.length) {
+      matches.push(`... [${partialReasons.join('; ')}]`);
     }
     return truncateUtf8(matches.join('\n'), MAX_TOOL_OUTPUT_BYTES, '\n... [output truncated]').text;
   }
@@ -603,17 +665,30 @@ function normalizeToolCallBatch(rawCalls, turn, seenCallIds) {
         code: 'INVALID_TOOL_CALL_BATCH',
       });
     }
-    const rawId = typeof call.id === 'string' && call.id.trim() ? call.id.trim() : '';
+    const rawId = typeof call.id === 'string' && CALL_ID_RE.test(call.id.trim()) ? call.id.trim() : '';
     let id = rawId;
     while (!id || seenCallIds.has(id)) {
       seq += 1;
       id = `call_t${turn}_${seq}`;
     }
     seenCallIds.add(id);
-    const argsStr =
-      typeof call.function.arguments === 'string'
-        ? call.function.arguments
-        : JSON.stringify(call.function.arguments ?? {});
+    let argsStr;
+    if (typeof call.function.arguments === 'string') {
+      try {
+        const parsed = call.function.arguments.trim() ? JSON.parse(call.function.arguments) : {};
+        argsStr = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? JSON.stringify(parsed)
+          : '{}';
+      } catch {
+        argsStr = '{}';
+      }
+    } else {
+      argsStr = JSON.stringify(
+        call.function.arguments && typeof call.function.arguments === 'object' && !Array.isArray(call.function.arguments)
+          ? call.function.arguments
+          : {},
+      );
+    }
     normalized.push({
       id,
       type: 'function',
@@ -761,8 +836,21 @@ export async function runReadonlyHarnessLoop({
 
     const budgetExhaustedNotice = 'Error: cumulative read-only tool output budget reached; answer from gathered evidence.';
     const budgetTruncatedSuffix = '\n... [cumulative tool output budget reached]';
+    const minBudgetNeeded = Buffer.byteLength(budgetTruncatedSuffix, 'utf8') + 1;
 
     for (const call of calls) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : Object.assign(new Error('Request aborted'), { code: 'REQUEST_ABORTED' });
+      }
+      if (deadlineAt !== null && Date.now() >= deadlineAt) {
+        throw Object.assign(new Error('Command timed out during read-only tool execution'), {
+          code: 'REQUEST_TIMEOUT',
+          turns: turn,
+          toolCalls: toolTrace,
+        });
+      }
       const fnName = call.function.name;
       const rawArgs = call.function.arguments;
       if (verbose && stderr) {
@@ -771,14 +859,19 @@ export async function runReadonlyHarnessLoop({
       const remainingBudget = Math.max(0, MAX_TOTAL_TOOL_OUTPUT_BYTES - totalToolBytes);
       let outcome;
       let toolOutput;
-      if (remainingBudget === 0) {
+      if (remainingBudget < minBudgetNeeded) {
+        totalToolBytes = MAX_TOTAL_TOOL_OUTPUT_BYTES;
         outcome = { ok: false, output: '' };
         toolOutput = budgetExhaustedNotice;
       } else {
         outcome = executor.execute(fnName, rawArgs);
         const bounded = truncateUtf8(outcome.output, remainingBudget, budgetTruncatedSuffix);
         toolOutput = bounded.text;
-        totalToolBytes += Buffer.byteLength(toolOutput, 'utf8');
+        if (bounded.truncated) {
+          totalToolBytes = MAX_TOTAL_TOOL_OUTPUT_BYTES;
+        } else {
+          totalToolBytes += Buffer.byteLength(toolOutput, 'utf8');
+        }
       }
       let parsedArgs = null;
       try {
