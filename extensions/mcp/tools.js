@@ -20,7 +20,25 @@ import { formatQuotaDisplay, SUBSCRIPTION_LABELS } from '../pi/provider.js';
 import { resolveGatewayConfig } from './auth.js';
 
 const DEFAULT_TIMEOUT_MS = 180_000;
+const STREAM_PREFIX_BYTES = 2048;
+const MAX_SSE_LINE_BYTES = 4 * 1024 * 1024;
 const ALLOWED_DIRECT_MODELS = Object.freeze(Object.keys(MODEL_SPECS));
+
+function splitCompleteCodePoints(str) {
+  if (!str) return { ready: '', trailing: '' };
+  const last = str.charCodeAt(str.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    const head = str.slice(0, -1);
+    return {
+      ready: head.isWellFormed() ? head : head.toWellFormed(),
+      trailing: str.slice(-1),
+    };
+  }
+  return {
+    ready: str.isWellFormed() ? str : str.toWellFormed(),
+    trailing: '',
+  };
+}
 
 export const MCP_TOOL_DEFINITIONS = buildMcpToolDefinitions({
   allowLocalImagePaths: true,
@@ -139,13 +157,19 @@ function loadLocalOrInlineImageParts(images) {
   return parts;
 }
 
-function formatFriendlyMcpError(err) {
+function formatFriendlyMcpError(err, loginCommand = 'npx mcp-gemini-app login') {
   const code = err?.code || '';
   if (code === 'MCP_AUTH_REQUIRED') {
     return err.message;
   }
-  if (code === 'NATIVE_PERMISSION_OR_AUTH' || code === 'OAUTH_REFRESH_FAILED' || code === 'QUOTA_AUTH_REJECTED') {
-    return `Google authentication failed (${code}). Run \`npx mcp-gemini-app login\` to sign in again.`;
+  if (
+    code === 'NATIVE_PERMISSION_OR_AUTH' ||
+    code === 'NATIVE_AUTH_REJECTED' ||
+    code === 'NATIVE_PERMISSION_REJECTED' ||
+    code === 'OAUTH_REFRESH_FAILED' ||
+    code === 'QUOTA_AUTH_REJECTED'
+  ) {
+    return `Google authentication failed (${code}). Run \`${loginCommand}\` to sign in again.`;
   }
   if (code === 'NATIVE_QUOTA_EXHAUSTED' || code === 'QUOTA_RATE_LIMITED') {
     return `Google Gemini quota exhausted or rate-limited (${code}). Try \`gemini-hydrogen\` or wait for quota reset.`;
@@ -160,6 +184,8 @@ function formatFriendlyMcpError(err) {
 export function createMcpToolHandlers({
   authManager,
   env = process.env,
+  clientLabel = 'mcp-gemini-app',
+  loginCommand = 'npx mcp-gemini-app login',
   openTurn = defaultOpenDirectTurn,
   uploadImages,
   fetchImpl = globalThis.fetch,
@@ -178,34 +204,209 @@ export function createMcpToolHandlers({
     models: initialGateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
   });
 
-  async function callViaGateway(gateway, payload, { signal } = {}) {
-    const headers = { 'Content-Type': 'application/json' };
-    if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
-    const res = await fetchImpl(`${gateway.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ ...payload, stream: false }),
-      signal,
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      const code = data?.error?.code || `GATEWAY_HTTP_${res.status}`;
-      const message = data?.error?.message || `Gateway returned HTTP ${res.status}`;
-      throw Object.assign(new Error(message), { code, status: res.status });
+  function withOptionalTimeout(signal, reqTimeoutMs) {
+    if (!(reqTimeoutMs > 0)) {
+      return { signal, cleanup: () => {} };
     }
-    const msg = data?.choices?.[0]?.message;
-    const incomplete = data?.status === 'incomplete' || Boolean(data?.error);
+    const controller = new AbortController();
+    const onOuterAbort = () => controller.abort(signal?.reason ?? new Error('Request aborted'));
+    if (signal?.aborted) onOuterAbort();
+    else signal?.addEventListener('abort', onOuterAbort, { once: true });
+    const timer = setTimeout(
+      () => controller.abort(Object.assign(new Error('Gateway request timed out'), { code: 'REQUEST_TIMEOUT' })),
+      reqTimeoutMs,
+    );
+    timer.unref?.();
     return {
-      content: typeof msg?.content === 'string' ? msg.content : '',
-      model: data?.model || payload.model,
-      annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
-      usage: data?.usage ?? null,
-      incomplete,
-      incompleteReason: data?.error?.code || data?.incomplete_details?.reason || null,
+      signal: controller.signal,
+      cleanup: () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onOuterAbort);
+      },
     };
   }
 
-  async function callDirectNative(payload, { signal } = {}) {
+  async function callViaGateway(gateway, payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
+    const wantStream = typeof onTextDelta === 'function' && !payload.native_search;
+    if (wantStream) headers.Accept = 'text/event-stream, application/json';
+
+    const scoped = withOptionalTimeout(signal, reqTimeoutMs);
+    try {
+      const res = await fetchImpl(`${gateway.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ ...payload, stream: wantStream }),
+        signal: scoped.signal,
+      });
+      const contentType = String(res.headers?.get?.('content-type') || '').toLowerCase();
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        const code = data?.error?.code || `GATEWAY_HTTP_${res.status}`;
+        const message = data?.error?.message || `Gateway returned HTTP ${res.status}`;
+        throw Object.assign(new Error(message), { code, status: res.status });
+      }
+      if (!wantStream || !contentType.includes('text/event-stream') || !res.body) {
+        let data;
+        try {
+          data = await res.json();
+        } catch (err) {
+          if (scoped.signal?.aborted) {
+            throw scoped.signal.reason instanceof Error
+              ? scoped.signal.reason
+              : Object.assign(new Error('Gateway request aborted'), { code: 'REQUEST_ABORTED', cause: err });
+          }
+          throw Object.assign(new Error('Invalid JSON response from gateway'), {
+            code: 'INVALID_GATEWAY_RESPONSE',
+            cause: err,
+          });
+        }
+        if (
+          !data ||
+          typeof data !== 'object' ||
+          Array.isArray(data) ||
+          (!Array.isArray(data.choices) && !data.error && data.status !== 'incomplete' && data.incomplete !== true)
+        ) {
+          throw Object.assign(new Error('Unexpected JSON response shape from gateway'), {
+            code: 'INVALID_GATEWAY_RESPONSE',
+          });
+        }
+        const msg = data?.choices?.[0]?.message;
+        const content = typeof msg?.content === 'string' ? msg.content : '';
+        const incomplete = data?.incomplete === true || data?.status === 'incomplete' || Boolean(data?.error);
+        let streamed = false;
+        if (wantStream && !incomplete && content) {
+          onTextDelta(content);
+          streamed = true;
+        }
+        return {
+          content,
+          model: data?.model || payload.model,
+          annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
+          usage: data?.usage ?? null,
+          incomplete,
+          incompleteReason: data?.error?.code || data?.incomplete_details?.code || data?.incomplete_details?.reason || null,
+          streamed,
+        };
+      }
+
+      const decoder = new TextDecoder('utf-8', { fatal: false });
+      let lineBuf = '';
+      let pendingSurrogate = '';
+      let content = '';
+      let model = payload.model;
+      let usage = null;
+      let annotations = [];
+      let incomplete = false;
+      let incompleteReason = null;
+      let sawDone = false;
+      let sawTerminalFinish = false;
+      let streamed = false;
+
+      const emitChunk = (text) => {
+        if (!text) return;
+        content += text;
+        const { ready, trailing } = splitCompleteCodePoints(pendingSurrogate + text);
+        pendingSurrogate = trailing;
+        if (ready) {
+          onTextDelta(ready);
+          streamed = true;
+        }
+      };
+
+      const processLine = (rawLine) => {
+        const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+        if (Buffer.byteLength(line, 'utf8') > MAX_SSE_LINE_BYTES) {
+          throw Object.assign(new Error('Gateway SSE line exceeded maximum size'), { code: 'GATEWAY_SSE_OVERFLOW' });
+        }
+        if (!line || line.startsWith(':')) return;
+        if (!line.startsWith('data:')) return;
+        const dataStr = line.slice(5).trim();
+        if (!dataStr) return;
+        if (dataStr === '[DONE]') {
+          sawDone = true;
+          return;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(dataStr);
+        } catch (err) {
+          throw Object.assign(new Error('Malformed JSON in gateway SSE frame'), {
+            code: 'INVALID_GATEWAY_SSE',
+            cause: err,
+          });
+        }
+        if (parsed?.model) model = parsed.model;
+        if (parsed?.usage) usage = parsed.usage;
+        if (parsed?.error) {
+          incomplete = true;
+          incompleteReason = parsed.error.code || parsed.error.message || 'upstream_error';
+          return;
+        }
+        if (parsed?.incomplete === true || parsed?.status === 'incomplete') {
+          incomplete = true;
+          incompleteReason =
+            parsed?.incomplete_details?.code || parsed?.incomplete_details?.reason || incompleteReason || 'incomplete';
+        }
+        const choice = parsed?.choices?.[0];
+        if (choice?.delta?.content && typeof choice.delta.content === 'string') {
+          emitChunk(choice.delta.content);
+        }
+        if (Array.isArray(choice?.delta?.annotations) && choice.delta.annotations.length) {
+          annotations = choice.delta.annotations;
+        } else if (Array.isArray(choice?.message?.annotations) && choice.message.annotations.length) {
+          annotations = choice.message.annotations;
+        }
+        if (choice?.finish_reason === 'stop' || choice?.finish_reason === 'length') {
+          sawTerminalFinish = true;
+        } else if (choice?.finish_reason === 'error') {
+          incomplete = true;
+          incompleteReason = incompleteReason || 'stream_error';
+        }
+      };
+
+      for await (const rawChunk of res.body) {
+        const text = typeof rawChunk === 'string' ? rawChunk : decoder.decode(rawChunk, { stream: true });
+        lineBuf += text;
+        let nl;
+        while ((nl = lineBuf.indexOf('\n')) !== -1) {
+          processLine(lineBuf.slice(0, nl));
+          lineBuf = lineBuf.slice(nl + 1);
+          if (sawDone) break;
+        }
+        if (sawDone) break;
+        if (Buffer.byteLength(lineBuf, 'utf8') > MAX_SSE_LINE_BYTES) {
+          throw Object.assign(new Error('Gateway SSE line exceeded maximum size'), { code: 'GATEWAY_SSE_OVERFLOW' });
+        }
+      }
+      const tail = decoder.decode();
+      if (tail) lineBuf += tail;
+      if (lineBuf && !sawDone) processLine(lineBuf);
+      if (pendingSurrogate) {
+        onTextDelta('\uFFFD');
+        streamed = true;
+        pendingSurrogate = '';
+      }
+      if (!sawDone && !sawTerminalFinish && !incomplete) {
+        incomplete = true;
+        incompleteReason = 'stream_truncated';
+      }
+      return {
+        content,
+        model,
+        annotations,
+        usage,
+        incomplete,
+        incompleteReason,
+        streamed,
+      };
+    } finally {
+      scoped.cleanup();
+    }
+  }
+
+  async function callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
     const cred = await authManager.getValidCredential({ signal });
     const tier = cred.subscriptionTier;
     const requestedModel = payload.model;
@@ -215,8 +416,58 @@ export function createMcpToolHandlers({
       model: effectiveModel,
     };
     if (effectiveModel === 'gemini-auto') delete effectivePayload.thinking_level;
+    const effectiveTimeout = reqTimeoutMs ?? timeoutMs;
+    const wantStream = typeof onTextDelta === 'function' && !effectivePayload.native_search;
+    let publishedToCallback = false;
 
     const invoke = async (accessToken) => {
+      let textBuffer = '';
+      let pendingSurrogate = '';
+      let committed = false;
+      let publishedBytes = 0;
+
+      const emitReady = (delta) => {
+        if (!delta) return;
+        const { ready, trailing } = splitCompleteCodePoints(pendingSurrogate + delta);
+        pendingSurrogate = trailing;
+        if (ready) {
+          onTextDelta(ready);
+          publishedBytes += Buffer.byteLength(ready, 'utf8');
+          publishedToCallback = true;
+        }
+      };
+
+      const onDelta = wantStream
+        ? (event) => {
+            if (!event || typeof event !== 'object') return;
+            if (event.reset) {
+              if (!committed) {
+                textBuffer = '';
+                pendingSurrogate = '';
+                return;
+              }
+              throw Object.assign(
+                new Error('Upstream stream reset after output already started'),
+                { code: 'NON_MONOTONIC_NATIVE_RESPONSE' },
+              );
+            }
+            if (typeof event.content === 'string' && event.content.length > 0) {
+              if (committed) {
+                emitReady(event.content);
+              } else {
+                textBuffer += event.content;
+                const { ready } = splitCompleteCodePoints(textBuffer);
+                if (Buffer.byteLength(ready, 'utf8') >= STREAM_PREFIX_BYTES) {
+                  committed = true;
+                  const toFlush = textBuffer;
+                  textBuffer = '';
+                  emitReady(toFlush);
+                }
+              }
+            }
+          }
+        : () => {};
+
       const provider = new NativeDirectProvider(
         { getValidAccessToken: async () => accessToken },
         {
@@ -225,27 +476,62 @@ export function createMcpToolHandlers({
           blobCache: imageBlobCache,
           modelAlias: effectiveModel,
           allowAutoModel: effectiveModel === 'gemini-auto',
-          timeoutMs,
+          timeoutMs: effectiveTimeout,
         },
       );
-      const turnResult = await provider.runTurn('mcp-gemini-app', effectivePayload, () => {}, {
+      const turnResult = await provider.runTurn(clientLabel, effectivePayload, onDelta, {
+        incrementalOutput: wantStream,
+        ...(wantStream
+          ? {
+              getOutputCommitState: () => ({
+                publishedBytes: committed ? publishedBytes : 0,
+                toolCallCount: 0,
+              }),
+            }
+          : {}),
         signal,
-        timeoutMs,
+        timeoutMs: effectiveTimeout,
       });
+      const content = typeof turnResult?.content === 'string' ? turnResult.content : '';
+      const incomplete = Boolean(turnResult?.incomplete);
+      if (wantStream && !incomplete) {
+        if (textBuffer.length > 0) {
+          committed = true;
+          const toFlush = textBuffer;
+          textBuffer = '';
+          emitReady(toFlush);
+        } else if (!committed && !publishedToCallback && content.length > 0) {
+          committed = true;
+          emitReady(content);
+        }
+        if (pendingSurrogate) {
+          onTextDelta('\uFFFD');
+          publishedBytes += Buffer.byteLength('\uFFFD', 'utf8');
+          publishedToCallback = true;
+          pendingSurrogate = '';
+        }
+      }
       return {
-        content: typeof turnResult?.content === 'string' ? turnResult.content : '',
+        content,
         model: turnResult?.model || effectiveModel,
         annotations: Array.isArray(turnResult?.annotations) ? turnResult.annotations : [],
         usage: turnResult?.usage ?? null,
-        incomplete: Boolean(turnResult?.incomplete),
+        incomplete,
         incompleteReason: turnResult?.outputError?.code || turnResult?.incompleteDetails?.reason || null,
+        streamed: publishedToCallback,
       };
     };
 
     try {
       return await invoke(cred.access);
     } catch (err) {
-      if ((err?.code === 'NATIVE_PERMISSION_OR_AUTH' || err?.code === 'NATIVE_AUTH_REJECTED') && !signal?.aborted) {
+      if (
+        !publishedToCallback &&
+        (err?.code === 'NATIVE_PERMISSION_OR_AUTH' ||
+          err?.code === 'NATIVE_AUTH_REJECTED' ||
+          err?.code === 'NATIVE_PERMISSION_REJECTED') &&
+        !signal?.aborted
+      ) {
         // Pin retry strictly to the original request's account epoch so switching accounts
         // between attempt 1 and retry can never send Account A's prompt/images to Account B.
         const refreshed = await authManager.getValidCredential({
@@ -259,19 +545,28 @@ export function createMcpToolHandlers({
     }
   }
 
-  async function executeChat(payload, { signal } = {}) {
+  async function executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
     const gateway = resolveGatewayConfig(env);
-    if (gateway) return callViaGateway(gateway, payload, { signal });
-    return callDirectNative(payload, { signal });
+    if (gateway) return callViaGateway(gateway, payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
+    return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
   }
 
-  async function handleAskGemini(args, { signal } = {}) {
+  async function runAskGemini(args, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
     const gateway = resolveGatewayConfig(env);
     const payload = normalizeAskGeminiArgs(args, {
       allowedModels: gateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
       loadImages: loadLocalOrInlineImageParts,
     });
-    const result = await executeChat(payload, { signal });
+    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
+  }
+
+  async function runGeminiSearch(args, { signal, timeoutMs: reqTimeoutMs } = {}) {
+    const payload = normalizeGeminiSearchArgs(args);
+    return executeChat(payload, { signal, timeoutMs: reqTimeoutMs });
+  }
+
+  async function handleAskGemini(args, { signal } = {}) {
+    const result = await runAskGemini(args, { signal });
     const text = result.content || '(empty response)';
     if (result.incomplete) {
       return {
@@ -290,8 +585,7 @@ export function createMcpToolHandlers({
   }
 
   async function handleGeminiSearch(args, { signal } = {}) {
-    const payload = normalizeGeminiSearchArgs(args);
-    const result = await executeChat(payload, { signal });
+    const result = await runGeminiSearch(args, { signal });
     const sourcesMd = formatMcpCitationsMarkdown(result.annotations);
     const text = (result.content || '(empty response)') + sourcesMd;
     if (result.incomplete) {
@@ -311,7 +605,7 @@ export function createMcpToolHandlers({
     };
   }
 
-  async function handleGeminiQuota(_args, { signal } = {}) {
+  async function handleGeminiQuota(_args, { signal, timeoutMs: reqTimeoutMs } = {}) {
     const gateway = resolveGatewayConfig(env);
     if (gateway) {
       const headers = {
@@ -319,31 +613,37 @@ export function createMcpToolHandlers({
         Accept: 'application/json, text/event-stream',
       };
       if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
-      const res = await fetchImpl(`${gateway.baseUrl}/mcp`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/call',
-          params: { name: 'gemini_quota', arguments: {} },
-        }),
-        signal,
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok || data?.error) {
-        const msg = data?.error?.message || `Gateway /mcp returned HTTP ${res.status}`;
-        throw Object.assign(new Error(msg), { code: `GATEWAY_HTTP_${res.status}` });
+      const scoped = withOptionalTimeout(signal, reqTimeoutMs);
+      try {
+        const res = await fetchImpl(`${gateway.baseUrl}/mcp`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'gemini_quota', arguments: {} },
+          }),
+          signal: scoped.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || data?.error) {
+          const msg = data?.error?.message || `Gateway /mcp returned HTTP ${res.status}`;
+          throw Object.assign(new Error(msg), { code: `GATEWAY_HTTP_${res.status}` });
+        }
+        if (data?.result?.content) return data.result;
+        throw Object.assign(new Error('Invalid gateway /mcp quota response'), { code: 'INVALID_GATEWAY_RESPONSE' });
+      } finally {
+        scoped.cleanup();
       }
-      if (data?.result?.content) return data.result;
-      throw Object.assign(new Error('Invalid gateway /mcp quota response'), { code: 'INVALID_GATEWAY_RESPONSE' });
     }
 
+    const quotaTimeoutMs = reqTimeoutMs ?? 10_000;
     const cred = await authManager.getValidCredential({ signal });
     const fetchSubOnly = async (accessToken) => {
       if (!subFetch) return { subscriptionInfo: null, subAuthRejected: false };
       try {
-        const res = await subFetch(accessToken, { signal, timeoutMs: 10_000 });
+        const res = await subFetch(accessToken, { signal, timeoutMs: quotaTimeoutMs });
         if (res?.payload) {
           try {
             return { subscriptionInfo: decodeSubscription(res.payload), subAuthRejected: false };
@@ -357,7 +657,7 @@ export function createMcpToolHandlers({
     };
     const fetchOnce = async (accessToken) => {
       const [usageResult, subOutcome] = await Promise.all([
-        usageFetch(accessToken, { signal, timeoutMs: 10_000 }).then(
+        usageFetch(accessToken, { signal, timeoutMs: quotaTimeoutMs }).then(
           (value) => ({ ok: true, value }),
           (error) => ({ ok: false, error }),
         ),
@@ -408,7 +708,7 @@ export function createMcpToolHandlers({
     } catch (err) {
       return {
         isError: true,
-        content: [{ type: 'text', text: formatFriendlyMcpError(err) }],
+        content: [{ type: 'text', text: formatFriendlyMcpError(err, loginCommand) }],
       };
     }
   }
@@ -416,8 +716,11 @@ export function createMcpToolHandlers({
   return {
     tools,
     callTool,
+    runAskGemini,
+    runGeminiSearch,
     handleAskGemini,
     handleGeminiSearch,
     handleGeminiQuota,
+    formatError: (err) => formatFriendlyMcpError(err, loginCommand),
   };
 }

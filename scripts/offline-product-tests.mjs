@@ -78,4 +78,6 @@ export const productTests = Object.freeze([
   'test/mcp-package-build.test.mjs',
   'test/opencode-extension.test.mjs',
   'test/opencode-package-build.test.mjs',
+  'test/cli-extension.test.mjs',
+  'test/cli-package-build.test.mjs',
 ]);

@@ -1,0 +1,36 @@
+{
+  "name": "gemini-app-cli",
+  "version": "0.1.0",
+  "description": "Zero-dependency one-shot Google Gemini CLI (ask, search, quota, models) over native HTTP/2 using your Google Gemini subscription via OAuth or a local gemini-app2api gateway.",
+  "license": "MIT",
+  "author": "shawtim",
+  "homepage": "https://github.com/ShawTim/gemini-app2api/blob/main/extensions/cli/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShawTim/gemini-app2api.git",
+    "directory": "extensions/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/ShawTim/gemini-app2api/issues"
+  },
+  "keywords": [
+    "gemini",
+    "cli",
+    "gemini-cli",
+    "gemini-neon",
+    "gemini-hydrogen",
+    "google-search",
+    "oauth",
+    "http2",
+    "unix",
+    "coding-agent",
+    "skill"
+  ],
+  "bin": {
+    "gemini-app": "./extensions/cli/cli.js",
+    "gemini-app-cli": "./extensions/cli/cli.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
