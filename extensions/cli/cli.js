@@ -880,7 +880,7 @@ export async function runGeminiCli(
               model: result.model,
               partialContent: result.content,
               ...(result.turns !== undefined ? { turns: result.turns } : {}),
-              ...(Array.isArray(result.toolCalls) ? { toolCalls: result.toolCalls } : {}),
+              ...(parsed.tools && Array.isArray(result.toolCalls) ? { toolCalls: result.toolCalls } : {}),
             }) + '\n',
           );
         } else {
@@ -906,7 +906,7 @@ export async function runGeminiCli(
               ...(parsedSchemaValue !== undefined ? { parsed: parsedSchemaValue } : {}),
               ...(result.usage ? { usage: result.usage } : {}),
               ...(result.turns !== undefined ? { turns: result.turns } : {}),
-              ...(Array.isArray(result.toolCalls) ? { toolCalls: result.toolCalls } : {}),
+              ...(parsed.tools && Array.isArray(result.toolCalls) ? { toolCalls: result.toolCalls } : {}),
             },
             null,
             2,
