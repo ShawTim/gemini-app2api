@@ -1,4 +1,5 @@
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
+import { fetchGoogleSubscription as defaultFetchGoogleSubscription } from '../../src/gateway/subscription-transport.mjs';
 import { decodeUsageInfo as defaultDecodeUsageInfo } from '../../src/gateway/quota.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
 import { SUBSCRIPTION_LABELS } from '../pi/provider.js';
@@ -14,10 +15,13 @@ function parseResetMs(value) {
 }
 
 export function createOpenClawUsageFetcher({
-  fetchGoogleUsageInfo = defaultFetchGoogleUsageInfo,
+  fetchGoogleUsageInfo,
+  fetchGoogleSubscription,
   decodeUsageInfo = defaultDecodeUsageInfo,
   decodeSubscription = defaultDecodeSubscription,
 } = {}) {
+  const usageFetch = fetchGoogleUsageInfo || defaultFetchGoogleUsageInfo;
+  const subFetch = fetchGoogleSubscription || (fetchGoogleUsageInfo ? null : defaultFetchGoogleSubscription);
   return async function fetchOpenClawUsageSnapshot(ctx) {
     const token = typeof ctx?.token === 'string' ? ctx.token.trim() : '';
     if (!token) {
@@ -32,12 +36,16 @@ export function createOpenClawUsageFetcher({
       ? Math.min(15_000, Math.max(1_000, Math.floor(ctx.timeoutMs)))
       : 10_000;
     try {
-      const { payload } = await fetchGoogleUsageInfo(token, {
-        signal: ctx?.signal,
-        timeoutMs,
-      });
-      const usageInfo = decodeUsageInfo(payload);
-      const subscription = decodeSubscription(payload);
+      const [usageRes, subRes] = await Promise.all([
+        usageFetch(token, { signal: ctx?.signal, timeoutMs }),
+        subFetch ? subFetch(token, { signal: ctx?.signal, timeoutMs }).catch(() => null) : Promise.resolve(null),
+      ]);
+      const usageInfo = decodeUsageInfo(usageRes.payload);
+      let subscription = null;
+      try {
+        const subPayload = subFetch ? subRes?.payload : usageRes.payload;
+        if (subPayload) subscription = decodeSubscription(subPayload);
+      } catch {}
       const tier = subscription?.tier;
       const plan = tier && tier !== 'unknown' ? SUBSCRIPTION_LABELS[tier] || tier : undefined;
       const windows = (usageInfo?.usageRows || [])

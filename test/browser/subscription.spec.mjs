@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { fixture } from '../gateway-fixture.mjs';
 import { varintField as v } from '../../native-wire/protobuf.mjs';
-const snapshot = (tier = 2) => v(2, tier);
+const snapshot = (tier = 2) => v(21, tier);
 test.beforeEach(async ({ context }) => {
   // Isolate explicit subscription lookups from the separately tested usage scheduler.
   await context.addInitScript(() => localStorage.setItem('gemini_quota_auto', 'false'));
@@ -31,8 +31,14 @@ test('subscription lookup is explicit, account scoped, bilingual and clear about
     release();
     await expect(row.locator('[data-subscription-tier]')).toHaveText('Google AI Pro');
     await expect(button).toBeFocused();
-    await expect(row.locator('[data-subscription-feedback]')).toContainText('Google GetUsageInfo');
+    await expect(row.locator('[data-subscription-feedback]')).toContainText('Google GetUserStatus');
     await expect(row.locator('[data-subscription-observed]')).toBeVisible();
+    // Repeating within the 30s local throttle preserves the confirmed tier badge and shows friendly copy.
+    await button.click();
+    await expect(row.locator('[data-subscription-tier]')).toHaveText('Google AI Pro');
+    await expect(row.locator('[data-subscription-feedback]')).toContainText('SUBSCRIPTION_REFRESH_THROTTLED');
+    await expect(row.locator('[data-subscription-feedback]')).not.toContainText('Current tier unknown');
+    expect(calls).toBe(1);
     await page.keyboard.press('Escape');
     await page.locator('[data-account-card="acc-1"] [data-action="open-drawer"]').click();
     await expect(page.locator('#account-drawer [data-subscription="acc-1"] [data-subscription-tier]')).toHaveText('Unknown');

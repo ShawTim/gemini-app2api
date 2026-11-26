@@ -193,7 +193,7 @@ test('OAuth SSH manual callback paste races loopback server, validates state, ex
       assert.equal(accessToken, 'scoped-robin-access-token');
       throw Object.assign(new Error('Transient ToS error'), { code: 'TOS_PRECONDITION_REQUIRED' });
     },
-    fetchGoogleUsageInfo: async () => ({ payload: v(2, 2) }),
+    fetchGoogleSubscription: async () => ({ payload: v(21, 2) }),
   });
 
   const before = Date.now();
@@ -254,7 +254,7 @@ test('OAuth local HTTP loopback callback wins race, aborts manual prompt, and re
       expiresInSeconds: 1800,
     }),
     acceptGoogleMainTerms: async () => ({ status: 'accepted' }),
-    fetchGoogleUsageInfo: async () => ({ payload: v(2, 2) }),
+    fetchGoogleSubscription: async () => ({ payload: v(21, 2) }),
   });
 
   let authUrl;
@@ -410,7 +410,7 @@ test('OAuth login propagates non-TOS auth errors during terms verification', asy
     acceptGoogleMainTerms: async () => {
       throw Object.assign(new Error('Permission denied'), { code: 'NATIVE_PERMISSION_OR_AUTH' });
     },
-    fetchGoogleUsageInfo: async () => ({ payload: v(2, 2) }),
+    fetchGoogleSubscription: async () => ({ payload: v(21, 2) }),
   });
 
   let authUrl;
@@ -1648,7 +1648,7 @@ test('gemini-auto streams with smartModelSelection=true, omits mode/thinking wir
   assert.equal(recovered.content[0].text, 'Auto recovered');
 });
 
-test('auth.login and auth.refresh detect subscriptionTier via GetUsageInfo with non-fatal fallback', async () => {
+test('auth.login and auth.refresh detect subscriptionTier via GetUserStatus with non-fatal fallback', async () => {
   const notifications = [];
   let currentTierWire = 1; // free
   let failUsage = false;
@@ -1671,10 +1671,10 @@ test('auth.login and auth.refresh detect subscriptionTier via GetUsageInfo with 
       expiresInSeconds: 3600,
     }),
     acceptGoogleMainTerms: async () => ({ status: 'accepted' }),
-    fetchGoogleUsageInfo: async (token) => {
+    fetchGoogleSubscription: async (token) => {
       assert.equal(token, 'scoped-tier-token');
-      if (failUsage) throw Object.assign(new Error('Usage unavailable'), { code: 'QUOTA_TIMEOUT' });
-      return { payload: v(2, currentTierWire) };
+      if (failUsage) throw Object.assign(new Error('Subscription unavailable'), { code: 'SUBSCRIPTION_TIMEOUT' });
+      return { payload: v(21, currentTierWire) };
     },
   });
 
@@ -1790,10 +1790,7 @@ test('/gemini-quota displays detected subscription tier header alongside usage r
   };
   let tierVarint = 1; // Free
   const buildUsage = () =>
-    Buffer.concat([
-      v(2, tierVarint),
-      m(3, m(2, Buffer.concat([floatField(2, 0.2), m(3, Buffer.from('5-hour limit'))]))),
-    ]);
+    m(3, m(2, Buffer.concat([floatField(2, 0.2), m(3, Buffer.from('5-hour limit'))])));
 
   registerGeminiAppExtension(
     { registerProvider: () => {}, registerCommand: (name, spec) => registeredCommands.set(name, spec) },
@@ -1801,6 +1798,7 @@ test('/gemini-quota displays detected subscription tier header alongside usage r
       createProvider: (def) => def,
       createAssistantMessageEventStream: () => new MockEventStream(),
       fetchGoogleUsageInfo: async () => ({ payload: buildUsage() }),
+      fetchGoogleSubscription: async () => ({ payload: v(21, tierVarint) }),
     },
   );
 

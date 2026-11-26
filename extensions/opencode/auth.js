@@ -3,7 +3,7 @@ import {
   refreshNativeCredential as defaultRefreshNativeCredential,
 } from '../../native-wire/oauth-loopback.mjs';
 import { acceptGoogleMainTerms as defaultAcceptGoogleMainTerms } from '../../src/gateway/terms.mjs';
-import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
+import { fetchGoogleSubscription as defaultFetchGoogleSubscription } from '../../src/gateway/subscription-transport.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
 import { identifyGoogleAccount as defaultIdentifyGoogleAccount } from '../../src/gateway/oauth-identity.mjs';
 import { DEFAULT_OAUTH_PROFILE } from '../../src/gateway/oauth-client-defaults.mjs';
@@ -23,7 +23,8 @@ export function createOpenCodeAuthHook({
   startLoopbackLogin = defaultStartLoopbackLogin,
   refreshNativeCredential = defaultRefreshNativeCredential,
   acceptGoogleMainTerms = defaultAcceptGoogleMainTerms,
-  fetchGoogleUsageInfo = defaultFetchGoogleUsageInfo,
+  fetchGoogleSubscription,
+  fetchGoogleUsageInfo,
   decodeSubscription = defaultDecodeSubscription,
   identifyGoogleAccount = defaultIdentifyGoogleAccount,
   defaultProfile = DEFAULT_OAUTH_PROFILE,
@@ -31,12 +32,13 @@ export function createOpenCodeAuthHook({
   uploadImages,
   now = Date.now,
 } = {}) {
+  const subscriptionFetch = fetchGoogleSubscription || fetchGoogleUsageInfo || defaultFetchGoogleSubscription;
   // Advisory display-only tier for provider.models(); each loader maintains its own isolated { identity, tier }.
   let displayTierState = { identity: null, tier: 'unknown' };
 
   async function detectSubscriptionTier(accessToken, { signal } = {}) {
     try {
-      const { payload } = await fetchGoogleUsageInfo(accessToken, { signal, timeoutMs: 8000 });
+      const { payload } = await subscriptionFetch(accessToken, { signal, timeoutMs: 8000 });
       const sub = decodeSubscription(payload);
       return typeof sub?.tier === 'string' && sub.tier ? sub.tier : 'unknown';
     } catch {

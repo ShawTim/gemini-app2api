@@ -14,6 +14,7 @@ import {
 } from './stream.js';
 import { formatQuotaDisplay } from '../pi/provider.js';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
+import { fetchGoogleSubscription as defaultFetchGoogleSubscription } from '../../src/gateway/subscription-transport.mjs';
 import { decodeUsageInfo as defaultDecodeUsageInfo } from '../../src/gateway/quota.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
 
@@ -115,6 +116,7 @@ export function buildGeminiAppOpenClawProvider(deps = {}) {
 
 export function createGeminiAppOpenClawPlugin(deps = {}) {
   const fetchGoogleUsageInfo = deps.fetchGoogleUsageInfo || defaultFetchGoogleUsageInfo;
+  const fetchGoogleSubscription = deps.fetchGoogleSubscription || (deps.fetchGoogleUsageInfo ? null : defaultFetchGoogleSubscription);
   const decodeUsageInfo = deps.decodeUsageInfo || defaultDecodeUsageInfo;
   const decodeSubscription = deps.decodeSubscription || defaultDecodeSubscription;
 
@@ -146,9 +148,16 @@ export function createGeminiAppOpenClawPlugin(deps = {}) {
               };
             }
             try {
-              const { payload } = await fetchGoogleUsageInfo(token, { timeoutMs: 10000 });
-              const usageInfo = decodeUsageInfo(payload);
-              const subInfo = decodeSubscription(payload);
+              const [usageRes, subRes] = await Promise.all([
+                fetchGoogleUsageInfo(token, { timeoutMs: 10000 }),
+                fetchGoogleSubscription ? fetchGoogleSubscription(token, { timeoutMs: 10000 }).catch(() => null) : Promise.resolve(null),
+              ]);
+              const usageInfo = decodeUsageInfo(usageRes.payload);
+              let subInfo = null;
+              try {
+                const subPayload = fetchGoogleSubscription ? subRes?.payload : usageRes.payload;
+                if (subPayload) subInfo = decodeSubscription(subPayload);
+              } catch {}
               return { text: formatQuotaDisplay(usageInfo, subInfo) };
             } catch (err) {
               return {

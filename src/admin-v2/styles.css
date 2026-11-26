@@ -542,11 +542,49 @@ svg.spark { width: 76px; height: 24px; display: block; }
   color: var(--text);
 }
 .topbar-github {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-elevated);
+  border: 1px solid color-mix(in srgb, var(--amber) 42%, var(--border-strong));
+  box-shadow: 0 1px 2px rgb(0 0 0 / 16%);
   text-decoration: none;
+  white-space: nowrap;
 }
-.topbar-github svg {
-  width: 15.5px;
-  height: 15.5px;
+.topbar-github:hover {
+  background: color-mix(in srgb, var(--amber) 14%, var(--surface-elevated));
+  border-color: color-mix(in srgb, var(--amber) 66%, var(--border-strong));
+  color: var(--text);
+}
+.topbar-github-mark {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+.topbar-github-star {
+  display: inline-flex;
+  align-items: center;
+  color: var(--amber);
+}
+.topbar-github-star svg {
+  width: 12.5px;
+  height: 12.5px;
+  fill: var(--amber);
+}
+@media (max-width: 480px) {
+  .topbar-github {
+    padding: 4px 8px;
+    gap: 5px;
+  }
+  .topbar-github-label {
+    display: none;
+  }
 }
 .star-prompt-banner {
   display: flex;

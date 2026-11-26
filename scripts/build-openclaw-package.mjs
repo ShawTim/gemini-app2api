@@ -56,6 +56,7 @@ export const ALLOWED_OPENCLAW_RUNTIME_FILES = Object.freeze([
   'src/gateway/quota.mjs',
   'src/gateway/soft-error.mjs',
   'src/gateway/structured-output.mjs',
+  'src/gateway/subscription-transport.mjs',
   'src/gateway/subscription.mjs',
   'src/gateway/terms.mjs',
 ]);

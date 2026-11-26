@@ -50,10 +50,10 @@ export const ALLOWED_OPENCODE_RUNTIME_FILES = Object.freeze([
   'src/gateway/outbound-proxy.mjs',
   'src/gateway/output-recovery.mjs',
   'src/gateway/quota-failover.mjs',
-  'src/gateway/quota-transport.mjs',
   'src/gateway/quota.mjs',
   'src/gateway/soft-error.mjs',
   'src/gateway/structured-output.mjs',
+  'src/gateway/subscription-transport.mjs',
   'src/gateway/subscription.mjs',
   'src/gateway/terms.mjs',
 ]);

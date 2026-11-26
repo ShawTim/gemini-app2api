@@ -1,10 +1,10 @@
-// Read-only GetUsageInfo tier lookup. No generation, quota mutation, terms acceptance or retry.
+// Read-only GetUserStatus tier lookup. No generation, quota mutation, terms acceptance or retry.
 import http2 from 'node:http2';
 import { GrpcMessageReader, frameGrpcMessage, GATEWAY_USER_AGENT } from '../../native-wire/robin-current.mjs';
 import { buildSubscriptionRequest } from './subscription.mjs';
 import { connectHttp2 } from './outbound-proxy.mjs';
 export const SUBSCRIPTION_ORIGIN = 'https://robinfrontend-pa.googleapis.com';
-export const SUBSCRIPTION_RPC = '/assistant.mobile.robin.RobinService/GetUsageInfo';
+export const SUBSCRIPTION_RPC = '/assistant.mobile.robin.RobinService/GetUserStatus';
 const failure = (code, status = 502) => Object.assign(new Error(code), { code, status });
 export async function fetchGoogleSubscription(accessToken, { signal, timeoutMs = 10000, connect = connectHttp2 } = {}) {
   if (typeof accessToken !== 'string' || !accessToken || accessToken.length > 65536 || /\s/.test(accessToken)) throw failure('SUBSCRIPTION_CREDENTIAL_REQUIRED', 401);

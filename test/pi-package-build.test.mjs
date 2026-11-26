@@ -16,12 +16,13 @@ import { scanEcmaModule } from '../scripts/js-module-scanner.mjs';
 
 const scratchBase = () => process.env.PI_SCRATCH_DIR || os.tmpdir();
 
-test('tracePiRuntimeClosure resolves exact 37 ESM files with zero child_process and no state.mjs', () => {
+test('tracePiRuntimeClosure resolves exact 38 ESM files with zero child_process and no state.mjs', () => {
   const traced = tracePiRuntimeClosure({ baseRoot: root });
-  assert.equal(traced.length, 37);
+  assert.equal(traced.length, 38);
   assert.deepEqual(traced, [...ALLOWED_PI_RUNTIME_FILES].sort());
   assert.equal(traced.includes('src/gateway/state.mjs'), false);
   assert.equal(traced.includes('src/gateway/oauth-client-defaults.mjs'), true);
+  assert.equal(traced.includes('src/gateway/subscription-transport.mjs'), true);
 });
 
 test('assertSafeOutDir blocks repository root, parent directories, and protected subdirectories', () => {
@@ -61,7 +62,7 @@ test('assertSafeOutDir blocks symlink parent resolving into protected repository
   );
 });
 
-test('buildPiPackage and verifyPiPackageStaging produce clean 41-file Marketplace package', async (t) => {
+test('buildPiPackage and verifyPiPackageStaging produce clean 42-file Marketplace package', async (t) => {
   const stageRoot = fs.mkdtempSync(path.join(scratchBase(), 'pi-pkg-stage-'));
   t.after(() => fs.rmSync(stageRoot, { recursive: true, force: true }));
   const outDir = path.join(stageRoot, 'package');
@@ -74,8 +75,8 @@ test('buildPiPackage and verifyPiPackageStaging produce clean 41-file Marketplac
   });
   assert.equal(buildRes.built, true);
   assert.equal(buildRes.name, 'pi-gemini-app');
-  assert.equal(buildRes.runtimeFiles, 37);
-  assert.equal(buildRes.files, 41);
+  assert.equal(buildRes.runtimeFiles, 38);
+  assert.equal(buildRes.files, 42);
   assert.ok(buildRes.runtimeBytes < 500 * 1024);
 
   // Re-running without --clean must fail closed
@@ -112,7 +113,7 @@ test('buildPiPackage and verifyPiPackageStaging produce clean 41-file Marketplac
   const verifyRes = await verifyPiPackageStaging({ baseRoot: root });
   assert.equal(verifyRes.verified, true);
   assert.equal(verifyRes.package, 'pi-gemini-app');
-  assert.equal(verifyRes.unpackedFiles, 41);
+  assert.equal(verifyRes.unpackedFiles, 42);
   assert.ok(verifyRes.unpackedBytes < 500 * 1024);
 });
 
@@ -259,7 +260,7 @@ test('scripts/build-pi-package.mjs CLI builds and packs tarball cleanly in isola
   const summary = JSON.parse(run.stdout);
   assert.equal(summary.built, true);
   assert.equal(summary.name, 'pi-gemini-app');
-  assert.equal(summary.files, 41);
+  assert.equal(summary.files, 42);
   assert.ok(summary.tarball && fs.existsSync(summary.tarball));
 });
 

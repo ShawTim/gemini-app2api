@@ -38,9 +38,10 @@ const stringValue = (fields, number) => {
   return value === undefined ? null : utf8.decode(value);
 };
 /** Native ROBINRequestMetadata subset. No device IDs or hardware attestation. */
-export function buildRequestMetadata({ clientType, languageCode, interfaceLanguageCode, clientVersion, clientInstanceId, triggerType, uiSource, clientFunctionCapabilities = false } = {}) {
+export function buildRequestMetadata({ clientType, languageCode, interfaceLanguageCode, clientVersion, clientInstanceId, triggerType, uiSource, clientFunctionCapabilities = false, subscriptionTierCapability = false } = {}) {
   if (!Number.isSafeInteger(clientType) || clientType < 0 || clientType > 255) throw new Error('Explicit client type required');
   if (typeof clientFunctionCapabilities !== 'boolean') throw new TypeError('Invalid client-function capabilities');
+  if (typeof subscriptionTierCapability !== 'boolean') throw new TypeError('Invalid subscription-tier capability');
   const fields = [];
   if (triggerType !== undefined) {if (!Number.isSafeInteger(triggerType)||triggerType<0)throw new Error('Invalid trigger');fields.push(message(1,varintField(1,triggerType)));}
   if (interfaceLanguageCode !== undefined) fields.push(message(2, string(1, interfaceLanguageCode)));
@@ -48,8 +49,12 @@ export function buildRequestMetadata({ clientType, languageCode, interfaceLangua
   fields.push(varintField(4, clientType));
   if (languageCode !== undefined) fields.push(string(7, languageCode));
   if (uiSource !== undefined) {if (!Number.isSafeInteger(uiSource)||uiSource<0)throw new Error('Invalid UI source');fields.push(varintField(5,uiSource));}
-  // Metadata CapabilityType values, distinct from DesktopInfo capability enum 379.
-  if (clientFunctionCapabilities) fields.push(message(6, message(2, Buffer.concat([varint(668), varint(669)]))));
+  // Metadata CapabilityType values (field 6.2), distinct from DesktopInfo capability enum 379.
+  // 529 = ENABLE_USER_SUBSCRIPTION_TIER; 668/669 = CLIENT_TOOLS / ROBIN_OP_CLIENT_FUNCTION_CALL.
+  const capabilities = [];
+  if (subscriptionTierCapability) capabilities.push(529);
+  if (clientFunctionCapabilities) capabilities.push(668, 669);
+  if (capabilities.length) fields.push(message(6, message(2, Buffer.concat(capabilities.map(varint)))));
   if (clientInstanceId !== undefined) fields.push(string(23, clientInstanceId));
   return Buffer.concat(fields);
 }

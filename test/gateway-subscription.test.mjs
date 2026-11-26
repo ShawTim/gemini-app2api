@@ -5,10 +5,10 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { parse, lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 import { frameGrpcMessage } from '../native-wire/robin-current.mjs';
-import { decodeSubscription, safeSubscription, buildSubscriptionRequest } from '../src/gateway/subscription.mjs';
+import { decodeSubscription, safeSubscription, buildSubscriptionRequest, SUBSCRIPTION_CAPABILITY_USER_TIER } from '../src/gateway/subscription.mjs';
 import { fetchGoogleSubscription, SUBSCRIPTION_ORIGIN, SUBSCRIPTION_RPC } from '../src/gateway/subscription-transport.mjs';
 import { fixture } from './gateway-fixture.mjs';
-const snapshot = (tier = 2) => v(2, tier);
+const snapshot = (tier = 2) => v(21, tier);
 const observedAt = '2026-10-28T12:00:00.000Z';
 const query = (f, id = 'acc-0') => f.admin(`accounts/${id}/subscription`, { method: 'POST', body: {} });
 
@@ -16,33 +16,68 @@ test('subscription wire fields and enum values preserve native provenance withou
   for (const [nativeTier, tier, name] of [[1, 'free', 'BASIC_USER'], [2, 'pro', 'TIER1'], [3, 'ultra', 'TIER2'], [4, 'plus', 'LITE_USER'], [5, 'ultra_neon', 'TIER_NEON']]) {
     const result = decodeSubscription(snapshot(nativeTier));
     assert.equal(result.tier, tier); assert.equal(result.nativeTierName, name); assert.equal(result.status, 'ok');
-    assert.equal(result.membershipStatus, 'unknown'); assert.equal(result.isForced, null); assert.equal(result.rpc, 'GetUsageInfo');
+    assert.equal(result.membershipStatus, 'unknown'); assert.equal(result.isForced, null); assert.equal(result.rpc, 'GetUserStatus');
   }
   for (const tier of [0, 99]) { const result = decodeSubscription(snapshot(tier)); assert.equal(result.tier, 'unknown'); assert.equal(result.status, 'missing'); }
   assert.equal(decodeSubscription(Buffer.alloc(0)).tier, 'unknown');
-  const unrelated = decodeSubscription(Buffer.concat([snapshot(), v(7, 4), v(29, 1)]));
-  assert.equal(unrelated.membershipStatus, 'unknown'); assert.equal(unrelated.isForced, null);
+  // Legacy GetUsageInfo field 2 must NOT be decoded as subscription tier.
+  assert.equal(decodeSubscription(v(2, 2)).tier, 'unknown');
+  assert.equal(decodeSubscription(v(2, 2)).status, 'missing');
+  // GetUserStatus field 29 decodes is_subscription_tier_forced (0/1), while field 7 stays unmapped.
+  const withForced = decodeSubscription(Buffer.concat([snapshot(1), v(7, 4), v(29, 1)]));
+  assert.equal(withForced.tier, 'free');
+  assert.equal(withForced.membershipStatus, 'unknown');
+  assert.equal(withForced.isForced, true);
+  assert.equal(decodeSubscription(Buffer.concat([snapshot(2), v(29, 0)])).isForced, false);
 });
 
-test('subscription decoder rejects ambiguous malformed fields; safe snapshots cannot retain account data', () => {
-  for (const bytes of [Buffer.concat([v(2, 2), v(2, 3)]), m(2, Buffer.from('PRIVATE')), v(2, 0xffffffff), Buffer.from([0x80]), Buffer.alloc(512 * 1024 + 1)]) assert.throws(() => decodeSubscription(bytes), { code: 'INVALID_SUBSCRIPTION_METADATA' });
+test('subscription decoder rejects ambiguous malformed fields; safe snapshots cannot retain account data or stale GetUsageInfo tier', () => {
+  for (const bytes of [
+    Buffer.concat([v(21, 2), v(21, 3)]),
+    m(21, Buffer.from('PRIVATE')),
+    v(21, 0xffffffff),
+    v(29, 2),
+    Buffer.concat([v(29, 0), v(29, 1)]),
+    m(29, Buffer.from('x')),
+    Buffer.from([0x80]),
+    Buffer.alloc(512 * 1024 + 1),
+  ]) assert.throws(() => decodeSubscription(bytes), { code: 'INVALID_SUBSCRIPTION_METADATA' });
   const decoded = decodeSubscription(Buffer.concat([snapshot(), m(36, Buffer.from('PRIVATE_GOOGLE_IDENTIFIER'))]));
   const clean = safeSubscription({ ...decoded, token: 'PRIVATE_TOKEN', email: 'PRIVATE_EMAIL', updatedAt: observedAt });
   assert.doesNotMatch(JSON.stringify(clean), /PRIVATE|token|email/);
   assert.deepEqual(safeSubscription(clean), clean);
   assert.equal(safeSubscription({ tier: 'pro', nativeTier: 2, status: 'ok' }).tier, 'unknown');
+  // Legacy persisted GetUsageInfo snapshots must be invalidated so stale bogus 'pro' tiers never persist.
+  const legacy = safeSubscription({ source: 'official', provider: 'google-robin', rpc: 'GetUsageInfo', status: 'ok', tier: 'pro', nativeTier: 2, updatedAt: observedAt });
+  assert.equal(legacy.tier, 'unknown');
+  assert.equal(legacy.status, 'missing');
+  assert.equal(legacy.rpc, null);
   assert.equal(safeSubscription({ ...decoded, updatedAt: 'not a date' }).updatedAt, null);
 });
 
-test('subscription request uses established empty GetUsageInfo request without asserting a client tier', () => {
-  assert.deepEqual(buildSubscriptionRequest(), Buffer.alloc(0));
-  assert.equal(SUBSCRIPTION_RPC, '/assistant.mobile.robin.RobinService/GetUsageInfo');
+test('subscription request uses GetUserStatus with RequestMetadata advertising ENABLE_USER_SUBSCRIPTION_TIER (529)', () => {
+  const req = buildSubscriptionRequest();
+  assert.equal(SUBSCRIPTION_RPC, '/assistant.mobile.robin.RobinService/GetUserStatus');
+  const root = parse(req);
+  assert.equal(root.length, 1);
+  assert.equal(root[0].number, 1);
+  assert.equal(root[0].wire, 2);
+  const meta = parse(root[0].payload);
+  const capField = meta.find(f => f.number === 6 && f.wire === 2);
+  assert.ok(capField, 'RequestMetadata must include field 6 (clientCapabilities)');
+  const capList = parse(capField.payload).find(f => f.number === 2 && f.wire === 2);
+  assert.ok(capList, 'ClientCapabilities must include packed field 2 (capabilities)');
+  // Varint decode packed field 2 and assert 529 (ENABLE_USER_SUBSCRIPTION_TIER) is present.
+  let val = 0, shift = 0;
+  for (const byte of capList.payload) { val |= (byte & 127) << shift; shift += 7; if (!(byte & 128)) break; }
+  assert.equal(val, SUBSCRIPTION_CAPABILITY_USER_TIER);
+  assert.equal(val, 529);
 });
 
 function transport(emit) {
   const state = { connects: 0, requests: 0, cancelled: 0 };
   const request = new EventEmitter(); request.rstCode = 0; request.close = () => state.cancelled++;
-  request.end = bytes => { assert.deepEqual(bytes, frameGrpcMessage(Buffer.alloc(0))); queueMicrotask(() => emit(request)); };
+  request.end = bytes => { assert.deepEqual(bytes, frameGrpcMessage(buildSubscriptionRequest())); queueMicrotask(() => emit(request)); };
   const client = new EventEmitter(); client.destroy = () => {}; client.close = () => client.emit('close');
   client.request = headers => { state.requests++; assert.equal(headers[':method'], 'POST'); assert.equal(headers[':path'], SUBSCRIPTION_RPC); assert.equal(headers.authorization, 'Bearer synthetic-token'); assert.equal(headers['user-agent'], 'gemini-app2api/1.0'); return request; };
   return { state, connect: origin => { state.connects++; assert.equal(origin, SUBSCRIPTION_ORIGIN); return client; } };

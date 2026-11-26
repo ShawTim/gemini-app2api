@@ -6,6 +6,7 @@ import { MODEL_SPECS, NATIVE_MODELS } from '../../src/openai-contract.mjs';
 import { decodeImageBytes, decodeImageDataUrl, MAX_IMAGE_BYTES } from '../../src/image-input.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
+import { fetchGoogleSubscription as defaultFetchGoogleSubscription } from '../../src/gateway/subscription-transport.mjs';
 import { decodeUsageInfo as defaultDecodeUsageInfo } from '../../src/gateway/quota.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
 import {
@@ -162,11 +163,14 @@ export function createMcpToolHandlers({
   openTurn = defaultOpenDirectTurn,
   uploadImages,
   fetchImpl = globalThis.fetch,
-  fetchGoogleUsageInfo = defaultFetchGoogleUsageInfo,
+  fetchGoogleUsageInfo,
+  fetchGoogleSubscription,
   decodeUsageInfo = defaultDecodeUsageInfo,
   decodeSubscription = defaultDecodeSubscription,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
+  const usageFetch = fetchGoogleUsageInfo || defaultFetchGoogleUsageInfo;
+  const subFetch = fetchGoogleSubscription || (fetchGoogleUsageInfo ? null : defaultFetchGoogleSubscription);
   const imageBlobCache = createImageBlobCache();
   const initialGateway = resolveGatewayConfig(env);
   const tools = buildMcpToolDefinitions({
@@ -337,9 +341,16 @@ export function createMcpToolHandlers({
 
     const cred = await authManager.getValidCredential({ signal });
     const fetchOnce = async (accessToken) => {
-      const { payload } = await fetchGoogleUsageInfo(accessToken, { signal, timeoutMs: 10_000 });
-      const usageInfo = decodeUsageInfo(payload);
-      const subscriptionInfo = decodeSubscription(payload);
+      const [usageRes, subRes] = await Promise.all([
+        usageFetch(accessToken, { signal, timeoutMs: 10_000 }),
+        subFetch ? subFetch(accessToken, { signal, timeoutMs: 10_000 }).catch(() => null) : Promise.resolve(null),
+      ]);
+      const usageInfo = decodeUsageInfo(usageRes.payload);
+      let subscriptionInfo = null;
+      try {
+        const subPayload = subFetch ? subRes?.payload : usageRes.payload;
+        if (subPayload) subscriptionInfo = decodeSubscription(subPayload);
+      } catch {}
       return { usageInfo, subscriptionInfo };
     };
     let quota;

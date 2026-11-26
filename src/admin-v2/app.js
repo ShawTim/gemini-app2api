@@ -263,6 +263,10 @@ function safeError(error) {
     KEY_SECRET_UNAVAILABLE: L('This key was created in an earlier version that stored only a hash. Create a new key to enable copying.', '此金鑰由只儲存雜湊值的舊版建立。請建立新金鑰以支援隨時複製。'),
     KEY_NOT_FOUND: L('This API key is no longer active.', '此 API 金鑰已失效或已被撤銷。'),
     MCP_DISABLED: L('The MCP endpoint (POST /mcp) is disabled in Settings.', 'MCP 端點（POST /mcp）已在設定中停用。'),
+    SUBSCRIPTION_REFRESH_THROTTLED: L('Checked within the last 30s — please wait briefly before checking again.', '剛於 30 秒內查詢過，請稍候再試。', '刚于 30 秒内查询过，请稍后再试。'),
+    QUOTA_REFRESH_THROTTLED: L('Refreshed within the last 30s — please wait briefly before refreshing again.', '剛於 30 秒內更新過，請稍候再試。', '刚于 30 秒内更新过，请稍后再试。'),
+    SUBSCRIPTION_RATE_LIMITED: L('Google temporarily rate-limited subscription lookups. Wait briefly and retry.', 'Google 暫時限制訂閱查詢頻率，請稍後重試。', 'Google 暂时限制订阅查询频率，请稍后重试。'),
+    QUOTA_RATE_LIMITED: L('Google temporarily rate-limited usage lookups. Wait briefly and retry.', 'Google 暫時限制用量查詢頻率，請稍後重試。', 'Google 暂时限制用量查询频率，请稍后重试。'),
     DEMO_ONLY: L('Demo only: this action did not contact a provider.', '僅為示範，此操作沒有連接供應商。'),
   };
   return `${messages[code] || L('The operation failed. Your current view and input have been retained. Check sanitized server diagnostics.', '操作失敗，已保留目前畫面及輸入。請檢查已清理的伺服器診斷資料。')} (${code}${error?.status ? ` · HTTP ${error.status}` : ''})`;
@@ -444,17 +448,21 @@ function dismissStarPrompt() {
   savePref('gemini_star_prompt_dismissed', '1');
   render();
 }
+function githubMark() {
+  return svg('svg', { class: 'topbar-github-mark', viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true },
+    svg('path', { d: 'M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55 0-.27-.01-1.15-.02-2.09-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.04 11.04 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.39-5.26 5.67.42.36.79 1.07.79 2.16 0 1.56-.01 2.82-.01 3.2 0 .31.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z' }));
+}
 function topbarStarControl() {
   return el('a', {
     id: 'topbar-github-star',
-    class: 'button icon-button quiet topbar-github',
+    class: 'button topbar-github',
     href: GITHUB_REPO_URL,
     target: '_blank',
     rel: 'noopener noreferrer',
     title: L('GitHub repository · Star Gemini App2API', 'GitHub 專案頁 · 畀星支持 Gemini App2API', 'GitHub 仓库 · 点 Star 支持 Gemini App2API'),
     'aria-label': L('GitHub repository · Star Gemini App2API', 'GitHub 專案頁 · 畀星支持 Gemini App2API', 'GitHub 仓库 · 点 Star 支持 Gemini App2API'),
     onClick: () => { if (!S.starPromptDismissed) dismissStarPrompt(); },
-  }, icon('github'));
+  }, githubMark(), el('span', { class: 'topbar-github-label' }, 'GitHub'), el('span', { class: 'topbar-github-star', 'aria-hidden': true }, icon('star')));
 }
 function starPromptBanner() {
   if (!shouldShowStarPrompt()) return null;
@@ -795,12 +803,15 @@ function accountQuotaView(a) {
   const rows = (q.usageRows || []).slice(0, 32), budgets = (q.budgets || []).slice(0, 32), refills = (q.refills || []).slice(0, 32);
   const stamp = (label, value, attrs = {}) => el('span', { class: 'quota-time', ...attrs }, label, value ? el('time', { datetime: value, title: value }, date(value)) : '—');
   const blocked = quotaRefreshBlockReason(a), hasData = rows.length > 0 || budgets.length > 0 || refills.length > 0;
-  const failed = q.status === 'error' || quotaRefreshErrors.has(a.id);
+  const quotaErr = quotaRefreshErrors.get(a.id);
+  const throttled = quotaErr?.code === 'QUOTA_REFRESH_THROTTLED';
+  const failed = q.status === 'error' || (Boolean(quotaErr) && !throttled);
   const observedAt = r => r.observedAt || r.updatedAt || q.usageUpdatedAt || q.updatedAt;
   const commonObservation = rows.length > 0 && rows.every(r => observedAt(r) === observedAt(rows[0]));
   const feedback = pending
     ? L('Updating usage…', '正在更新用量…')
-    : failed ? L('Update failed. ', '更新失敗。') + (hasData ? L('Showing previous values. ', '顯示上次數字。') : L('No usage data yet. ', '尚未取得用量。')) + (quotaRefreshErrors.get(a.id) || q.errorCode || 'QUOTA_ERROR')
+    : throttled ? quotaErr.message
+    : failed ? L('Update failed. ', '更新失敗。') + (hasData ? L('Showing previous values. ', '顯示上次數字。') : L('No usage data yet. ', '尚未取得用量。')) + (quotaErr?.message || q.errorCode || 'QUOTA_ERROR')
     : q.status === 'missing' ? hasData ? L('No new values returned. Showing previous values.', '未取得新數字，顯示上次數字。') : L('No usage data returned.', '未取得用量資料。')
     : hasData ? '' : L('No usage data yet.', '尚未取得用量。');
   return el('section', { class: 'account-quota', 'data-quota': a.id, 'aria-label': L('Provider usage', '供應商用量') },
@@ -837,7 +848,7 @@ async function refreshAccountQuota(account) {
   const epoch = S.epoch, returnFocus = document.activeElement?.dataset.action === 'refresh-quota', inDrawer = Boolean($('account-drawer')?.contains(document.activeElement));
   quotaRefreshErrors.delete(account.id); quotaPending.add(account.id); render();
   try { await api(`/accounts/${encodeURIComponent(account.id)}/quota`, { method: 'POST', data: {} }); if (S.epoch === epoch) await refresh(); }
-  catch (error) { if (S.epoch === epoch && S.authenticated) { quotaRefreshErrors.set(account.id, safeError(error)); await refresh(); } }
+  catch (error) { if (S.epoch === epoch && S.authenticated) { quotaRefreshErrors.set(account.id, { code: error?.code || '', message: safeError(error) }); await refresh(); } }
   finally {
     quotaPending.delete(account.id); render();
     if (returnFocus && S.epoch === epoch && S.authenticated && S.route === 'accounts' && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || (inDrawer && document.activeElement === $('account-drawer')) || document.activeElement?.dataset.action === 'refresh-quota')) {
@@ -850,15 +861,18 @@ async function refreshAccountQuota(account) {
 const subscriptionPending = new Set(), subscriptionRefreshErrors = new Map();
 const subscriptionTierLabel = tier => ({ free: L('Free', '免費'), plus: 'Google AI Plus', pro: 'Google AI Pro', ultra: 'Google AI Ultra', ultra_neon: L('Google AI Ultra · Neon tier', 'Google AI Ultra · Neon 層級') }[tier] || t('unknown'));
 function accountSubscriptionView(a) {
-  const s = a.subscription || {}, pending = subscriptionPending.has(a.id), failed = s.status === 'error' || subscriptionRefreshErrors.has(a.id);
+  const s = a.subscription || {}, pending = subscriptionPending.has(a.id);
+  const refreshErr = subscriptionRefreshErrors.get(a.id);
+  const throttled = refreshErr?.code === 'SUBSCRIPTION_REFRESH_THROTTLED';
+  const failed = s.status === 'error' || (Boolean(refreshErr) && !throttled);
   const known = s.source === 'official' && s.status === 'ok' && s.tier && s.tier !== 'unknown' && !failed;
   const hasPrevious = !known && s.source === 'official' && s.updatedAt && s.tier && s.tier !== 'unknown';
   const blocked = quotaRefreshBlockReason(a);
   return el('section', { class: 'account-subscription', 'data-subscription': a.id, 'aria-label': L('Subscription tier', '訂閱層級') },
     el('div', { class: 'subscription-summary' }, el('h3', { class: 'help', style: 'font-size:inherit;font-weight:inherit' }, L('Subscription', '訂閱')), badge(known ? subscriptionTierLabel(s.tier) : t('unknown'), known ? 'teal' : failed ? 'amber' : '', false, { 'data-subscription-tier': '' }),
-      btn(pending ? L('Checking…', '查詢中…') : L('Check subscription', '查詢訂閱'), () => refreshAccountSubscription(a), { class: 'compact quiet', 'data-action': 'refresh-subscription', 'data-id': a.id, disabled: pending || Boolean(blocked), title: blocked || L('Read-only GetUsageInfo tier; no generation or quota changes', '唯讀 GetUsageInfo 層級，不會生成或更改配額') })),
+      btn(pending ? L('Checking…', '查詢中…') : L('Check subscription', '查詢訂閱'), () => refreshAccountSubscription(a), { class: 'compact quiet', 'data-action': 'refresh-subscription', 'data-id': a.id, disabled: pending || Boolean(blocked), title: blocked || L('Read-only GetUserStatus tier; no generation or quota changes', '唯讀 GetUserStatus 層級，不會生成或更改配額') })),
     el('div', { class: 'subscription-meta help', role: 'status', 'aria-live': 'polite', 'data-subscription-feedback': '' },
-      pending ? L('Checking Google subscription tier…', '正在查詢 Google 訂閱層級…') : failed ? L('Current tier unknown — ', '目前層級未知 — ') + (subscriptionRefreshErrors.get(a.id) || s.errorCode || 'SUBSCRIPTION_FETCH_FAILED') : known ? L('Google GetUsageInfo access tier, not billing-owner proof.', 'Google GetUsageInfo 回報的權限層級，不代表付款人證明。') : L('Not checked or no recognized tier returned.', '未查詢或未回報可識別層級。'),
+      pending ? L('Checking Google subscription tier…', '正在查詢 Google 訂閱層級…') : throttled ? refreshErr.message : failed ? L('Current tier unknown — ', '目前層級未知 — ') + (refreshErr?.message || s.errorCode || 'SUBSCRIPTION_FETCH_FAILED') : known ? L('Google GetUserStatus access tier, not billing-owner proof.', 'Google GetUserStatus 回報的權限層級，不代表付款人證明。') : L('Not checked or no recognized tier returned.', '未查詢或未回報可識別層級。'),
       hasPrevious && el('span', {}, L('Last confirmed: ', '上次確認：') + subscriptionTierLabel(s.tier)),
       s.updatedAt && el('time', { datetime: s.updatedAt, title: s.updatedAt, 'data-subscription-observed': '' }, L('Last checked ', '上次查詢 ') + date(s.updatedAt))));
 }
@@ -868,7 +882,7 @@ async function refreshAccountSubscription(account) {
   const epoch = S.epoch, returnFocus = document.activeElement?.dataset.action === 'refresh-subscription', inDrawer = Boolean($('account-drawer')?.contains(document.activeElement));
   subscriptionRefreshErrors.delete(account.id); subscriptionPending.add(account.id); render();
   try { await api(`/accounts/${encodeURIComponent(account.id)}/subscription`, { method: 'POST', data: {} }); if (S.epoch === epoch) await refresh(); }
-  catch (error) { if (S.epoch === epoch && S.authenticated) { subscriptionRefreshErrors.set(account.id, safeError(error)); await refresh(); } }
+  catch (error) { if (S.epoch === epoch && S.authenticated) { subscriptionRefreshErrors.set(account.id, { code: error?.code || '', message: safeError(error) }); await refresh(); } }
   finally {
     subscriptionPending.delete(account.id); render();
     if (returnFocus && S.epoch === epoch && S.authenticated && S.route === 'accounts' && !$('action-dialog')?.open && (!document.activeElement || document.activeElement === document.body || (inDrawer && document.activeElement === $('account-drawer')) || document.activeElement?.dataset.action === 'refresh-subscription')) {
@@ -1068,7 +1082,8 @@ function accountAttentionReasons(a) {
   if (a.status === 'auth_error' || a.authenticationStatus === 'auth_error') reasons.push({ key: 'auth', label: L('Authentication error', '驗證失敗'), tone: 'rose' });
   else if (a.status === 'login_required' || a.authenticationStatus === 'login_required') reasons.push({ key: 'auth', label: L('Sign-in required', '需要重新登入'), tone: 'amber' });
   if (accountCoolingDown(a)) reasons.push({ key: 'cooldown', label: L('Routing cooldown', '路由冷卻中'), tone: 'amber' });
-  if (a.quota?.status === 'error' || quotaRefreshErrors.has(a.id)) reasons.push({ key: 'quota', label: L('Quota refresh failed', '額度更新失敗'), tone: 'amber' });
+  const hasQuotaError = a.quota?.status === 'error' || (quotaRefreshErrors.has(a.id) && quotaRefreshErrors.get(a.id)?.code !== 'QUOTA_REFRESH_THROTTLED');
+  if (hasQuotaError) reasons.push({ key: 'quota', label: L('Quota refresh failed', '額度更新失敗'), tone: 'amber' });
   const rejected = Object.values(a.modelStates || {}).filter(s => ['rejected', 'blocked'].includes(s.state)).length;
   if (rejected) reasons.push({ key: 'models', label: L(`${rejected} previous upstream rejection${rejected === 1 ? '' : 's'}`, `${rejected} 個過往上游拒絕紀錄`), tone: 'rose' });
   return reasons.map(reason => ({ ...reason, category: reason.key === 'quota' ? 'freshness' : reason.key === 'cooldown' ? 'pause' : 'action' }));
@@ -1101,7 +1116,7 @@ function dailyQuota(a) {
       el('strong', { class: 'daily-value number' }, pct !== null ? `${num(row.providerPercent)}%` : t('unknown'), el('small', {}, pct !== null ? L(' used', ' 已用') : '')),
       pct !== null && el('div', { class: 'daily-bar', 'aria-hidden': true }, el('span', { class: barTone || null, style: `width:${pct}%` })),
       row?.providerTimestamp && row.timestampMeaning === 'window_refresh' && el('small', { class: 'daily-window' }, L('Updates ', '額度更新 '), el('time', { datetime: row.providerTimestamp, title: L('Update time does not guarantee a full refill.', '額度更新時間唔代表一定補滿。') }, new Intl.DateTimeFormat(S.lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(row.providerTimestamp)))));
-  }), el('small', { class: 'daily-data-time', 'data-usage-observed-at': dataAt || '' }, quotaRefreshErrors.has(a.id) || q.status === 'error' ? rows.length ? L('Update failed · showing saved data', '更新失敗 · 顯示已儲存資料') : L('Update failed · no saved usage', '更新失敗 · 尚未有已儲存用量') : q.status === 'missing' && rows.length ? L('No newer usage · showing saved data', '未有新用量 · 顯示已儲存資料') : dataAt ? L('Data ', '資料 ') + date(dataAt) : L('No usage data yet', '尚未有用量資料')));
+  }), el('small', { class: 'daily-data-time', 'data-usage-observed-at': dataAt || '' }, ((quotaRefreshErrors.has(a.id) && quotaRefreshErrors.get(a.id)?.code !== 'QUOTA_REFRESH_THROTTLED') || q.status === 'error') ? rows.length ? L('Update failed · showing saved data', '更新失敗 · 顯示已儲存資料') : L('Update failed · no saved usage', '更新失敗 · 尚未有已儲存用量') : q.status === 'missing' && rows.length ? L('No newer usage · showing saved data', '未有新用量 · 顯示已儲存資料') : dataAt ? L('Data ', '資料 ') + date(dataAt) : L('No usage data yet', '尚未有用量資料')));
 }
 function relativeTime(value) {
   if (!value) return '—';

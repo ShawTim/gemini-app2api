@@ -2,6 +2,7 @@ import { createGeminiOAuthAuth } from './auth.js';
 import { createGeminiStreamHandler } from './stream.js';
 import { MODEL_SPECS } from '../../src/openai-contract.mjs';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
+import { fetchGoogleSubscription as defaultFetchGoogleSubscription } from '../../src/gateway/subscription-transport.mjs';
 import { decodeUsageInfo as defaultDecodeUsageInfo } from '../../src/gateway/quota.mjs';
 import { decodeSubscription as defaultDecodeSubscription } from '../../src/gateway/subscription.mjs';
 
@@ -84,6 +85,7 @@ export function createGeminiAppProvider({
   getCurrentTools,
   toToolDeclaration,
   auth,
+  fetchGoogleSubscription,
   fetchGoogleUsageInfo,
   decodeSubscription,
   ...streamDependencies
@@ -95,6 +97,7 @@ export function createGeminiAppProvider({
   const resolvedAuth =
     auth ||
     createGeminiOAuthAuth({
+      ...(fetchGoogleSubscription ? { fetchGoogleSubscription } : {}),
       ...(fetchGoogleUsageInfo ? { fetchGoogleUsageInfo } : {}),
       ...(decodeSubscription ? { decodeSubscription } : {}),
     });
@@ -123,6 +126,7 @@ export function createGeminiAppProvider({
 
 export function registerGeminiAppExtension(pi, dependencies = {}) {
   const fetchUsage = dependencies?.fetchGoogleUsageInfo || defaultFetchGoogleUsageInfo;
+  const fetchSub = dependencies?.fetchGoogleSubscription || (dependencies?.fetchGoogleUsageInfo ? null : defaultFetchGoogleSubscription);
   const decodeUsage = dependencies?.decodeUsageInfo || defaultDecodeUsageInfo;
   const decodeSub = dependencies?.decodeSubscription || defaultDecodeSubscription;
 
@@ -130,6 +134,7 @@ export function registerGeminiAppExtension(pi, dependencies = {}) {
     const {
       createProvider: _ignoredCreateProvider,
       auth,
+      fetchGoogleSubscription: _ignoredFetchSub,
       fetchGoogleUsageInfo: _ignoredFetchUsage,
       decodeUsageInfo: _ignoredDecodeUsage,
       decodeSubscription: _ignoredDecodeSub,
@@ -138,6 +143,7 @@ export function registerGeminiAppExtension(pi, dependencies = {}) {
     const resolvedAuth =
       auth ||
       createGeminiOAuthAuth({
+        ...(dependencies?.fetchGoogleSubscription ? { fetchGoogleSubscription: dependencies.fetchGoogleSubscription } : {}),
         ...(dependencies?.fetchGoogleUsageInfo ? { fetchGoogleUsageInfo: dependencies.fetchGoogleUsageInfo } : {}),
         ...(dependencies?.decodeSubscription ? { decodeSubscription: dependencies.decodeSubscription } : {}),
       });
@@ -191,11 +197,16 @@ export function registerGeminiAppExtension(pi, dependencies = {}) {
       }
       try {
         ctx.ui?.notify?.('Fetching Gemini quota information...', 'info');
-        const { payload } = await fetchUsage(token, ctx?.signal ? { signal: ctx.signal } : undefined);
-        const decoded = decodeUsage(payload);
+        const opts = ctx?.signal ? { signal: ctx.signal } : undefined;
+        const [usageRes, subRes] = await Promise.all([
+          fetchUsage(token, opts),
+          fetchSub ? fetchSub(token, opts).catch(() => null) : Promise.resolve(null),
+        ]);
+        const decoded = decodeUsage(usageRes.payload);
         let subscription = null;
         try {
-          subscription = decodeSub(payload);
+          const subPayload = fetchSub ? subRes?.payload : usageRes.payload;
+          if (subPayload) subscription = decodeSub(subPayload);
         } catch {}
         const formatted = formatQuotaDisplay(decoded, subscription);
         ctx.ui?.notify?.(formatted, 'info');
