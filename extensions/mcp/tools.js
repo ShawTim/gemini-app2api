@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { NativeDirectProvider } from '../../src/native-provider.mjs';
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
+import { automaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
+import { validateStructuredOutputText } from '../../src/gateway/structured-output.mjs';
 import { MODEL_SPECS, NATIVE_MODELS } from '../../src/openai-contract.mjs';
 import { decodeImageBytes, decodeImageDataUrl, MAX_IMAGE_BYTES } from '../../src/image-input.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
@@ -229,7 +231,12 @@ export function createMcpToolHandlers({
   async function callViaGateway(gateway, payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
     const headers = { 'Content-Type': 'application/json' };
     if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
-    const wantStream = typeof onTextDelta === 'function' && !payload.native_search;
+    const hasTools = Array.isArray(payload.tools) && payload.tools.length > 0;
+    const wantStream =
+      typeof onTextDelta === 'function' &&
+      !payload.native_search &&
+      !payload.response_format &&
+      !hasTools;
     if (wantStream) headers.Accept = 'text/event-stream, application/json';
 
     const scoped = withOptionalTimeout(signal, reqTimeoutMs);
@@ -273,8 +280,12 @@ export function createMcpToolHandlers({
           });
         }
         const msg = data?.choices?.[0]?.message;
-        const content = typeof msg?.content === 'string' ? msg.content : '';
+        const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
+        let content = typeof msg?.content === 'string' ? msg.content : '';
         const incomplete = data?.incomplete === true || data?.status === 'incomplete' || Boolean(data?.error);
+        if (!incomplete && payload.response_format && toolCalls.length === 0) {
+          content = validateStructuredOutputText(content, payload.response_format);
+        }
         let streamed = false;
         if (wantStream && !incomplete && content) {
           onTextDelta(content);
@@ -282,6 +293,7 @@ export function createMcpToolHandlers({
         }
         return {
           content,
+          toolCalls,
           model: data?.model || payload.model,
           annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
           usage: data?.usage ?? null,
@@ -394,6 +406,7 @@ export function createMcpToolHandlers({
       }
       return {
         content,
+        toolCalls: [],
         model,
         annotations,
         usage,
@@ -417,10 +430,15 @@ export function createMcpToolHandlers({
     };
     if (effectiveModel === 'gemini-auto') delete effectivePayload.thinking_level;
     const effectiveTimeout = reqTimeoutMs ?? timeoutMs;
-    const wantStream = typeof onTextDelta === 'function' && !effectivePayload.native_search;
+    const hasTools = Array.isArray(effectivePayload.tools) && effectivePayload.tools.length > 0;
+    const wantStream =
+      typeof onTextDelta === 'function' &&
+      !effectivePayload.native_search &&
+      !effectivePayload.response_format &&
+      !hasTools;
     let publishedToCallback = false;
 
-    const invoke = async (accessToken) => {
+    const invoke = async (accessToken, { recoveryCode, recoveryReason } = {}) => {
       let textBuffer = '';
       let pendingSurrogate = '';
       let committed = false;
@@ -489,10 +507,12 @@ export function createMcpToolHandlers({
               }),
             }
           : {}),
+        ...(recoveryCode ? { recoveryCode, recoveryReason } : {}),
         signal,
         timeoutMs: effectiveTimeout,
       });
       const content = typeof turnResult?.content === 'string' ? turnResult.content : '';
+      const toolCalls = Array.isArray(turnResult?.calls) ? turnResult.calls : [];
       const incomplete = Boolean(turnResult?.incomplete);
       if (wantStream && !incomplete) {
         if (textBuffer.length > 0) {
@@ -513,6 +533,7 @@ export function createMcpToolHandlers({
       }
       return {
         content,
+        toolCalls,
         model: turnResult?.model || effectiveModel,
         annotations: Array.isArray(turnResult?.annotations) ? turnResult.annotations : [],
         usage: turnResult?.usage ?? null,
@@ -522,8 +543,26 @@ export function createMcpToolHandlers({
       };
     };
 
+    const canRecoverProtocol = hasTools || Boolean(effectivePayload.response_format);
+    const invokeWithRecovery = async (accessToken) => {
+      try {
+        return await invoke(accessToken);
+      } catch (err) {
+        const kind = canRecoverProtocol && !publishedToCallback && !signal?.aborted
+          ? automaticRecoveryKind(err, effectiveModel, { allowAutoModel: effectiveModel === 'gemini-auto' })
+          : null;
+        if (kind === 'structured_output' || kind === 'tool_protocol') {
+          return await invoke(accessToken, {
+            recoveryCode: err.code,
+            recoveryReason: err.toolProtocolReason ?? err.nativeEvidence?.toolProtocolReason ?? null,
+          });
+        }
+        throw err;
+      }
+    };
+
     try {
-      return await invoke(cred.access);
+      return await invokeWithRecovery(cred.access);
     } catch (err) {
       if (
         !publishedToCallback &&
@@ -539,7 +578,7 @@ export function createMcpToolHandlers({
           forceRefresh: true,
           ...(cred.accountEpoch !== undefined ? { expectedAccountEpoch: cred.accountEpoch } : {}),
         });
-        return await invoke(refreshed.access);
+        return await invokeWithRecovery(refreshed.access);
       }
       throw err;
     }
@@ -551,12 +590,17 @@ export function createMcpToolHandlers({
     return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
   }
 
-  async function runAskGemini(args, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
+  async function runAskGemini(args, { signal, onTextDelta, timeoutMs: reqTimeoutMs, responseFormat } = {}) {
     const gateway = resolveGatewayConfig(env);
     const payload = normalizeAskGeminiArgs(args, {
       allowedModels: gateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
       loadImages: loadLocalOrInlineImageParts,
     });
+    if (responseFormat) payload.response_format = responseFormat;
+    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
+  }
+
+  async function runChatTurn(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
     return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
   }
 
@@ -717,10 +761,12 @@ export function createMcpToolHandlers({
     tools,
     callTool,
     runAskGemini,
+    runChatTurn,
     runGeminiSearch,
     handleAskGemini,
     handleGeminiSearch,
     handleGeminiQuota,
+    loadLocalOrInlineImageParts,
     formatError: (err) => formatFriendlyMcpError(err, loginCommand),
   };
 }

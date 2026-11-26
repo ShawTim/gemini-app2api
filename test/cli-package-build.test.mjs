@@ -13,6 +13,7 @@ import { verifyCliPackageStaging } from '../scripts/check-cli-package.mjs';
 test('traceCliRuntimeClosure resolves zero-dependency ESM closure with no child_process or state.mjs', () => {
   const files = traceCliRuntimeClosure();
   assert.ok(files.includes('extensions/cli/cli.js'));
+  assert.ok(files.includes('extensions/cli/readonly-tools.js'));
   assert.ok(files.includes('extensions/mcp/tools.js'));
   assert.ok(files.includes('extensions/mcp/auth.js'));
   assert.ok(files.includes('src/native-provider.mjs'));

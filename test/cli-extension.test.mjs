@@ -819,3 +819,493 @@ test('CLI rejects missing value before flags, hard-linked output, invalid models
     assert.match(cap.err, /Interrupted/);
   }
 });
+
+test('ask supports -f/--file attachments and --schema validated structured outputs (inline & file)', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-schema-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const codeFile = path.join(dir, 'sample.js');
+  fs.writeFileSync(codeFile, 'export const answer = 42;\n');
+  const binFile = path.join(dir, 'bin.dat');
+  fs.writeFileSync(binFile, Buffer.from([0x00, 0x01, 0x02, 0x03]));
+  const schemaFile = path.join(dir, 'audit.schema.json');
+  fs.writeFileSync(
+    schemaFile,
+    JSON.stringify({
+      type: 'object',
+      additionalProperties: false,
+      required: ['verdict', 'score'],
+      properties: {
+        verdict: { type: 'string', enum: ['pass', 'fail'] },
+        score: { type: 'integer' },
+      },
+    }),
+  );
+
+  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
+  let seenReq = null;
+  let gatewayReply = '{"verdict":"pass","score":95}';
+  const handlers = createMcpToolHandlers({
+    authManager: createCliAuthManager({ env }),
+    env,
+    clientLabel: CLI_AUTH_OWNER,
+    loginCommand: 'npx gemini-app-cli login',
+    fetchImpl: async (_url, init) => {
+      seenReq = JSON.parse(init.body);
+      return makeJsonResponse({
+        model: 'gemini-neon',
+        choices: [{ message: { role: 'assistant', content: gatewayReply } }],
+        usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+      });
+    },
+  });
+
+  // 1. -f file + --schema file in plain text mode prints validated JSON (no streaming)
+  {
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '-f', codeFile, '--schema', schemaFile, 'Audit this'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    assert.equal(seenReq.stream, false);
+    assert.equal(seenReq.response_format.type, 'json_schema');
+    assert.match(seenReq.messages[0].content, /BEGIN ATTACHMENT_/);
+    assert.match(seenReq.messages[0].content, /export const answer = 42;/);
+    assert.deepEqual(JSON.parse(cap.out), { verdict: 'pass', score: 95 });
+  }
+
+  // 2. Inline --schema + --json returns parsed object alongside content
+  {
+    const cap = makeCapture();
+    const inlineSchema = JSON.stringify({
+      type: 'object',
+      additionalProperties: false,
+      required: ['verdict', 'score'],
+      properties: { verdict: { type: 'string' }, score: { type: 'integer' } },
+    });
+    const code = await runGeminiCli(['ask', '--schema', inlineSchema, '--json', 'Check'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    const out = JSON.parse(cap.out);
+    assert.equal(out.ok, true);
+    assert.deepEqual(out.parsed, { verdict: 'pass', score: 95 });
+  }
+
+  // 3. Schema mismatch from gateway fails closed with exit 1
+  {
+    gatewayReply = '{"verdict":"maybe","score":"bad"}';
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '--schema', schemaFile, 'Audit'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 1);
+    assert.equal(cap.out, '');
+    assert.match(cap.err, /STRUCTURED_OUTPUT_SCHEMA_MISMATCH|SCHEMA/i);
+  }
+
+  // 4. Invalid --schema JSON exits 2 before making any network call
+  {
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '--schema', '{broken', 'Audit'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 2);
+    assert.match(cap.err, /Invalid JSON in --schema/);
+  }
+
+  // 5. Binary -f file is rejected
+  {
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '-f', binFile, 'Inspect'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 1);
+    assert.match(cap.err, /binary/i);
+  }
+});
+
+test('read-only workspace harness (--tools readonly) executes multi-turn ls/find/grep/read, enforces sandbox & secret denylist, and supports --schema', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-harness-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-outside-'));
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'auth.mjs'), 'export function refreshToken() {\n  return "ok";\n}\n');
+  fs.writeFileSync(path.join(dir, '.env'), 'SECRET_TOKEN=super-secret-value\n');
+  fs.writeFileSync(path.join(dir, '.env.example'), 'SECRET_TOKEN=\n');
+  fs.writeFileSync(path.join(dir, '.git', 'config'), '[core]\n');
+  fs.writeFileSync(path.join(outsideDir, 'escape.txt'), 'outside-secret\n');
+  fs.symlinkSync(path.join(outsideDir, 'escape.txt'), path.join(dir, 'src', 'escape-link.txt'));
+
+  // Reject unsafe non-readonly tool names and --cwd/--max-turns without --tools
+  for (const badArgs of [
+    ['ask', '--tools', 'bash', 'hi'],
+    ['ask', '--tools', 'read,write', 'hi'],
+    ['ask', '--cwd', dir, 'hi'],
+    ['ask', '--max-turns', '5', 'hi'],
+    ['ask', '--tools', 'readonly', '--max-turns', '0', 'hi'],
+    ['ask', '--tools', 'readonly', '--max-turns', '99', 'hi'],
+  ]) {
+    const cap = makeCapture();
+    const code = await runGeminiCli(badArgs, {
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+    });
+    assert.equal(code, 2, `Expected exit 2 for ${JSON.stringify(badArgs)}, got ${code}`);
+  }
+
+  // Multi-turn gateway harness loop exercising ls, find, grep, read + symlink/escape/.env denial + final --schema
+  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
+  const requests = [];
+  const handlers = createMcpToolHandlers({
+    authManager: createCliAuthManager({ env }),
+    env,
+    clientLabel: CLI_AUTH_OWNER,
+    loginCommand: 'npx gemini-app-cli login',
+    fetchImpl: async (_url, init) => {
+      const req = JSON.parse(init.body);
+      requests.push(req);
+      if (requests.length === 1) {
+        return makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                { id: 'c1', type: 'function', function: { name: 'ls', arguments: '{"path":"."}' } },
+                { id: 'c2', type: 'function', function: { name: 'find', arguments: '{"pattern":"*.mjs"}' } },
+                { id: 'c3', type: 'function', function: { name: 'grep', arguments: '{"pattern":"refreshToken"}' } },
+              ],
+            },
+          }],
+          usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 },
+        });
+      }
+      if (requests.length === 2) {
+        return makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                { id: 'c4', type: 'function', function: { name: 'read', arguments: '{"path":"src/auth.mjs"}' } },
+                { id: 'c5', type: 'function', function: { name: 'read', arguments: '{"path":".env"}' } },
+                { id: 'c6', type: 'function', function: { name: 'read', arguments: '{"path":"src/escape-link.txt"}' } },
+                { id: 'c7', type: 'function', function: { name: 'read', arguments: '{"path":"../escape.txt"}' } },
+              ],
+            },
+          }],
+          usage: { prompt_tokens: 150, completion_tokens: 40, total_tokens: 190 },
+        });
+      }
+      return makeJsonResponse({
+        model: 'gemini-neon',
+        choices: [{
+          message: {
+            role: 'assistant',
+            content: JSON.stringify({ file: 'src/auth.mjs', functionName: 'refreshToken' }),
+          },
+        }],
+        usage: { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220 },
+      });
+    },
+  });
+
+  const schema = JSON.stringify({
+    type: 'object',
+    additionalProperties: false,
+    required: ['file', 'functionName'],
+    properties: { file: { type: 'string' }, functionName: { type: 'string' } },
+  });
+
+  const cap = makeCapture();
+  const code = await runGeminiCli(
+    ['ask', '--tools', 'readonly', '--cwd', dir, '--max-turns', '5', '--verbose', '--schema', schema, '--json', 'Find token refresh'],
+    {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    },
+  );
+  assert.equal(code, 0, cap.err);
+  assert.equal(requests.length, 3);
+  assert.match(cap.err, /\[turn 1\] ls\(\.\)/);
+  assert.match(cap.err, /\[turn 2\] read\(src\/auth\.mjs\)/);
+
+  const out = JSON.parse(cap.out);
+  assert.equal(out.ok, true);
+  assert.equal(out.turns, 3);
+  assert.equal(out.toolCalls.length, 7);
+  assert.deepEqual(out.parsed, { file: 'src/auth.mjs', functionName: 'refreshToken' });
+  assert.equal(out.usage.total_tokens, 540);
+
+  // Verify tool outputs sent in turn 2 and turn 3 enforced security boundaries
+  const turn2Messages = requests[1].messages;
+  const lsOut = turn2Messages.find((m) => m.tool_call_id === 'c1')?.content || '';
+  assert.match(lsOut, /src\//);
+  assert.match(lsOut, /\.env\.example/);
+  assert.doesNotMatch(lsOut, /(?:^|\n)\.env(?:\n|$)/);
+  assert.doesNotMatch(lsOut, /\.git/);
+
+  const turn3Messages = requests[2].messages;
+  assert.match(turn3Messages.find((m) => m.tool_call_id === 'c4')?.content || '', /L1: export function refreshToken/);
+  assert.match(turn3Messages.find((m) => m.tool_call_id === 'c5')?.content || '', /Access denied for protected secret path/);
+  assert.match(turn3Messages.find((m) => m.tool_call_id === 'c6')?.content || '', /Refusing symlink path/);
+  assert.match(turn3Messages.find((m) => m.tool_call_id === 'c7')?.content || '', /escapes workspace root/);
+
+  // Max turns exceeded fails cleanly with exit 1
+  {
+    const loopHandlers = createMcpToolHandlers({
+      authManager: createCliAuthManager({ env }),
+      env,
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      fetchImpl: async () =>
+        makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [{ id: 'loop1', type: 'function', function: { name: 'ls', arguments: '{}' } }],
+            },
+          }],
+        }),
+    });
+    const loopCap = makeCapture();
+    const loopCode = await runGeminiCli(
+      ['ask', '--tools', 'ls', '--cwd', dir, '--max-turns', '2', '--json', 'Loop forever'],
+      {
+        env,
+        stdin: makeStdin('', { isTTY: true }),
+        stdout: loopCap.stdout,
+        stderr: loopCap.stderr,
+        toolHandlers: loopHandlers,
+      },
+    );
+    assert.equal(loopCode, 1);
+    const errObj = JSON.parse(loopCap.err);
+    assert.equal(errObj.ok, false);
+    assert.equal(errObj.code, 'MAX_TURNS_EXCEEDED');
+    assert.equal(errObj.turns, 2);
+    assert.equal(errObj.toolCalls.length, 1);
+  }
+});
+
+test('read-only tools harden glob/grep termination, case-folded & cwd-root secrets, platform aliases, tool-call batch IDs, strict UTF-8 -f, and direct --schema recovery', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-sec-'));
+  const credDir = path.join(dir, '.gemini-app2api-cli');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  fs.mkdirSync(credDir, { recursive: true });
+  fs.writeFileSync(path.join(credDir, 'auth.json'), '{"refresh":"secret"}\n');
+  fs.writeFileSync(path.join(dir, 'a'.repeat(80) + '.txt'), 'hello\n');
+  const badUtf8 = path.join(dir, 'bad-utf8.txt');
+  fs.writeFileSync(badUtf8, Buffer.from([0x61, 0xff, 0xfe, 0x62]));
+
+  // 1. Non-NUL invalid UTF-8 -f file is rejected
+  {
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '-f', badUtf8, 'Inspect'], {
+      env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' },
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+    });
+    assert.equal(code, 1);
+    assert.match(cap.err, /not valid UTF-8/i);
+  }
+
+  // 2. When --cwd IS ~/.gemini-app2api-cli, reading auth.json is still denied; case-folded .ENV / NTFS / trailing-dot / regex grep / evil glob all safe
+  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
+  {
+    const seen = [];
+    const handlers = createMcpToolHandlers({
+      authManager: createCliAuthManager({ env }),
+      env,
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      fetchImpl: async (_url, init) => {
+        const req = JSON.parse(init.body);
+        seen.push(req);
+        if (seen.length === 1) {
+          return makeJsonResponse({
+            model: 'gemini-neon',
+            choices: [{
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  { id: '', type: 'function', function: { name: 'read', arguments: '{"path":"auth.json"}' } },
+                  { id: 'dup', type: 'function', function: { name: 'read', arguments: '{"path":".ENV"}' } },
+                  { id: 'dup', type: 'function', function: { name: 'read', arguments: '{"path":".env."}' } },
+                  { id: 'ntfs', type: 'function', function: { name: 'read', arguments: '{"path":"foo:stream"}' } },
+                  { id: 're', type: 'function', function: { name: 'grep', arguments: '{"pattern":"(a+)+$","regex":true}' } },
+                ],
+              },
+            }],
+          });
+        }
+        return makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{ message: { role: 'assistant', content: 'all blocked' } }],
+        });
+      },
+    });
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '--tools', 'readonly', '--cwd', credDir, '--json', 'Probe'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    const out = JSON.parse(cap.out);
+    // All 5 normalized IDs are non-empty and unique across assistant.tool_calls and role:tool
+    const assistantCalls = seen[1].messages.find((m) => m.role === 'assistant').tool_calls;
+    const toolMsgs = seen[1].messages.filter((m) => m.role === 'tool');
+    assert.equal(assistantCalls.length, 5);
+    assert.equal(new Set(assistantCalls.map((c) => c.id)).size, 5);
+    assert.deepEqual(assistantCalls.map((c) => c.id), toolMsgs.map((m) => m.tool_call_id));
+    assert.match(toolMsgs[0].content, /Access denied for protected secret path/);
+    assert.match(toolMsgs[1].content, /Access denied for protected secret path/);
+    assert.match(toolMsgs[2].content, /Refusing unsafe path segment/);
+    assert.match(toolMsgs[3].content, /Refusing unsafe path segment/);
+    assert.match(toolMsgs[4].content, /Regex search is disabled/);
+    assert.equal(out.toolCalls.length, 5);
+  }
+
+  // 3. Linear-time glob handles multi-wildcard pathological pattern quickly without backtracking hang
+  {
+    const seen = [];
+    const handlers = createMcpToolHandlers({
+      authManager: createCliAuthManager({ env }),
+      env,
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      fetchImpl: async (_url, init) => {
+        seen.push(JSON.parse(init.body));
+        if (seen.length === 1) {
+          return makeJsonResponse({
+            model: 'gemini-neon',
+            choices: [{
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  { id: 'g1', type: 'function', function: { name: 'find', arguments: '{"pattern":"*a*a*a*a*a*a*a*a*a*a*b"}' } },
+                ],
+              },
+            }],
+          });
+        }
+        return makeJsonResponse({
+          model: 'gemini-neon',
+          choices: [{ message: { role: 'assistant', content: 'done' } }],
+        });
+      },
+    });
+    const t0 = Date.now();
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '--tools', 'find', '--cwd', dir, 'Find'], {
+      env,
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    assert.ok(Date.now() - t0 < 2000, 'Linear glob must finish fast without backtracking');
+    assert.equal(seen[1].messages.find((m) => m.tool_call_id === 'g1')?.content, '(no matching files)');
+  }
+
+  // 4. Direct HTTP/2 --schema performs 1x automatic structured_output recovery on invalid first response
+  {
+    const makeNativeFrame = (text, id = 'resp-so-1') => {
+      const str = (n, value) => m(n, Buffer.from(value));
+      const inner = [
+        m(1, Buffer.concat([str(1, id), m(2, str(1, text))])),
+        v(9, 1),
+        str(30, 'Used 4 Neon High model'),
+        v(41, 3),
+        v(42, 2),
+      ];
+      return m(1003, m(1, Buffer.concat(inner)));
+    };
+    let attempts = 0;
+    const handlers = createMcpToolHandlers({
+      authManager: {
+        getValidCredential: async () => ({
+          type: 'oauth',
+          refresh: 'r-so',
+          access: 'tok-so',
+          expires: Date.now() + 600_000,
+          subscriptionTier: 'pro',
+        }),
+      },
+      env: {},
+      clientLabel: CLI_AUTH_OWNER,
+      loginCommand: 'npx gemini-app-cli login',
+      openTurn: () => {
+        attempts += 1;
+        const reply = attempts === 1 ? 'Not valid json at all' : '{"ok":true}';
+        return {
+          cancel() {},
+          getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 0, ended: true }),
+          events: (async function* () {
+            yield { type: 'frame', bytes: makeNativeFrame(reply, `resp-so-${attempts}`) };
+            yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+          })(),
+        };
+      },
+    });
+    const schema = JSON.stringify({
+      type: 'object',
+      additionalProperties: false,
+      required: ['ok'],
+      properties: { ok: { type: 'boolean' } },
+    });
+    const cap = makeCapture();
+    const code = await runGeminiCli(['ask', '--schema', schema, 'Return ok'], {
+      env: {},
+      stdin: makeStdin('', { isTTY: true }),
+      stdout: cap.stdout,
+      stderr: cap.stderr,
+      toolHandlers: handlers,
+    });
+    assert.equal(code, 0, cap.err);
+    assert.equal(attempts, 2);
+    assert.deepEqual(JSON.parse(cap.out), { ok: true });
+  }
+});

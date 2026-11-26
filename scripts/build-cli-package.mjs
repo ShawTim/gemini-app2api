@@ -16,6 +16,7 @@ export const CLI_BUILD_MARKER = '.cli-package-build-marker';
 
 export const ALLOWED_CLI_RUNTIME_FILES = Object.freeze([
   'extensions/cli/cli.js',
+  'extensions/cli/readonly-tools.js',
   'extensions/mcp/tools.js',
   'extensions/mcp/auth.js',
   'extensions/pi/provider.js',
