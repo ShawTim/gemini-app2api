@@ -1,10 +1,27 @@
 import { MODEL_MODES, NATIVE_MODELS } from "../openai-contract.mjs";
 import { safeAccountError } from "./native-evidence.mjs";
+import { safeSubscription } from "./subscription.mjs";
 export { NATIVE_MODELS as ACCOUNT_MODELS };
 export const hasHydrogenAttribution = (value) =>
   typeof value === "string" && /\bhydrogen\b/i.test(value);
 export const hasNeonAttribution = (value) =>
   typeof value === "string" && /\bneon\b/i.test(value);
+export function isConfirmedFreeSubscription(account) {
+  const sub = safeSubscription(account?.subscription);
+  return (
+    sub.source === "official" &&
+    sub.rpc === "GetUserStatus" &&
+    sub.status === "ok" &&
+    sub.tier === "free"
+  );
+}
+export function modelRoutingAllowed(account, model) {
+  if (model === "gemini-neon" && isConfirmedFreeSubscription(account)) {
+    const state = account?.modelStates?.[model] ?? modelState(account, model);
+    return state?.state === "verified";
+  }
+  return true;
+}
 const requiresAttribution = (model) =>
   model === "gemini-hydrogen" || model === "gemini-neon";
 const hasExpectedAttribution = (model, value) =>
@@ -33,19 +50,35 @@ export function isProviderRejection(error) {
 }
 export function modelState(account, model) {
   const value = account.providerStates?.[model];
+  const prior = safeAccountError(account.lastError);
   if (value?.state === "unverified") return unchecked();
   if (
     value?.state === "verified" &&
     time(value.checkedAt) &&
     value.mode === MODEL_MODES[model] &&
     (!requiresAttribution(model) || value.attributionVerified === true)
-  )
+  ) {
+    if (
+      prior?.code === "MODEL_DOWNGRADE_REJECTED" &&
+      prior.model === model &&
+      time(prior.at) &&
+      prior.at >= value.checkedAt
+    ) {
+      return unchecked();
+    }
+    if (model === "gemini-neon" && isConfirmedFreeSubscription(account)) {
+      const subAt = Date.parse(account.subscription?.updatedAt || "");
+      if (!Number.isFinite(subAt) || subAt >= value.checkedAt) {
+        return unchecked();
+      }
+    }
     return {
       state: "verified",
       checkedAt: value.checkedAt,
       mode: value.mode,
       errorCode: null,
     };
+  }
   if (
     value?.state === "rejected" &&
     time(value.checkedAt) &&
@@ -59,7 +92,6 @@ export function modelState(account, model) {
       errorCode: "NATIVE_PRECONDITION_REQUIRED",
     };
   // Migrate prior observed failures without requesting Google or pretending they succeeded.
-  const prior = safeAccountError(account.lastError);
   if (
     prior &&
     (!prior.model || prior.model === model) &&

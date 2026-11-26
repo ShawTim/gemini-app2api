@@ -75,3 +75,31 @@ test('unrecognized Google subscription enum remains unknown rather than guessed 
     expect(f.seen).toHaveLength(0);
   } finally { await f.close(); }
 });
+
+test('confirmed Free subscription clears stale pre-Free Neon access badge on card and drawer while keeping Hydrogen', async ({ page }) => {
+  const preFreeAt = Date.parse('2026-10-25T12:00:00.000Z');
+  const f = await fixture({ adminPassword: '', subscriptionFetch: async () => ({ payload: snapshot(1), observedAt: '2026-10-28T12:00:00.000Z' }) });
+  f.store.data.accounts[0].providerStates = {
+    'gemini-neon': { state: 'verified', checkedAt: preFreeAt, mode: 3, attributionVerified: true },
+    'gemini-hydrogen': { state: 'verified', checkedAt: preFreeAt, mode: 1, attributionVerified: true },
+  };
+  f.store.save();
+  try {
+    await page.goto(f.base + '/admin/#accounts');
+    const card = page.locator('[data-account-card="acc-0"]');
+    await expect(card.locator('[data-model-chip="gemini-neon"]')).toHaveClass(/ok/);
+    await card.locator('[data-action="open-drawer"]').click();
+    const subRow = page.locator('#account-drawer [data-subscription="acc-0"]');
+    await subRow.locator('[data-action="refresh-subscription"]').click();
+    await expect(subRow.locator('[data-subscription-tier]')).toHaveText('Free');
+    const neonRow = page.locator('#account-drawer [data-provider-model="gemini-neon"]');
+    await expect(neonRow).toHaveAttribute('data-provider-state', 'unverified');
+    await expect(neonRow).toHaveAttribute('data-plan-excluded', 'true');
+    await expect(neonRow).toContainText('Free plan · not routed');
+    await expect(page.locator('#account-drawer [data-provider-model="gemini-hydrogen"]')).toHaveAttribute('data-provider-state', 'verified');
+    await page.keyboard.press('Escape');
+    await expect(card.locator('[data-model-chip="gemini-neon"]')).toHaveClass(/unavailable/);
+    await expect(card.locator('[data-model-chip="gemini-neon"]')).not.toHaveClass(/\bok\b/);
+    await expect(card.locator('[data-model-chip="gemini-hydrogen"]')).toHaveClass(/ok/);
+  } finally { await f.close(); }
+});

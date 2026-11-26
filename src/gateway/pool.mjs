@@ -4,7 +4,7 @@ import { normalizeRoutingAccountIds } from './routing-policy.mjs';
 import { isExplicitQuotaFailure } from './quota-failover.mjs';
 import { isVerifiedEmptyResponse } from './output-recovery.mjs';
 import { TOOL_ERRORS, automaticRecoveryKind } from './automatic-recovery.mjs';
-import { ACCOUNT_MODELS, isProviderRejection } from "./provider-state.mjs";
+import { ACCOUNT_MODELS, isProviderRejection, modelRoutingAllowed } from "./provider-state.mjs";
 import { canonicalModel } from "../openai-contract.mjs";
 import { ModelTelemetry } from "./model-telemetry.mjs";
 const keyOf = (owner, id) => crypto.createHash("sha256").update(owner + "\0" + id).digest("hex");
@@ -148,19 +148,23 @@ export class AccountPool {
   available(model = "gemini-neon") {
     model = canonicalModel(model);
     if (!ACCOUNT_MODELS.includes(model)) return [];
-    return this.accounts.list().filter(a => this.routingAllowed(a.id) && a.enabled && a.status === "ready" && this.stats(a.id).inFlight < 2);
+    return this.accounts.list().filter(a => this.routingAllowed(a.id) && a.enabled && a.status === "ready" && this.stats(a.id).inFlight < 2 && modelRoutingAllowed(a, model));
   }
   snapshotAccounts() {
     return this.accounts.list().map(a => {
       const stat = this.stats(a.id);
       // Historical provider rejections remain evidence, never an admission block.
       const states = Object.fromEntries(ACCOUNT_MODELS.map(model => [model, a.modelStates?.[model] ?? { state: "unverified", checkedAt: null, mode: null, errorCode: null }]));
-      const eligible = this.routingAllowed(a.id) && a.enabled && a.status === "ready" && stat.inFlight < 2;
+      const baseEligible = this.routingAllowed(a.id) && a.enabled && a.status === "ready" && stat.inFlight < 2;
+      const byModel = Object.fromEntries(ACCOUNT_MODELS.map(model => [model, baseEligible && modelRoutingAllowed(a, model)]));
+      const planExcludedModels = ACCOUNT_MODELS.filter(model => !modelRoutingAllowed(a, model));
+      const eligible = ACCOUNT_MODELS.some(model => byModel[model]);
       return {
         ...a, ...stat,
         routingAllowed: this.routingAllowed(a.id),
         routingExclusionReason: this.routingAllowed(a.id) ? null : 'DEPLOYMENT_ACCOUNT_ALLOWLIST',
-        routingEligibilityByModel: Object.fromEntries(ACCOUNT_MODELS.map(model => [model, eligible])),
+        routingEligibilityByModel: byModel,
+        planExcludedModels,
         modelStates: states, modelTelemetry: this.#telemetry.account(a.id), routingEligible: eligible,
       };
     });

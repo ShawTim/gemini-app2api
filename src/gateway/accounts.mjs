@@ -199,6 +199,15 @@ export class Accounts {
         ...account.providerStates,
         [error.model]: rejection,
       };
+    else if (
+      error.code === "MODEL_DOWNGRADE_REJECTED" &&
+      error.model &&
+      account.providerStates?.[error.model]?.state === "verified"
+    )
+      account.providerStates = {
+        ...account.providerStates,
+        [error.model]: { state: "unverified" },
+      };
     try {
       this.store.save();
     } catch (failure) {

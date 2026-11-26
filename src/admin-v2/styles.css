@@ -1173,6 +1173,15 @@ button.terms-help {
   color: var(--rose);
 }
 .m-chip.rejected i { background: var(--rose); }
+.m-chip.unavailable {
+  opacity: 0.56;
+  border-style: dashed;
+  text-decoration: line-through;
+}
+.m-chip.unavailable i {
+  background: transparent;
+  border: 1px solid var(--subtle);
+}
 
 .enabled-switch {
   position: relative;

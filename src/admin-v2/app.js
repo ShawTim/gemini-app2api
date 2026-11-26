@@ -1059,6 +1059,8 @@ async function testAccountModel(a, model) {
     if (target && !target.disabled) { target.focus({ preventScroll: true }); if (inDrawer) ensureVisibleInDrawer(target); }
   }
 }
+const modelExcludedByPlan = (a, model) =>
+  Array.isArray(a.planExcludedModels) && a.planExcludedModels.includes(model);
 function modelStateLabel(state) {
   return ({ unverified: L('Not verified', '未驗證'), verified: L('Last verified', '曾成功驗證'), rejected: L('Previous upstream rejection', '曾被上游拒絕'), blocked: L('Previous account rejection (historical)', '過往帳戶拒絕紀錄') })[state] || L('Not verified', '未驗證');
 }
@@ -1067,11 +1069,12 @@ function accountModelStates(a) {
   const models = entries.length ? entries : (S.overview?.models || []).map(m => [m, { state: 'unverified' }]);
   return el('div', { class: 'compact-models', 'data-account-model-states': a.id }, models.map(([model, state]) => {
     const currentState = state?.state || 'unverified';
+    const planExcluded = currentState !== 'verified' && modelExcludedByPlan(a, model);
     const result = modelTests.get(`${a.id}:${model}`), blocked = a.routingAllowed === false || a.authenticationStatus !== 'signed_in';
-    return el('div', { class: 'compact-model-row', 'data-provider-model': model, 'data-provider-state': currentState },
+    return el('div', { class: 'compact-model-row', 'data-provider-model': model, 'data-provider-state': currentState, ...(planExcluded ? { 'data-plan-excluded': 'true' } : {}) },
       mono(model),
       el('div', { class: 'model-row-controls' },
-        badge(modelStateLabel(currentState), currentState === 'verified' ? 'teal' : ['rejected', 'blocked'].includes(currentState) ? 'rose' : ''),
+        badge(planExcluded ? L('Free plan · not routed', '免費方案 · 不路由', '免费方案 · 不路由') : modelStateLabel(currentState), currentState === 'verified' ? 'teal' : ['rejected', 'blocked'].includes(currentState) ? 'rose' : ''),
         el('span', { role: 'status', class: `model-test-result ${result?.status || ''}`, title: result?.error || (result?.at ? date(result.at) : ''), 'data-model-test-result': '' }, result?.status === 'busy' ? '…' : result?.status === 'ok' ? 'OK' : result?.status === 'fail' ? 'Fail' : '—'),
         btn('Test', () => testAccountModel(a, model), { class: 'compact', 'data-action': 'test-model', 'data-id': a.id, 'data-model': model, disabled: blocked || result?.status === 'busy', title: blocked ? L('Account unavailable or excluded by routing policy', '帳戶未登入或被路由政策排除') : L('Test this account and model', '測試此帳戶及模型') })),
       result?.status === 'fail' && el('small', { class: 'model-test-error' }, result.error),
@@ -1137,9 +1140,11 @@ function accountModelChips(a) {
   const states = a.modelStates || {};
   return el('div', { class: 'model-chips', 'aria-label': L('Model verification summary', '模型驗證摘要') }, models.map(m => {
     const st = states[m]?.state || 'unverified';
+    const planExcluded = st !== 'verified' && modelExcludedByPlan(a, m);
     const short = m === 'gemini-hydrogen' ? 'hydrogen' : m === 'gemini-neon' ? 'neon' : m === 'gemini-flash-lite' ? 'lite' : m;
-    const cls = st === 'verified' ? 'ok' : ['rejected', 'blocked'].includes(st) ? 'rejected' : '';
-    return el('span', { class: `m-chip ${cls}`.trim(), title: `${m}: ${modelStateLabel(st)}` }, el('i', { 'aria-hidden': true }), short);
+    const cls = st === 'verified' ? 'ok' : ['rejected', 'blocked'].includes(st) ? 'rejected' : planExcluded ? 'unavailable' : '';
+    const title = planExcluded ? `${m}: ${L('Free plan · not routed', '免費方案 · 不路由', '免费方案 · 不路由')}` : `${m}: ${modelStateLabel(st)}`;
+    return el('span', { class: `m-chip ${cls}`.trim(), title, 'data-model-chip': m, ...(planExcluded ? { 'data-plan-excluded': 'true' } : {}) }, el('i', { 'aria-hidden': true }), short);
   }));
 }
 function poolCurrentWindowSummary(all = S.accounts || []) {

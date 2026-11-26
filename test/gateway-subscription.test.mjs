@@ -326,3 +326,74 @@ test('aborted request after readJson is dropped before inference and app.close()
   assert.equal(afterDisk.includes('late-rotated-refresh'), false, 'no late refresh token write may occur after close/unlock');
   assert.equal(afterDisk, beforeDisk);
 });
+
+test('confirmed Free subscription invalidates stale pre-Free Neon verification and excludes Neon routing while keeping Hydrogen/Lite', async t => {
+  const preFreeAt = Date.parse('2026-10-25T12:00:00.000Z');
+  const freeObservedAt = '2026-10-28T12:00:00.000Z';
+  const postFreeAt = Date.parse('2026-10-28T13:00:00.000Z');
+  const f = await fixture({
+    subscriptionFetch: async () => ({ payload: snapshot(1), observedAt: freeObservedAt }),
+  });
+  t.after(f.close);
+
+  // Seed acc-0 with pre-Free verified Neon + Hydrogen + Flash-Lite (as if it used to be Pro).
+  f.store.data.accounts[0].providerStates = {
+    'gemini-neon': { state: 'verified', checkedAt: preFreeAt, mode: 3, attributionVerified: true },
+    'gemini-hydrogen': { state: 'verified', checkedAt: preFreeAt, mode: 1, attributionVerified: true },
+    'gemini-flash-lite': { state: 'verified', checkedAt: preFreeAt, mode: 6 },
+  };
+  f.store.save();
+
+  assert.equal(f.app.accounts.list()[0].modelStates['gemini-neon'].state, 'verified');
+  assert.equal(f.app.pool.available('gemini-neon').some(a => a.id === 'acc-0'), true);
+
+  // Confirm acc-0 is now Free via GetUserStatus.
+  const subRes = await query(f, 'acc-0');
+  assert.equal(subRes.status, 200);
+  assert.equal((await subRes.json()).subscription.tier, 'free');
+
+  const snapAfterFree = f.app.pool.snapshotAccounts().find(a => a.id === 'acc-0');
+  assert.equal(snapAfterFree.modelStates['gemini-neon'].state, 'unverified');
+  assert.equal(snapAfterFree.modelStates['gemini-hydrogen'].state, 'verified');
+  assert.equal(snapAfterFree.modelStates['gemini-flash-lite'].state, 'verified');
+  assert.equal(snapAfterFree.routingEligibilityByModel['gemini-neon'], false);
+  assert.equal(snapAfterFree.routingEligibilityByModel['gemini-hydrogen'], true);
+  assert.equal(snapAfterFree.routingEligibilityByModel['gemini-flash-lite'], true);
+  assert.deepEqual(snapAfterFree.planExcludedModels, ['gemini-neon']);
+  assert.equal(snapAfterFree.routingEligible, true);
+  assert.equal(f.app.pool.available('gemini-neon').some(a => a.id === 'acc-0'), false);
+  assert.equal(f.app.pool.available('gemini-hydrogen').some(a => a.id === 'acc-0'), true);
+  assert.equal(f.app.pool.available('gemini-flash-lite').some(a => a.id === 'acc-0'), true);
+
+  // Disabling acc-0 must NOT misclassify hydrogen/flash-lite as planExcludedModels.
+  f.store.data.accounts[0].enabled = false;
+  const disabledSnap = f.app.pool.snapshotAccounts().find(a => a.id === 'acc-0');
+  assert.deepEqual(disabledSnap.planExcludedModels, ['gemini-neon']);
+  f.store.data.accounts[0].enabled = true;
+
+  // If Google actually serves real Neon attribution AFTER freeObservedAt, verification & routing recover honestly.
+  f.store.data.accounts[0].providerStates['gemini-neon'] = { state: 'verified', checkedAt: postFreeAt, mode: 3, attributionVerified: true };
+  const recoveredSnap = f.app.pool.snapshotAccounts().find(a => a.id === 'acc-0');
+  assert.equal(recoveredSnap.modelStates['gemini-neon'].state, 'verified');
+  assert.equal(recoveredSnap.routingEligibilityByModel['gemini-neon'], true);
+  assert.deepEqual(recoveredSnap.planExcludedModels, []);
+
+  // A subsequent MODEL_DOWNGRADE_REJECTED on a verified model clears its stale verified state persistently.
+  f.app.accounts.recordUpstreamError('acc-0', {
+    code: 'MODEL_DOWNGRADE_REJECTED',
+    model: 'gemini-neon',
+    status: 502,
+    at: postFreeAt + 1000,
+    nativeEvidence: { observedMode: 3 },
+  });
+  assert.equal(f.app.accounts.list()[0].modelStates['gemini-neon'].state, 'unverified');
+  // Even if another model later overwrites lastError, the downgraded model remains unverified.
+  f.app.accounts.recordUpstreamError('acc-0', {
+    code: 'TOOL_ARGUMENT_SCHEMA_MISMATCH',
+    model: 'gemini-hydrogen',
+    status: 502,
+    at: postFreeAt + 2000,
+  });
+  assert.equal(f.app.accounts.list()[0].modelStates['gemini-neon'].state, 'unverified');
+  assert.equal(f.app.accounts.list()[0].modelStates['gemini-hydrogen'].state, 'verified');
+});
