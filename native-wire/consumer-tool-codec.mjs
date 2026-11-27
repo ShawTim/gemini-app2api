@@ -226,12 +226,13 @@ export function buildConsumerToolInitial({ userText, images = [], systemText, to
   const omitThinking = smartModelSelection && thinkingLevel === null;
   if (!omitThinking && (!Number.isSafeInteger(thinkingLevel) || thinkingLevel < 0 || thinkingLevel > 4)) rejectTool('INVALID_THINKING_LEVEL');
   if (typeof temporaryChat !== 'boolean') rejectTool('INVALID_TEMPORARY_CHAT');
-  const base = buildClientGenerate({ userText, images, systemText, identifiers, clientMetadata: metadata, temporaryChat, smartModelSelection });
+  const disableNativeTools = !(registry.size || allowNativeTools);
+  const base = buildClientGenerate({ userText, images, systemText, identifiers, clientMetadata: metadata, temporaryChat, smartModelSelection, disableNativeTools });
   const desktopInfo = cat(...[...registry.values()].map(tool => m(2, tool.declaration)), ...(ownedDeviceId===undefined?[]:[s(6,ownedDeviceId)]), ...(clientToolsCapability ? [m(7, unsignedVarint(CLIENT_TOOLS_CAPABILITY))] : []));
   const omitMode = smartModelSelection && (modeCategory === undefined || modeCategory === null);
   const requestedMode = omitMode ? null : (modeCategory === undefined ? ARGON_MODE_CATEGORY : modeCategory);
   if (!omitMode && (!Number.isSafeInteger(requestedMode) || requestedMode < 0 || requestedMode > 255)) rejectTool('INVALID_MODE_CATEGORY');
-  const template = cat(...parse(base).map(field => field.number === 15 ? v(15, registry.size || allowNativeTools ? 0 : 1) : field.raw), ...(omitMode ? [] : [v(47, requestedMode)]), ...(omitThinking ? [] : [v(48, thinkingLevel)]), ...(agentChat ? [v(49, 1)] : []), ...(registry.size ? [m(51, cat(...(ownedDeviceId===undefined?[]:[s(1,ownedDeviceId)]),m(3, desktopInfo), ...(localSession ? [v(5, 1)] : [])))] : []));
+  const template = cat(base, ...(omitMode ? [] : [v(47, requestedMode)]), ...(omitThinking ? [] : [v(48, thinkingLevel)]), ...(agentChat ? [v(49, 1)] : []), ...(registry.size ? [m(51, cat(...(ownedDeviceId===undefined?[]:[s(1,ownedDeviceId)]),m(3, desktopInfo), ...(localSession ? [v(5, 1)] : [])))] : []));
   if (continuation !== undefined && !Buffer.isBuffer(continuation)) rejectTool('INVALID_OWN_CONTINUATION');
   // Proven empty InitialRequest.ext1013 marker; NOT an outer update carrier or declaration list.
   const initial = cat(m(1, buildRequestMetadata(metadata)), ...(continuation === undefined ? [] : [m(6, continuation)]), m(1001, m(1, template)), m(1004, Buffer.alloc(0)), ...(registry.size && operationFeature ? [m(1009, Buffer.alloc(0))] : []), ...(halfCloseFeature ? [m(1010, Buffer.alloc(0))] : []), ...(clientToolsFeature ? [m(1013, Buffer.alloc(0))] : []));

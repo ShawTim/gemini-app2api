@@ -10,6 +10,8 @@ import { normalizeOpenCodeModelId } from './models.js';
 
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_SSE_HIGH_WATER_BYTES = 256 * 1024;
+const DEFAULT_SSE_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 function jsonErrorResponse(error) {
   const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 600
@@ -97,6 +99,8 @@ export function createOpenCodeFetch({
   fallbackFetch = globalThis.fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   keepaliveMs = KEEPALIVE_INTERVAL_MS,
+  sseHighWaterBytes = DEFAULT_SSE_HIGH_WATER_BYTES,
+  sseMaxBufferedBytes = DEFAULT_SSE_MAX_BUFFERED_BYTES,
 } = {}) {
   if (typeof resolveAccessToken !== 'function') {
     throw new TypeError('resolveAccessToken is required');
@@ -301,48 +305,172 @@ export function createOpenCodeFetch({
       };
     });
 
+    const highWaterBytes = Number.isSafeInteger(sseHighWaterBytes) && sseHighWaterBytes > 0
+      ? sseHighWaterBytes
+      : DEFAULT_SSE_HIGH_WATER_BYTES;
+    const maxBufferedBytes = Number.isSafeInteger(sseMaxBufferedBytes) && sseMaxBufferedBytes >= highWaterBytes
+      ? sseMaxBufferedBytes
+      : Math.max(DEFAULT_SSE_MAX_BUFFERED_BYTES, highWaterBytes);
+
     const pendingChunks = [];
+    let pendingHead = 0;
+    let pendingBytes = 0;
     let streamController = null;
+    let streamReady = false;
     let streamEnded = false;
     let streamClosed = false;
+    let streamError = null;
+    let drainWaiters = [];
     let publishedBytes = 0;
     let toolCallCount = 0;
     let sentRole = false;
     let emittedAny = false;
     let keepaliveTimer = null;
+    let deadlineTimer = null;
+
+    const currentQueuedBytes = () => {
+      const ctrlQueued = streamController
+        ? Math.max(0, highWaterBytes - (streamController.desiredSize ?? highWaterBytes))
+        : 0;
+      return pendingBytes + ctrlQueued;
+    };
+
+    const wakeDrainWaiters = () => {
+      if (!drainWaiters.length) return;
+      const waiters = drainWaiters;
+      drainWaiters = [];
+      for (const resolve of waiters) resolve();
+    };
 
     const cleanup = () => {
       if (keepaliveTimer) {
         clearInterval(keepaliveTimer);
         keepaliveTimer = null;
       }
+      if (deadlineTimer) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
       if (callerSignal) callerSignal.removeEventListener('abort', onCallerAbort);
+      streamAbort.signal.removeEventListener('abort', wakeDrainWaiters);
+    };
+    streamAbort.signal.addEventListener('abort', wakeDrainWaiters, { once: true });
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      deadlineTimer = setTimeout(() => {
+        streamAbort.abort(
+          Object.assign(new Error('OpenCode stream timeout'), { code: 'NATIVE_TURN_TIMEOUT', status: 504 }),
+        );
+      }, timeoutMs);
+      deadlineTimer.unref?.();
+    }
+
+    const abortSlowConsumer = (err) => {
+      if (!streamClosed) {
+        streamClosed = true;
+        streamError = err;
+        pendingChunks.length = 0;
+        pendingHead = 0;
+        pendingBytes = 0;
+        cleanup();
+        if (streamController) {
+          try {
+            streamController.error(err);
+          } catch {}
+        }
+        streamAbort.abort(err);
+      }
+      wakeDrainWaiters();
     };
 
-    const pushSse = (text) => {
-      if (streamClosed) return;
-      const bytes = encoder.encode(text);
-      if (streamController) {
+    const flushPending = () => {
+      while (
+        streamController &&
+        !streamClosed &&
+        pendingHead < pendingChunks.length &&
+        (streamController.desiredSize ?? 1) > 0
+      ) {
+        const chunk = pendingChunks[pendingHead];
+        pendingChunks[pendingHead++] = undefined;
+        pendingBytes = Math.max(0, pendingBytes - chunk.byteLength);
         try {
-          streamController.enqueue(bytes);
+          streamController.enqueue(chunk);
         } catch {
           streamClosed = true;
+          pendingChunks.length = 0;
+          pendingHead = 0;
+          pendingBytes = 0;
+          cleanup();
           streamAbort.abort(new Error('Stream consumer closed'));
+          break;
         }
-      } else {
-        pendingChunks.push(bytes);
       }
-    };
-
-    const finishSse = () => {
-      cleanup();
-      streamEnded = true;
-      if (streamController && !streamClosed) {
+      if (pendingHead >= pendingChunks.length) {
+        pendingChunks.length = 0;
+        pendingHead = 0;
+      } else if (pendingHead > 64 && pendingHead * 2 >= pendingChunks.length) {
+        pendingChunks.splice(0, pendingHead);
+        pendingHead = 0;
+      }
+      if (streamEnded && !streamClosed && streamController && pendingHead >= pendingChunks.length) {
         streamClosed = true;
         try {
           streamController.close();
         } catch {}
       }
+      if (streamClosed || currentQueuedBytes() < highWaterBytes) {
+        wakeDrainWaiters();
+      }
+    };
+
+    const waitForDrain = () => {
+      if (streamClosed || !streamReady || streamAbort.signal.aborted || currentQueuedBytes() < highWaterBytes) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        drainWaiters.push(resolve);
+      });
+    };
+
+    const pushSse = (text, { keepalive = false } = {}) => {
+      if (streamClosed) return Promise.resolve();
+      if (keepalive && currentQueuedBytes() > 0) {
+        // Coalesce/skip keepalive comments when data or a prior keepalive is already buffered.
+        return Promise.resolve();
+      }
+      const bytes = encoder.encode(text);
+      if (!keepalive && currentQueuedBytes() + bytes.byteLength > maxBufferedBytes) {
+        const err = Object.assign(
+          new Error(`SSE consumer buffer exceeded ${maxBufferedBytes} byte limit`),
+          { code: 'SLOW_CONSUMER_BUFFER_LIMIT', status: 503 },
+        );
+        abortSlowConsumer(err);
+        throw err;
+      }
+      if (streamController && pendingHead >= pendingChunks.length && (streamController.desiredSize ?? 1) > 0) {
+        try {
+          streamController.enqueue(bytes);
+        } catch {
+          streamClosed = true;
+          cleanup();
+          streamAbort.abort(new Error('Stream consumer closed'));
+          wakeDrainWaiters();
+          return Promise.resolve();
+        }
+      } else {
+        pendingChunks.push(bytes);
+        pendingBytes += bytes.byteLength;
+        if (streamController) flushPending();
+      }
+      return keepalive ? Promise.resolve() : waitForDrain();
+    };
+
+    const finishSse = () => {
+      cleanup();
+      streamEnded = true;
+      if (streamController) {
+        flushPending();
+      }
+      wakeDrainWaiters();
     };
 
     const sendDeltaChunk = (delta, finishReason = null, extra = {}) => {
@@ -355,7 +483,7 @@ export function createOpenCodeFetch({
         ...(includeUsage ? { usage: null } : {}),
         ...extra,
       };
-      pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
+      return pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
     };
 
     const sendUsageChunk = (usage) => {
@@ -367,17 +495,17 @@ export function createOpenCodeFetch({
         choices: [],
         usage,
       };
-      pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
+      return pushSse(`data: ${JSON.stringify(chunk)}\n\n`);
     };
 
     const ensureRoleSent = () => {
       if (!sentRole) {
-        sentRole = true;
         sendDeltaChunk({ role: 'assistant' }, null);
+        sentRole = true;
         resolveStart();
         if (keepaliveMs > 0 && !keepaliveTimer) {
           keepaliveTimer = setInterval(() => {
-            pushSse(': keepalive\n\n');
+            pushSse(': keepalive\n\n', { keepalive: true });
           }, keepaliveMs);
           keepaliveTimer.unref?.();
         }
@@ -399,14 +527,14 @@ export function createOpenCodeFetch({
               ensureRoleSent();
               emittedAny = true;
               publishedBytes += Buffer.byteLength(ev.content, 'utf8');
-              sendDeltaChunk({ content: ev.content }, null);
+              await sendDeltaChunk({ content: ev.content }, null);
             }
             if (ev.call) {
               ensureRoleSent();
               emittedAny = true;
               const index = toolCallCount++;
               publishedBytes += Buffer.byteLength(JSON.stringify(ev.call), 'utf8');
-              sendDeltaChunk({ tool_calls: [{ index, ...ev.call }] }, null);
+              await sendDeltaChunk({ tool_calls: [{ index, ...ev.call }] }, null);
             }
           },
         });
@@ -414,49 +542,57 @@ export function createOpenCodeFetch({
         ensureRoleSent();
         const finishReason = toolCallCount > 0 || result.calls?.length ? 'tool_calls' : 'stop';
         const annotations = result.annotations?.length ? toChatAnnotations(result.annotations) : null;
-        sendDeltaChunk(annotations ? { annotations } : {}, finishReason);
+        await sendDeltaChunk(annotations ? { annotations } : {}, finishReason);
         if (includeUsage) {
           const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
-          sendUsageChunk(usage);
+          await sendUsageChunk(usage);
         }
-        pushSse('data: [DONE]\n\n');
+        await pushSse('data: [DONE]\n\n');
       } catch (err) {
-        if (!sentRole) {
-          rejectStart(err);
+        if (!startSettled) {
+          rejectStart(streamError || err);
           cleanup();
           streamEnded = true;
           streamClosed = true;
+          wakeDrainWaiters();
           return;
         }
-        if (
-          canCompleteInterruptedOutput({
-            error: err,
-            publishedBytes,
-            callCount: toolCallCount,
-            hasVisibleText: publishedBytes > 0,
-            aborted: streamAbort.signal.aborted === true,
-            allowPrefixPartialOnTransport: false,
-            salvageToolErrors: true,
-            toolErrors: TOOL_ERRORS,
-          })
-        ) {
-          sendDeltaChunk({}, toolCallCount > 0 ? 'tool_calls' : 'stop', { incomplete: true });
-          if (includeUsage) {
-            const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
-            sendUsageChunk(usage);
+        if (streamClosed || err?.code === 'SLOW_CONSUMER_BUFFER_LIMIT') {
+          return;
+        }
+        try {
+          if (
+            canCompleteInterruptedOutput({
+              error: err,
+              publishedBytes,
+              callCount: toolCallCount,
+              hasVisibleText: publishedBytes > 0,
+              aborted: streamAbort.signal.aborted === true,
+              allowPrefixPartialOnTransport: false,
+              salvageToolErrors: true,
+              toolErrors: TOOL_ERRORS,
+            })
+          ) {
+            await sendDeltaChunk({}, toolCallCount > 0 ? 'tool_calls' : 'stop', { incomplete: true });
+            if (includeUsage) {
+              const usage = estimateUsage({ promptChars, imageCount, outputBytes: publishedBytes });
+              await sendUsageChunk(usage);
+            }
+            await pushSse('data: [DONE]\n\n');
+          } else {
+            await pushSse(
+              `data: ${JSON.stringify({
+                error: {
+                  code: err?.code || 'UPSTREAM_ERROR',
+                  message: err?.upstreamMessage || err?.message || 'Generation failed',
+                },
+                incomplete: true,
+              })}\n\n`,
+            );
+            await pushSse('data: [DONE]\n\n');
           }
-          pushSse('data: [DONE]\n\n');
-        } else {
-          pushSse(
-            `data: ${JSON.stringify({
-              error: {
-                code: err?.code || 'UPSTREAM_ERROR',
-                message: err?.upstreamMessage || err?.message || 'Generation failed',
-              },
-              incomplete: true,
-            })}\n\n`,
-          );
-          pushSse('data: [DONE]\n\n');
+        } catch {
+          // Slow consumer overflow or closed stream already transitioned streamController/streamAbort.
         }
       } finally {
         finishSse();
@@ -469,31 +605,34 @@ export function createOpenCodeFetch({
       return jsonErrorResponse(err);
     }
 
-    const sseStream = new ReadableStream({
-      start(controller) {
-        streamController = controller;
-        while (pendingChunks.length > 0 && !streamClosed) {
-          try {
-            controller.enqueue(pendingChunks.shift());
-          } catch {
-            streamClosed = true;
-            streamAbort.abort(new Error('Stream consumer closed'));
-            break;
+    const sseStream = new ReadableStream(
+      {
+        start(controller) {
+          streamController = controller;
+          streamReady = true;
+          if (streamError) {
+            try {
+              controller.error(streamError);
+            } catch {}
+            return;
           }
-        }
-        if (streamEnded && !streamClosed) {
+          flushPending();
+        },
+        pull() {
+          flushPending();
+        },
+        cancel(reason) {
           streamClosed = true;
-          try {
-            controller.close();
-          } catch {}
-        }
+          pendingChunks.length = 0;
+          pendingHead = 0;
+          pendingBytes = 0;
+          cleanup();
+          streamAbort.abort(reason instanceof Error ? reason : new Error('Stream cancelled by consumer'));
+          wakeDrainWaiters();
+        },
       },
-      cancel(reason) {
-        streamClosed = true;
-        cleanup();
-        streamAbort.abort(reason instanceof Error ? reason : new Error('Stream cancelled by consumer'));
-      },
-    });
+      new ByteLengthQueuingStrategy({ highWaterMark: highWaterBytes }),
+    );
 
     return new Response(sseStream, {
       status: 200,

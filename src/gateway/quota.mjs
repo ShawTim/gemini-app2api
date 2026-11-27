@@ -94,9 +94,12 @@ export function decodeUsageInfo(payload) {
 }
 
 /** Optional in-generation metadata. Invalid quota metadata is isolated from the turn. */
-export function decodePassiveQuota(clientBytes, observedModel) {
+export function decodePassiveQuota(clientBytes, observedModel, preParsedFields = null) {
   try {
-    const fs = fields(clientBytes), budgets = [], refills = [];
+    if (!Buffer.isBuffer(clientBytes) || clientBytes.length > MAX) fail();
+    const fs = Array.isArray(preParsedFields) ? preParsedFields : fields(clientBytes);
+    if (!fs.some((x) => x.number === 20 || x.number === 29 || x.number === 33)) return null;
+    const budgets = [], refills = [];
     for (const n of [20, 29, 33]) one(fs, n, 2);
     for (const f of fs.filter((x) => x.number === 20)) {
       if (f.wire !== 2) fail();

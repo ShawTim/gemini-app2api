@@ -7,8 +7,8 @@ import { lengthDelimited as m, varintField as v } from '../protobuf.mjs';
 const tools = [{ type: 'function', function: { name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } } }];
 const request = (extra = {}) => ({ messages: [{ role: 'user', content: 'fixture prompt' }], ...extra });
 const fence = '```tool_call\n{"name":"exec_command","arguments":{"cmd":"ls"}}\n```';
-const frame = (text = 'ok', { mode = 3, complete = true, thinking = 2, attribution = mode === 1 ? 'Used 4 Hydrogen High model' : mode === 3 ? 'Used 4 Neon High model' : undefined, fallback, downgrade, nativeTools = false } = {}) => m(1003, m(1, Buffer.concat([
-  ...(text === null ? [] : [m(1, m(2, m(1, Buffer.from(text))))]),
+const frame = (text = 'ok', { id, mode = 3, complete = true, thinking = 2, attribution = mode === 1 ? 'Used 4 Hydrogen High model' : mode === 3 ? 'Used 4 Neon High model' : undefined, fallback, downgrade, nativeTools = false } = {}) => m(1003, m(1, Buffer.concat([
+  ...(text === null ? [] : [m(1, Buffer.concat([...(id === undefined ? [] : [m(1, Buffer.from(id))]), m(2, m(1, Buffer.from(text)))]))]),
   ...(mode === null ? [] : [v(41, mode)]), ...(thinking === null ? [] : [v(42, thinking)]),
   v(9, Number(complete)), ...(fallback === undefined ? [] : [v(11, fallback)]), ...(attribution === undefined || attribution === null ? [] : [m(30, Buffer.from(attribution))]), ...(downgrade === undefined ? [] : [v(31, downgrade)]), ...(nativeTools ? [m(7, Buffer.alloc(0))] : []),
 ])));
@@ -484,4 +484,126 @@ test('F7: GrpcMessageReader assembles fragmented, zero-length, and 1 MiB frames 
   assert.equal(seenPrompts.length, 1);
   assert.match(seenPrompts[0], /mutated-marker/);
   assert.doesNotMatch(seenPrompts[0], /original-marker/);
+});
+
+test('Batch 3A: incremental preCallContent scales linearly across 800 deferred frames, isolates bad quota metadata, and flat protobuf encoding is byte-identical', async () => {
+  // 1. 800 incremental frames with deferToolCalls: true + trailing tool call + post-call text.
+  const toolDef = [{
+    type: 'function',
+    function: { name: 'ping', parameters: { type: 'object', properties: { n: { type: 'integer' } }, required: ['n'] } },
+  }];
+  let acc = '';
+  const frames800 = [];
+  for (let i = 0; i < 800; i++) {
+    acc += `line ${i} content\n`;
+    frames800.push(event(frame(acc, { id: 'resp-800', mode: 3, attribution: 'Used 4 Neon High model', complete: false })));
+  }
+  const preCallExpected = acc;
+  const withCall = acc + '```tool_call\n{"name":"ping","arguments":{"n":7}}\n```\nAfter call text.';
+  // Attach malformed quota metadata (field 20 with invalid wire type 0) on the final frame:
+  // single-pass frameInfo() must isolate the bad quota without failing the response.
+  const finalFrameWithBadQuota = m(1003, m(1, Buffer.concat([
+    m(1, Buffer.concat([m(1, Buffer.from('resp-800')), m(2, m(1, Buffer.from(withCall)))])),
+    v(9, 1),
+    v(20, 99), // invalid quota wire type (expected 2)
+    m(30, Buffer.from('Used 4 Neon High model')),
+    v(41, 3),
+    v(42, 2),
+  ])));
+  frames800.push(event(finalFrameWithBadQuota));
+  frames800.push(end());
+
+  const deltas = [];
+  let textDuringStreamBeforeEnd = null;
+  const f800 = fixture([], {
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        for (const ev of frames800) {
+          if (ev.type === 'end') {
+            textDuringStreamBeforeEnd = deltas.map(d => d.content || '').join('');
+          }
+          yield ev;
+        }
+      })(),
+    }),
+  });
+  const res = await f800.p.runTurn(
+    'a',
+    { model: 'gemini-neon', messages: [{ role: 'user', content: 'stream long' }], tools: toolDef },
+    ev => { deltas.push(ev); },
+    { incrementalOutput: true, deferToolCalls: true },
+  );
+  assert.equal(res.calls.length, 1);
+  assert.equal(res.calls[0].function.name, 'ping');
+  assert.equal(res.content, preCallExpected + '\nAfter call text.');
+  assert.equal(res.quotaObservation, undefined, 'malformed quota metadata must stay isolated and never fail turn');
+  // Verify post-call text and tool call were held until final flush (never leaked mid-stream).
+  assert.equal(textDuringStreamBeforeEnd, preCallExpected);
+  assert.equal(deltas.filter(d => d.call).length, 1);
+
+  // 1b. Same-id rebase and pre-commit reset keep livePreCallContent consistent with deferToolCalls: true.
+  const rebaseFrames = [
+    event(frame('Pre-reset draft\n', { id: 'resp-r', mode: 3, attribution: 'Used 4 Neon High model', complete: false })),
+    // Pre-commit same-id reset (getOutputCommitState reports 0 publishedBytes -> clears livePreCallContent).
+    event(frame('Committed intro.\n```tool_call\n{"name":"ping","arguments":{"n":1}}\n```\nDraft tail', { id: 'resp-r', mode: 3, attribution: 'Used 4 Neon High model', complete: false })),
+    // Same-id rebase after Committed intro is committed: revises tool call argument to n=2.
+    event(frame('Committed intro.\n```tool_call\n{"name":"ping","arguments":{"n":2}}\n```\nFinal tail', { id: 'resp-r', mode: 3, attribution: 'Used 4 Neon High model', complete: true })),
+    end(),
+  ];
+  let committedBytes = 0;
+  const fRebase = fixture(rebaseFrames);
+  const rebaseRes = await fRebase.p.runTurn(
+    'a',
+    { model: 'gemini-neon', messages: [{ role: 'user', content: 'rebase preCallContent' }], tools: toolDef },
+    ev => {
+      if (ev.content && ev.content.includes('Committed intro.')) committedBytes += Buffer.byteLength(ev.content);
+    },
+    { incrementalOutput: true, deferToolCalls: true, getOutputCommitState: () => ({ publishedBytes: committedBytes, toolCallCount: 0 }) },
+  );
+  assert.equal(rebaseRes.calls.length, 1);
+  assert.equal(JSON.parse(rebaseRes.calls[0].function.arguments).n, 2);
+  assert.equal(rebaseRes.content, 'Committed intro.\n\nFinal tail');
+
+  // 2. Byte-for-byte golden check for flat buildConsumerToolInitial vs parse(base)-rewrite reference.
+  const { buildConsumerToolInitial } = await import('../consumer-tool-codec.mjs');
+  const { buildClientGenerate } = await import('../robin-current.mjs');
+  const { parse } = await import('../protobuf.mjs');
+  const fixedMeta = {
+    clientType: 21,
+    languageCode: 'en',
+    interfaceLanguageCode: 'en',
+    clientVersion: '1.135.1.1291',
+    clientInstanceId: '00000000-0000-4000-8000-000000000000',
+    triggerType: 1,
+    uiSource: 1,
+  };
+  for (const allowNativeTools of [false, true]) {
+    const flatWire = buildConsumerToolInitial({
+      userText: 'Golden wire test',
+      systemText: 'Sys',
+      allowNativeTools,
+      clientMetadata: fixedMeta,
+      temporaryChat: true,
+      modeCategory: 3,
+      thinkingLevel: 2,
+    });
+    const baseDefault = buildClientGenerate({
+      userText: 'Golden wire test',
+      systemText: 'Sys',
+      clientMetadata: { ...fixedMeta, clientFunctionCapabilities: false },
+      temporaryChat: true,
+      smartModelSelection: false,
+    });
+    const expectedTemplate = Buffer.concat([
+      ...parse(baseDefault).map(fld => fld.number === 15 ? v(15, allowNativeTools ? 0 : 1) : fld.raw),
+      v(47, 3),
+      v(48, 2),
+    ]);
+    // Extract actual template from flatWire: field 1000 -> field 1001 -> field 1.
+    const outer1000 = parse(flatWire).find(f => f.number === 1000).payload;
+    const inner1001 = parse(outer1000).find(f => f.number === 1001).payload;
+    const actualTemplate = parse(inner1001).find(f => f.number === 1).payload;
+    assert.deepEqual(actualTemplate, expectedTemplate, `flat protobuf wire mismatch for allowNativeTools=${allowNativeTools}`);
+  }
 });

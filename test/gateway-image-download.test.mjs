@@ -183,3 +183,119 @@ test('admin toggle gates both APIs before download/account auth; inline images s
   assert.equal((await f.admin('settings', { method: 'PATCH', body: { allowRemoteImages: false } })).status, 200);
   await blocked();
 });
+
+test('bounded parallel remote downloads preserve order, enforce per-chunk shared byte budget, and cancel siblings on failure', async t => {
+  // Build 4 distinct 1x1-valid PNGs (differing in tEXt chunk) so exact order can be verified.
+  const makeLabeledPng = label => {
+    const base = Buffer.from(PNG);
+    const iendStart = base.length - 12;
+    const data = Buffer.from(label);
+    const typeAndData = Buffer.concat([Buffer.from('tEXt'), data]);
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    let crc = 0xffffffff;
+    for (const b of typeAndData) {
+      crc ^= b;
+      for (let j = 0; j < 8; j++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+    const tail = Buffer.alloc(4); tail.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+    return Buffer.concat([base.subarray(0, iendStart), len, typeAndData, tail, base.subarray(iendStart)]);
+  };
+  const pngs = ['img0', 'img1', 'img2', 'img3'].map(makeLabeledPng);
+
+  // 1. Concurrency bound (=2), real overlap, and exact attachment ordering (including interleaved inline image).
+  let active = 0, peakActive = 0;
+  const hOrder = await harness(t, (req, res) => {
+    active++;
+    peakActive = Math.max(peakActive, active);
+    const idx = Number(req.url.slice(1));
+    const delayMs = (4 - idx) * 15; // img0 slowest, img3 fastest
+    setTimeout(() => {
+      active--;
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': pngs[idx].length });
+      res.end(pngs[idx]);
+    }, delayMs);
+  });
+  const inlineImg = decodeImageBytes(PNG, 'image/png');
+  const out = await downloadRemoteImages(
+    [
+      { url: 'https://images.example.com/0' },
+      inlineImg,
+      { url: 'https://images.example.com/1' },
+      { url: 'https://images.example.com/2' },
+      { url: 'https://images.example.com/3' },
+    ],
+    { concurrency: 2 },
+    hOrder,
+  );
+  assert.equal(peakActive, 2, 'must run 2 downloads concurrently without exceeding concurrency cap');
+  assert.deepEqual(out[0].data, pngs[0]);
+  assert.equal(out[1], inlineImg);
+  assert.deepEqual(out[2].data, pngs[1]);
+  assert.deepEqual(out[3].data, pngs[2]);
+  assert.deepEqual(out[4].data, pngs[3]);
+
+  // 2. Per-chunk shared byte budget across 2 concurrent workers without Content-Length.
+  // Inline already uses MAX_TOTAL_IMAGE_BYTES - 1500; two concurrent 1000B streams must trip 413 IMAGES_TOO_LARGE
+  // even though each individual stream (< 1500B) would fit an unshared snapshot.
+  let chunkedSockets = 0;
+  const hBudget = await harness(t, (_req, res) => {
+    chunkedSockets++;
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.write(Buffer.alloc(1000, 0x41));
+    setTimeout(() => { if (!res.destroyed) res.end(Buffer.alloc(500, 0x42)); }, 30);
+  });
+  await rejected(
+    downloadRemoteImages(
+      [
+        { data: { length: MAX_TOTAL_IMAGE_BYTES - 1500 } },
+        { url: 'https://images.example.com/b0' },
+        { url: 'https://images.example.com/b1' },
+      ],
+      { concurrency: 2 },
+      hBudget,
+    ),
+    'IMAGES_TOO_LARGE',
+    413,
+  );
+  assert.equal(chunkedSockets, 2);
+
+  // 3. One worker failing cancels sibling in-flight download immediately.
+  let siblingClosed = false;
+  const hCancel = await harness(t, (req, res) => {
+    if (req.url === '/slow') {
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.flushHeaders();
+      req.on('close', () => { siblingClosed = true; });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await rejected(
+    downloadRemoteImages(
+      [{ url: 'https://images.example.com/slow' }, { url: 'https://images.example.com/fail' }],
+      { concurrency: 2, timeoutMs: 2000 },
+      hCancel,
+    ),
+    'IMAGE_DOWNLOAD_HTTP_ERROR',
+    502,
+  );
+  for (let i = 0; i < 40 && !siblingClosed; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(siblingClosed, true, 'failing worker must immediately abort sibling in-flight socket');
+
+  // 4. Invalid concurrency values reject upfront; upfront URL validation rejects [good, unsafe] before any socket.
+  for (const bad of [0, -1, 9, 1.5, '2']) {
+    await rejected(downloadRemoteImages([{ url: remote }], { concurrency: bad }, hOrder), 'INVALID_IMAGE_DOWNLOAD_CONCURRENCY', 400);
+  }
+  let openedOnInvalidBatch = 0;
+  await rejected(
+    downloadRemoteImages(
+      [{ url: remote }, { url: 'http://127.0.0.1/private.png' }],
+      { concurrency: 2 },
+      { lookup: publicLookup, request: () => { openedOnInvalidBatch++; } },
+    ),
+    'UNSAFE_IMAGE_URL',
+    400,
+  );
+  assert.equal(openedOnInvalidBatch, 0);
+});

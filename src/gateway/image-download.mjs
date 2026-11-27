@@ -11,31 +11,53 @@ const fail = (code, status = 400) => { throw protocolError(code, status); };
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const MIME = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
+const DEFAULT_DOWNLOAD_CONCURRENCY = 4;
+const MAX_DOWNLOAD_CONCURRENCY = 8;
+
 /** No proxy, cookies, caller/Google headers, cache, retries or URL-bearing errors. */
-export async function downloadRemoteImages(images, { signal, timeoutMs = 30000 } = {}, {
+export async function downloadRemoteImages(images, { signal, timeoutMs = 30000, concurrency = DEFAULT_DOWNLOAD_CONCURRENCY } = {}, {
   lookup = dnsLookup, request = (url, options, callback) => (url.protocol === 'https:' ? https : http).request(url, options, callback),
 } = {}) {
   if (!Array.isArray(images) || images.length > MAX_IMAGES) fail('IMAGE_COUNT_EXCEEDED', 413);
   if (!images.some(image => image.url)) return images;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 180000) fail('INVALID_IMAGE_DOWNLOAD_TIMEOUT');
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_DOWNLOAD_CONCURRENCY) fail('INVALID_IMAGE_DOWNLOAD_CONCURRENCY');
   if (signal?.aborted) fail('IMAGE_DOWNLOAD_ABORTED', 499);
   const controller = new AbortController();
   let rejectStop;
+  let stopError = null;
   const stopped = new Promise((_, reject) => { rejectStop = reject; });
+  stopped.catch(() => {});
   // The shared deadline includes DNS, every redirect and every image in this batch.
-  const stop = error => { rejectStop(error); controller.abort(); };
+  const stop = error => {
+    if (!stopError) {
+      stopError = error;
+      rejectStop(error);
+    }
+    controller.abort();
+  };
   const abort = () => stop(protocolError('IMAGE_DOWNLOAD_ABORTED', 499));
   signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => stop(protocolError('IMAGE_DOWNLOAD_TIMEOUT', 504)), timeoutMs);
   const bounded = promise => Promise.race([promise, stopped]);
-  let remaining = MAX_TOTAL_IMAGE_BYTES - images.reduce((sum, image) => sum + (image.data?.length ?? 0), 0);
+  let sharedRemaining = MAX_TOTAL_IMAGE_BYTES - images.reduce((sum, image) => sum + (image.data?.length ?? 0), 0);
   try {
-    if (remaining < 0) fail('IMAGES_TOO_LARGE', 413);
-    const result = [];
-    for (const image of images) {
-      if (!image.url) { result.push(image); continue; }
-      let url = parseRemoteImageUrl(image.url);
-      for (let redirects = 0;; redirects++) {
+    if (sharedRemaining < 0) fail('IMAGES_TOO_LARGE', 413);
+    const result = new Array(images.length);
+    const remoteTasks = [];
+    for (let index = 0; index < images.length; index++) {
+      const image = images[index];
+      if (!image.url) {
+        result[index] = image;
+        continue;
+      }
+      // Validate URL syntax upfront in deterministic index order before opening any socket.
+      remoteTasks.push({ index, initialUrl: parseRemoteImageUrl(image.url) });
+    }
+
+    const downloadOne = async ({ index, initialUrl }) => {
+      let url = initialUrl;
+      for (let redirects = 0; ; redirects++) {
         if (controller.signal.aborted) await stopped;
         const host = url.hostname.replace(/^\[|\]$/g, '');
         const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await bounded(lookup(host, { all: true, verbatim: true }));
@@ -49,10 +71,9 @@ export async function downloadRemoteImages(images, { signal, timeoutMs = 30000 }
             controller.signal.removeEventListener('abort', cancel);
             if (error) { res?.destroy(); req?.destroy(); reject(error); } else resolve(value);
           };
-          const cancel = () => finish(protocolError('IMAGE_DOWNLOAD_ABORTED', 499));
-          const limit = Math.min(MAX_IMAGE_BYTES, remaining);
+          const cancel = () => finish(stopError ?? protocolError('IMAGE_DOWNLOAD_ABORTED', 499));
           try {
-            if (limit <= 0) fail('IMAGES_TOO_LARGE', 413);
+            if (sharedRemaining <= 0) fail('IMAGES_TOO_LARGE', 413);
             req = request(url, {
               method: 'GET', agent: false, maxHeaderSize: 16384,
               headers: { accept: 'image/png, image/jpeg, image/webp', 'accept-encoding': 'identity', 'user-agent': GATEWAY_USER_AGENT },
@@ -76,11 +97,19 @@ export async function downloadRemoteImages(images, { signal, timeoutMs = 30000 }
               const length = res.headers['content-length'];
               if (res.statusCode !== 200) { finish(protocolError('IMAGE_DOWNLOAD_HTTP_ERROR', 502)); return; }
               if (!MIME.has(mimeType) || encoding !== undefined && encoding !== 'identity') { finish(protocolError('UNSUPPORTED_IMAGE_FORMAT')); return; }
-              if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > limit)) { finish(protocolError('IMAGES_TOO_LARGE', 413)); return; }
+              if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > Math.min(MAX_IMAGE_BYTES, sharedRemaining))) {
+                finish(protocolError('IMAGES_TOO_LARGE', 413));
+                return;
+              }
               const chunks = [];
               res.on('data', chunk => {
+                if (settled) return;
                 size += chunk.length;
-                if (size > limit) { finish(protocolError('IMAGES_TOO_LARGE', 413)); return; }
+                sharedRemaining -= chunk.length;
+                if (size > MAX_IMAGE_BYTES || sharedRemaining < 0) {
+                  finish(protocolError('IMAGES_TOO_LARGE', 413));
+                  return;
+                }
                 chunks.push(chunk);
               });
               res.on('end', () => { ended = true; });
@@ -95,16 +124,34 @@ export async function downloadRemoteImages(images, { signal, timeoutMs = 30000 }
           } catch (error) { finish(error); }
         }));
         if (response.next) { url = response.next; continue; }
-        const decoded = decodeImageBytes(response.data, response.mimeType);
-        remaining -= decoded.data.length;
-        result.push(decoded); break;
+        result[index] = decodeImageBytes(response.data, response.mimeType);
+        return;
       }
-    }
+    };
+
+    const workerCount = Math.min(concurrency, remoteTasks.length);
+    let cursor = 0;
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (cursor < remoteTasks.length) {
+        if (controller.signal.aborted) break;
+        const task = remoteTasks[cursor++];
+        try {
+          await downloadOne(task);
+        } catch (error) {
+          stop(error);
+          throw error;
+        }
+      }
+    });
+    await Promise.all(workers);
+    if (stopError) throw stopError;
     return result;
   } catch (error) {
-    if (error instanceof ProtocolError) throw error;
+    const reported = stopError ?? error;
+    if (reported instanceof ProtocolError) throw reported;
     fail('IMAGE_DOWNLOAD_FAILED', 502);
   } finally {
+    controller.abort();
     clearTimeout(timer); signal?.removeEventListener('abort', abort);
   }
 }

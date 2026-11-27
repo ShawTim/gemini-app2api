@@ -4,6 +4,7 @@ import http from 'node:http';
 import { startLoopbackLogin as realStartLoopbackLogin, refreshNativeCredential as realRefreshNativeCredential } from '../native-wire/oauth-loopback.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
 import { createGeminiAppOpenCodePlugin } from '../extensions/opencode/index.js';
+import { createOpenCodeFetch } from '../extensions/opencode/fetch.js';
 import {
   createGeminiAppOpenCodeV2Plugin,
   OPENCODE_V2_PLUGIN_ID,
@@ -1239,4 +1240,173 @@ test('OpenCode V2: legacy metadata.tier without tierRpc triggers GetUserStatus r
   } finally {
     await cleanup();
   }
+});
+
+test('OpenCode fetch: byte-bounded SSE backpressure pauses slow consumer without dropping data, coalesces keepalives, delivers [DONE], and wakes on cancel', async () => {
+  // 1. Slow reader pauses upstream producer after high-water mark, skips keepalive spam, then receives 100% data + [DONE].
+  let producedFrames = 0;
+  const customFetch = createOpenCodeFetch({
+    resolveAccessToken: async () => ({ accessToken: 'tok-bp', subscriptionTier: 'pro' }),
+    keepaliveMs: 10,
+    sseHighWaterBytes: 300,
+    sseMaxBufferedBytes: 64 * 1024,
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        let acc = '';
+        for (let i = 0; i < 12; i++) {
+          producedFrames = i + 1;
+          acc += `CHUNK_${String(i).padStart(2, '0')}_${'X'.repeat(180)}\n`;
+          yield { type: 'frame', bytes: makeFrame(acc, { mode: 3, thinking: 2 }) };
+          await new Promise(r => setImmediate(r));
+        }
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+
+  // Initial Response MUST resolve without waiting for consumer reads.
+  const res = await customFetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'slow reader' }] }),
+  });
+  assert.equal(res.status, 200);
+
+  // Give upstream a moment to push until backpressure engages while consumer hasn't started reading yet.
+  await new Promise(r => setTimeout(r, 40));
+  const pausedCount = producedFrames;
+  assert.ok(pausedCount < 12, `expected backpressure to pause upstream before frame 12, got ${pausedCount}`);
+
+  // Now drain the stream completely: every single chunk and [DONE] must arrive intact.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let wire = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    wire += decoder.decode(value, { stream: true });
+  }
+  wire += decoder.decode();
+  assert.equal(producedFrames, 12);
+  for (let i = 0; i < 12; i++) {
+    assert.ok(wire.includes(`CHUNK_${String(i).padStart(2, '0')}_`), `missing chunk ${i}`);
+  }
+  assert.match(wire, /data: \[DONE\]/);
+  const keepaliveCount = (wire.match(/: keepalive/g) || []).length;
+  assert.ok(keepaliveCount <= 1, `expected keepalive coalescing under backpressure, got ${keepaliveCount}`);
+
+  // 2. Cancelling a paused slow consumer wakes blocked onDelta and cancels upstream immediately.
+  let cancelledUpstream = false;
+  const cancelFetch = createOpenCodeFetch({
+    resolveAccessToken: async () => ({ accessToken: 'tok-bp-cancel', subscriptionTier: 'pro' }),
+    keepaliveMs: 0,
+    sseHighWaterBytes: 256,
+    sseMaxBufferedBytes: 64 * 1024,
+    openTurn: () => ({
+      cancel() { cancelledUpstream = true; },
+      events: (async function* () {
+        let acc = '';
+        for (let i = 0; i < 50; i++) {
+          acc += `CANCEL_${i}_${'Y'.repeat(200)}\n`;
+          yield { type: 'frame', bytes: makeFrame(acc, { mode: 3, thinking: 2 }) };
+        }
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+  const cancelRes = await cancelFetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'cancel while paused' }] }),
+  });
+  assert.equal(cancelRes.status, 200);
+  await new Promise(r => setTimeout(r, 20));
+  await cancelRes.body.cancel(new Error('consumer gave up'));
+  for (let i = 0; i < 40 && !cancelledUpstream; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(cancelledUpstream, true, 'cancelling paused slow consumer must wake producer and cancel upstream');
+
+  // 3. Pre-start hard-cap overflow when role chunk itself exceeds maxBufferedBytes returns 503 JSON (never hangs startGate).
+  const roleOverflowFetch = createOpenCodeFetch({
+    resolveAccessToken: async () => ({ accessToken: 'tok-role-over', subscriptionTier: 'pro' }),
+    keepaliveMs: 0,
+    sseHighWaterBytes: 32,
+    sseMaxBufferedBytes: 64,
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        yield { type: 'frame', bytes: makeFrame('hello', { mode: 3, thinking: 2 }) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+  const roleOverflowRes = await roleOverflowFetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'role overflow' }] }),
+  });
+  assert.equal(roleOverflowRes.status, 503);
+  assert.equal((await roleOverflowRes.json()).error.code, 'SLOW_CONSUMER_BUFFER_LIMIT');
+
+  // 4. Pre-start overflow when role fits (startGate resolves) but first content chunk exceeds maxBufferedBytes
+  //    must propagate SLOW_CONSUMER_BUFFER_LIMIT to ReadableStream.start(controller) instead of hanging.
+  const firstChunkOverflowFetch = createOpenCodeFetch({
+    resolveAccessToken: async () => ({ accessToken: 'tok-first-over', subscriptionTier: 'pro' }),
+    keepaliveMs: 0,
+    sseHighWaterBytes: 256,
+    sseMaxBufferedBytes: 300,
+    openTurn: () => ({
+      cancel() {},
+      events: (async function* () {
+        yield { type: 'frame', bytes: makeFrame('Z'.repeat(400), { mode: 3, thinking: 2 }) };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+  const firstOverRes = await firstChunkOverflowFetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'first chunk overflow' }] }),
+  });
+  assert.equal(firstOverRes.status, 200);
+  await assert.rejects(
+    async () => {
+      const r = firstOverRes.body.getReader();
+      while (!(await r.read()).done) {}
+    },
+    err => err?.code === 'SLOW_CONSUMER_BUFFER_LIMIT',
+  );
+
+  // 5. Stream timeout wakes a paused consumer without pull() or cancel() and cancels upstream cleanly.
+  let timedOutCancel = false;
+  const timeoutFetch = createOpenCodeFetch({
+    resolveAccessToken: async () => ({ accessToken: 'tok-bp-timeout', subscriptionTier: 'pro' }),
+    keepaliveMs: 10,
+    timeoutMs: 60,
+    sseHighWaterBytes: 256,
+    sseMaxBufferedBytes: 64 * 1024,
+    openTurn: () => ({
+      cancel() { timedOutCancel = true; },
+      events: (async function* () {
+        let acc = '';
+        for (let i = 0; i < 40; i++) {
+          acc += `TO_${i}_${'T'.repeat(200)}\n`;
+          yield { type: 'frame', bytes: makeFrame(acc, { mode: 3, thinking: 2 }) };
+        }
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+  const timeoutRes = await timeoutFetch(`${VIRTUAL_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gemini-neon', stream: true, messages: [{ role: 'user', content: 'timeout paused' }] }),
+  });
+  assert.equal(timeoutRes.status, 200);
+  // Deliberately never call reader.read() or cancel(): timeoutMs must wake waitForDrain and cancel upstream.
+  for (let i = 0; i < 50 && !timedOutCancel; i++) await new Promise(r => setTimeout(r, 10));
+  assert.equal(timedOutCancel, true, 'stream timeout must wake paused onDelta and cancel upstream without consumer pull/cancel');
+  // Draining afterwards must still terminate cleanly (no hang).
+  const timeoutWire = await timeoutRes.text();
+  assert.match(timeoutWire, /data: \[DONE\]/);
 });

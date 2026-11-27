@@ -334,7 +334,11 @@ export async function startOpenCodeV2Bridge({
           forceClose: status === 413 || !req.complete,
         });
       } else if (!res.writableEnded) {
-        try { res.end(); } catch {}
+        // After SSE headers are sent, abort the socket rather than sending a clean EOF
+        // so downstream clients observe a stream error instead of silent truncation.
+        try {
+          res.destroy(err instanceof Error ? err : new Error(String(err || 'Bridge stream error')));
+        } catch {}
       }
     } finally {
       releaseReserved();

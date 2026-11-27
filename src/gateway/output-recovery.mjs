@@ -4,14 +4,15 @@ import { MODEL_MODES, canonicalModel } from '../openai-contract.mjs';
 import { parse } from '../../native-wire/protobuf.mjs';
 import { protocolError } from '../tool-protocol.mjs';
 export const EMPTY_RESPONSE_REASONS = Object.freeze(['no_text', 'whitespace_only', 'thoughts_only', 'post_parse_empty']);
-export function inspectNativeOutput(fields) {
+export function inspectNativeOutput(fields, preParsedModelFields = null) {
   const singular = (list, number, wire = 2) => {
     const found = list.filter(field => field.number === number);
     if (found.length > 1 || found.some(field => field.wire !== wire)) throw protocolError('INVALID_NATIVE_RESPONSE', 502);
     return found[0];
   };
   const refusal = [13, 17].some(number => singular(fields, number) !== undefined);
-  const model = singular(fields, 1), mf = model ? parse(model.payload) : [];
+  const model = singular(fields, 1);
+  const mf = model ? (Array.isArray(preParsedModelFields) ? preParsedModelFields : parse(model.payload)) : [];
   const shareable = singular(mf, 7), thoughts = singular(mf, 12);
   const tf = thoughts ? parse(thoughts.payload) : [];
   const thoughtText = singular(tf, 1);

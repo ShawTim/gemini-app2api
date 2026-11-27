@@ -6,7 +6,7 @@
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { parse } from '../native-wire/protobuf.mjs';
-import { decodeClientGenerateResponse } from '../native-wire/robin-current.mjs';
+import { decodeClientGenerateResponseFields } from '../native-wire/robin-current.mjs';
 import { ProtocolError, protocolError, compileToolPolicy, isCompiledToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
 import { MODEL_ALIASES, MODEL_MODES, MODEL_SPECS, NATIVE_MODELS, PROMPT_MAX_BYTES, CANONICAL_BUILT, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
 import { RESPONSE_TOOL_IDENTITIES } from './responses-tool-namespaces.mjs';
@@ -114,7 +114,7 @@ function frameInfo(bytes) {
     if (attribution.wire !== 2 || attribution.payload.length > 4096) fail('INVALID_NATIVE_RESPONSE');
     try { utf8.decode(attribution.payload); } catch { fail('INVALID_NATIVE_RESPONSE'); }
   }
-  const info = decodeClientGenerateResponse(client.payload);
+  const info = decodeClientGenerateResponseFields(fields, { includeModels: false });
   if (info.hasToolOperations) fail('UNSUPPORTED_NATIVE_TOOL_EVENT');
   for (const n of [9, 11]) {
     const flag = one(fields, n);
@@ -123,8 +123,10 @@ function frameInfo(bytes) {
   info.text = null;
   info.responseId = null;
   const model = one(fields, 1);
+  let modelFields = null;
   if (model) {
-    const modelFields = parse(model.payload);
+    if (model.wire !== 2) fail('INVALID_NATIVE_RESPONSE');
+    modelFields = parse(model.payload);
     const responseId = one(modelFields, 1);
     if (responseId) {
       if (responseId.wire !== 2 || responseId.payload.length > 4096) fail('INVALID_NATIVE_RESPONSE');
@@ -132,12 +134,17 @@ function frameInfo(bytes) {
     }
     const display = one(modelFields, 2);
     if (display) {
+      if (display.wire !== 2) fail('INVALID_NATIVE_RESPONSE');
       const text = one(parse(display.payload), 1);
-      if (text) info.text = utf8.decode(text.payload);
+      if (text) {
+        if (text.wire !== 2) fail('INVALID_NATIVE_RESPONSE');
+        info.text = utf8.decode(text.payload);
+      }
     }
+    info.models = [{ responseId: info.responseId, text: info.text }];
   }
-  info.outputShape = inspectNativeOutput(fields);
-  info.quotaObservation = decodePassiveQuota(client.payload);
+  info.outputShape = inspectNativeOutput(fields, modelFields);
+  info.quotaObservation = decodePassiveQuota(client.payload, undefined, fields);
   return info;
 }
 const TRANSPORT_ERRORS = new Set(['NATIVE_CONNECTION_FAILED', 'NATIVE_STREAM_FAILED', 'NATIVE_STREAM_RESET', 'NATIVE_STREAM_CLOSED_EARLY', 'NATIVE_HTTP_REJECTED', 'NATIVE_INVALID_STATUS', 'NATIVE_RECEIVE_LIMIT', 'NATIVE_FRAME_REJECTED', 'NATIVE_READER_BUSY']);
@@ -420,7 +427,7 @@ export class NativeDirectProvider {
       [RESPONSE_TOOL_IDENTITIES]: body[RESPONSE_TOOL_IDENTITIES],
       requestedThinkingLevel: body.thinking_level, ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => body[key] !== undefined),
       ...((body.reasoning_effort ?? body.reasoning?.effort) === undefined ? {} : { requestedReasoningEffort: body.reasoning_effort ?? body.reasoning?.effort }) };
-    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorTailStart = 0, liveToolErrorDeadline = null, validatedIdleOutput = null, readExit = 'none', sinkFailed = false;
+    let liveSplitter = incremental ? createToolCallSplitter({ policy }) : null, liveItems = [], liveContent = '', livePreCallContent = '', liveCalls = [], publishedContent = '', publishedCalls = 0, liveSyncedLength = 0, liveToolError = null, liveToolErrorTailStart = 0, liveToolErrorDeadline = null, validatedIdleOutput = null, readExit = 'none', sinkFailed = false;
     const deliver = async event => {
       try { await onDelta(event); }
       catch (error) { sinkFailed = true; throw error; }
@@ -450,14 +457,10 @@ export class NativeDirectProvider {
     // bodies. With deferToolCalls, calls (and any text after the first call) are held
     // until the turn is final so callers never receive draft calls that upstream rewrites.
     const deferCalls = incremental && context.deferToolCalls === true;
-    const visibleText = (items, content, splitter, final) => {
+    const visibleText = (hasCalls, preCallContent, content, splitter, final) => {
       if (!deferCalls || final) return content + splitter.preview();
-      let text = '';
-      for (const item of items) {
-        if (item.type === 'call') return text;
-        text += item.text;
-      }
-      return text + splitter.preview();
+      if (hasCalls) return preCallContent;
+      return preCallContent + splitter.preview();
     };
     // Same-id revision after output was committed: accept it only if replaying the new
     // snapshot reproduces everything already delivered (visible text prefix + identical calls).
@@ -489,16 +492,19 @@ export class NativeDirectProvider {
         splitter = replay;
       }
       let content = '';
+      let preCallContent = '';
       const calls = [];
       for (const item of items) {
-        if (item.type === 'content') content += item.text;
-        else calls.push(item.call);
+        if (item.type === 'content') {
+          content += item.text;
+          if (calls.length === 0) preCallContent += item.text;
+        } else calls.push(item.call);
       }
       if (calls.length < publishedCalls) return false;
       for (let i = 0; i < publishedCalls; i++) {
         if (calls[i].function.name !== liveCalls[i].function.name || calls[i].function.arguments !== liveCalls[i].function.arguments) return false;
       }
-      if (!visibleText(items, content, splitter, false).startsWith(publishedContent)) return false;
+      if (!visibleText(calls.length > 0, preCallContent, content, splitter, false).startsWith(publishedContent)) return false;
       // Preserve IDs of calls that were already delivered.
       let callIndex = 0;
       for (const item of items) {
@@ -511,6 +517,7 @@ export class NativeDirectProvider {
       liveSplitter = splitter;
       liveItems = items;
       liveContent = content;
+      livePreCallContent = preCallContent;
       liveCalls = calls;
       liveSyncedLength = nextText.length;
       if (rebaseToolError) {
@@ -525,8 +532,16 @@ export class NativeDirectProvider {
       return true;
     };
     const publish = async (items, { final = false } = {}) => {
-      for (const item of items) { liveItems.push(item); if (item.type === 'content') liveContent += item.text; else liveCalls.push(item.call); }
-      const text = visibleText(liveItems, liveContent, liveSplitter, final);
+      for (const item of items) {
+        liveItems.push(item);
+        if (item.type === 'content') {
+          liveContent += item.text;
+          if (liveCalls.length === 0) livePreCallContent += item.text;
+        } else {
+          liveCalls.push(item.call);
+        }
+      }
+      const text = visibleText(liveCalls.length > 0, livePreCallContent, liveContent, liveSplitter, final);
       if (!text.startsWith(publishedContent)) {
         const committed = committedOutput();
         if (snapshotId === null || committed.publishedBytes || committed.toolCallCount) failWithEvidence('NON_MONOTONIC_NATIVE_RESPONSE', {
@@ -805,7 +820,7 @@ export class NativeDirectProvider {
                 rebased = true;
               } else if (incremental) {
                 if (liveSyncedLength > 0) await deliver({ reset: true, sameResponseIdentity: true, response: identity });
-                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0; liveToolError = null; liveToolErrorTailStart = 0; liveToolErrorDeadline = null;
+                liveSplitter = createToolCallSplitter({ policy }); liveItems = []; liveContent = ''; livePreCallContent = ''; liveCalls = []; publishedContent = ''; publishedCalls = 0; liveSyncedLength = 0; liveToolError = null; liveToolErrorTailStart = 0; liveToolErrorDeadline = null;
               }
             }
             if (id) snapshotId = id;

@@ -77,8 +77,9 @@ function imageAttachments(images) {
  * Model IDs and mode numbers are passed explicitly by caller policy.
  * Built-in tools, overage credits and smart model selection default off.
  */
-export function buildClientGenerate({ userText, images = [], systemText, modelId, identifiers, clientMetadata, includePolicyFlags = true, temporaryChat = false, smartModelSelection = false } = {}) {
+export function buildClientGenerate({ userText, images = [], systemText, modelId, identifiers, clientMetadata, includePolicyFlags = true, temporaryChat = false, smartModelSelection = false, disableNativeTools = true } = {}) {
   if (typeof smartModelSelection !== 'boolean') throw new TypeError('Invalid smart model selection');
+  if (typeof disableNativeTools !== 'boolean') throw new TypeError('Invalid native tools flag');
   const fields = [message(1, Buffer.concat([string(1, userText), ...imageAttachments(images)]))];
   if (modelId !== undefined) fields.push(message(3, string(2, modelId)));
   if (identifiers !== undefined) {
@@ -90,7 +91,7 @@ export function buildClientGenerate({ userText, images = [], systemText, modelId
   }
   fields.push(varintField(5, 1));
   if (clientMetadata !== undefined) fields.push(message(13, buildRequestMetadata(clientMetadata)));
-  fields.push(varintField(15, 1));
+  fields.push(varintField(15, disableNativeTools ? 1 : 0));
   if (systemText !== undefined) fields.push(message(29, string(4, systemText)));
   // Temporary chat keeps the turn out of the account's saved conversation history.
   if (temporaryChat) fields.push(varintField(31, 1));
@@ -100,16 +101,16 @@ export function buildClientGenerate({ userText, images = [], systemText, modelId
   return output;
 }
 
-/** Decode inner ClientGenerateResponse. Thought contents are not exported.
- * Model identity fields are recorded as evidence and verified by caller policy.
- */
-export function decodeClientGenerateResponse(bytes) {
-  const fields = parse(bytes), ids = field(fields, 2);
+/** Decode already-parsed ClientGenerateResponse fields (single-pass helper). */
+export function decodeClientGenerateResponseFields(fields, { includeModels = true } = {}) {
+  const ids = field(fields, 2);
   const models = [];
-  for (const model of fields.filter(value => value.number === 1)) {
-    if (model.wire !== 2) throw new Error('Invalid model response');
-    const item = parse(model.payload), display = field(item, 2);
-    models.push({ responseId: stringValue(item, 1), text: display === undefined ? null : stringValue(parse(display), 1) });
+  if (includeModels) {
+    for (const model of fields.filter(value => value.number === 1)) {
+      if (model.wire !== 2) throw new Error('Invalid model response');
+      const item = parse(model.payload), display = field(item, 2);
+      models.push({ responseId: stringValue(item, 1), text: display === undefined ? null : stringValue(parse(display), 1) });
+    }
   }
   const responseIds = ids === undefined ? [] : parse(ids);
   return {
@@ -122,6 +123,13 @@ export function decodeClientGenerateResponse(bytes) {
     hasToolOperations: fields.some(value => value.number === 7),
     unknownFieldNumbers: fields.filter(value => ![1, 2, 7, 9, 11, 30, 31, 39, 40, 41, 42].includes(value.number)).map(value => value.number)
   };
+}
+
+/** Decode inner ClientGenerateResponse. Thought contents are not exported.
+ * Model identity fields are recorded as evidence and verified by caller policy.
+ */
+export function decodeClientGenerateResponse(bytes) {
+  return decodeClientGenerateResponseFields(parse(bytes));
 }
 
 /** Extension 1014 wrapper field 1 -> streaming ContinuationIdentifiers
