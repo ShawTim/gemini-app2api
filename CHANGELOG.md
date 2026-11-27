@@ -2,6 +2,25 @@
 
 Release notes for Gemini App2API.
 
+## 1.9.0 — 2026-11-27
+
+### Standalone One-Shot & Read-Only Harness CLI (`gemini-app-cli@0.1.0`), `GetUserStatus` Subscription Provenance & Free-Account Routing Safety, Gateway Hardening, and Admin UI Updates (`pi-gemini-app@0.1.15`, `openclaw-gemini-app@0.1.11`, `opencode-gemini-app@0.1.7`, `mcp-gemini-app@0.1.6`, `gemini-app-cli@0.1.0`)
+- **New Standalone Package: `gemini-app-cli@0.1.0`** (`extensions/cli/cli.js`, `extensions/cli/readonly-tools.js`, `extensions/cli/README.md`, `extensions/cli/SKILL.md`, `scripts/build-cli-package.mjs`, `scripts/check-cli-package.mjs`):
+  - Added a zero-dependency non-interactive Unix CLI (`gemini-app` / `gemini-app-cli`) supporting both direct Google OAuth HTTP/2 and optional `GEMINI_GATEWAY_URL` multi-account gateway routing.
+  - Supports `ask` (streaming direct HTTP/2 with `getOutputCommitState` 2 KiB commit boundary & gateway SSE, piped stdin, repeatable `-f`/`--file` strict UTF-8 attachments, repeatable `-i`/`--image` multimodal attachments, `-o`/`--output` atomic writes, `--json`, and `--timeout`), `search` (Google Search grounding with verified citations), `quota`, `models`, `login [--remote] [--accept-terms]`, `status`, and `logout`.
+  - Added validated JSON Schema Structured Outputs (`--schema <file|json>`) reusing `normalizeChatResponseFormat` and `validateStructuredOutputText` with bounded single-retry protocol recovery.
+  - Added an opt-in sandboxed read-only workspace harness (`--tools readonly` / `read,grep,find,ls` + `--cwd`, `--max-turns`, `--verbose`) with zero `child_process`, zero writes, polynomial-time non-backtracking `**/` glob matching, UTF-16-safe literal `grep` with 16 MiB scan caps, case-folded secret-path denylist, batch `tool_call` ID normalization, and hard 32 KiB / 256 KiB output & overall deadline budgets.
+  - Shared `extensions/mcp/auth.js` and `extensions/mcp/tools.js` via clean owner/env parameterization with strict bidirectional credential isolation (`owner: "gemini-app-cli"` vs `"mcp-gemini-app"`), read-only external auth reuse, and `NATIVE_PERMISSION_REJECTED` (403) pre-publish token refresh retry.
+  - Updated `README.md`, `README.zh.md`, `README.zh-CN.md`, and the 5-logo `docs/assets/extensions-overview.jpg` banner.
+- **`GetUserStatus` + `cap529` Subscription Tier Detection & Free-Account Neon Routing Safety** (`src/gateway/subscription.mjs`, `src/gateway/subscription-transport.mjs`, `src/gateway/pool.mjs`, `src/gateway/state.mjs`, `extensions/pi/`, `extensions/openclaw/`, `extensions/opencode/`, `extensions/mcp/`):
+  - Switched live subscription tier lookup to `GetUserStatus` + `cap529` with strict `subscriptionRpc: "GetUserStatus"` provenance across the gateway and all standalone extensions, dropping un-provenanced legacy tier assumptions during outages.
+  - Excluded Free accounts from `gemini-neon` routing and invalidated stale pre-Free / downgraded Neon verification snapshots so Free accounts no longer enter Neon failover loops.
+  - Hardened 429 quota/throttle handling and Admin UI throttle display.
+- **Gateway Terminal Outcomes, Admission Budgets, SSE Usage, Tool Namespaces & O(n) gRPC Framing** (`src/gateway/app.mjs`, `src/gateway/response-delivery.mjs`, `src/native-provider.mjs`, `src/responses-tool-namespaces.mjs`, `src/openai-usage.mjs`):
+  - Hardened terminal completion outcomes, admission budgets, SSE usage reporting, Responses tool namespace handling, and linear $O(n)$ gRPC frame assembly.
+- **Admin Console UI Enhancements** (`src/admin-v2/index.html`, `src/admin-v2/app.js`, `src/admin-v2/styles.css`):
+  - Added a high-contrast GitHub icon topbar link and a dismissible active-workspace GitHub star prompt across all 3 locales (`EN` / `繁體中文` / `简体中文`).
+
 ## 1.8.3 — 2026-11-26
 
 ### Streaming Tool-Call Revision Rebasing (Fixes #11), Instant Inline-Backtick Streaming Preview (Fixes #10), and Zero-Call Hallucinated Tool-Result Recovery (`pi-gemini-app@0.1.14`, `openclaw-gemini-app@0.1.10`, `opencode-gemini-app@0.1.6`, `mcp-gemini-app@0.1.5`)

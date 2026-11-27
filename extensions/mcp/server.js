@@ -22,7 +22,7 @@ function readMcpVersion() {
       // Try fallback manifest path.
     }
   }
-  return '0.1.5';
+  return '0.1.6';
 }
 
 export const MCP_SERVER_VERSION = readMcpVersion();
