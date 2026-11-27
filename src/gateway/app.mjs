@@ -17,6 +17,7 @@ import { safeNativeEvidence } from "./native-evidence.mjs";
 import { RequestResumption } from './request-resumption.mjs';
 import { QuotaRefreshJobs } from './quota-refresh-jobs.mjs';
 import { NativeDiagnostic, observeNative } from './native-diagnostic.mjs';
+import { createRequestTimings } from './request-timings.mjs';
 import { createResponseDelivery } from './response-delivery.mjs';
 import {
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
@@ -478,6 +479,7 @@ export function createGateway({
       }, settings.timeoutMs + 1000);
     timer.unref();
     controllers.add(controller);
+    const requestTimings = createRequestTimings();
     const delivery = createResponseDelivery(res, { route, stream: outputStreaming, model: canonical.model,
       thinkingLevel: canonical.thinking_level, reasoningEffort: canonical.reasoning_effort ?? canonical.reasoning?.effort,
       ignoredTokenParameters: ['max_tokens', 'max_completion_tokens'].filter(key => canonical[key] !== undefined),
@@ -486,7 +488,8 @@ export function createGateway({
       promptChars: canonical[CANONICAL_PROMPT_CHARS] ?? 0, imageCount: canonical[CANONICAL_IMAGE_COUNT] ?? 0,
       deferEmptyStart: !playground && !accountTestId && !canonical.native_search,
       signal: controller.signal, writeTimeoutMs: Math.min(settings.timeoutMs, 30000),
-      keepaliveHeadersDelayMs: route === 'chat' ? keepaliveHeadersDelayMs : 0 });
+      keepaliveHeadersDelayMs: route === 'chat' ? keepaliveHeadersDelayMs : 0,
+      onFirstPublishedText: () => observeNative(requestTimings, 'markFirstPublishedText') });
     let resolveInFlight;
     const inFlightPromise = new Promise((r) => { resolveInFlight = r; });
     inFlightTasks.add(inFlightPromise);
@@ -531,6 +534,8 @@ export function createGateway({
         providerAttempts++;
         let attemptDiagnostic = null;
         try { attemptDiagnostic = diagnostic?.attempt(); } catch {}
+        let attemptTiming = null;
+        try { attemptTiming = requestTimings.startAttempt(); } catch {}
         if (!res.headersSent) {
           res.setHeader("X-Gemini-Provider-Attempts", String(providerAttempts));
           res.setHeader("X-Gemini-Failover-Count", String(providerAttempts - 1));
@@ -538,11 +543,17 @@ export function createGateway({
           if (context.failoverReason) res.setHeader("X-Gemini-Failover-Reason", context.failoverReason);
           if (providerFailures.length) res.setHeader('X-Gemini-Recovery-Errors', [...new Set(providerFailures.map(f => f.code))].join(','));
         }
-        try { return await provider.runTurn(acc, canonical, event => delivery.accept(event), { ...context, timeoutMs: settings.timeoutMs,
-          preNormalized: true, incrementalOutput: true, deferToolCalls: true, outputMode: outputStreaming ? 'stream' : 'buffered',
-          getOutputCommitState: delivery.outputCommitState,
-          ...(attemptDiagnostic ? { nativeDiagnostic: attemptDiagnostic } : {}) }); }
+        try {
+          const turnResult = await provider.runTurn(acc, canonical, event => delivery.accept(event), { ...context, timeoutMs: settings.timeoutMs,
+            preNormalized: true, incrementalOutput: true, deferToolCalls: true, outputMode: outputStreaming ? 'stream' : 'buffered',
+            getOutputCommitState: delivery.outputCommitState,
+            ...(attemptTiming ? { timing: attemptTiming } : {}),
+            ...(attemptDiagnostic ? { nativeDiagnostic: attemptDiagnostic } : {}) });
+          observeNative(attemptTiming, 'finish', true);
+          return turnResult;
+        }
         catch (error) {
+          observeNative(attemptTiming, 'finish', false);
           // Delivery owns the cross-attempt commit boundary: a held tiny prefix
           // or comment-only SSE keepalive header is still replaceable without splicing output.
           const disposition = delivery.attemptDisposition(error);
@@ -650,6 +661,7 @@ export function createGateway({
       req.off("aborted", disconnect);
       res.off("close", disconnect);
       delivery.close();
+      const timings = requestTimings.snapshot();
       requests.unshift({
         id,
         at,
@@ -660,7 +672,8 @@ export function createGateway({
         model: canonical.model ?? "gemini-neon",
         accountId,
         status,
-        durationMs: Date.now() - at,
+        durationMs: timings.totalMs,
+        timings,
         errorCode,
         ...(controller.signal.aborted ? { cancellationSource: controller.signal.reason?.code === 'REQUEST_DEADLINE' ? 'request_deadline'
           : controller.signal.reason?.code === 'SERVER_SHUTDOWN' ? 'server_shutdown' : 'client_disconnect' } : {}),

@@ -58,6 +58,7 @@ export async function runNativeSearchDiagnostic({
   signal,
   timeoutMs = 180000,
   allowNativeTools = false,
+  timing,
 } = {}) {
   if (
     typeof getAccessToken !== "function" ||
@@ -225,7 +226,7 @@ export async function runNativeSearchDiagnostic({
         thinking_level: 2,
       },
       () => {},
-      { signal },
+      { signal, ...(timing ? { timing } : {}) },
     );
     if (result.resolvedModeCategory !== 3 || result.thinkingLevel !== 2)
       return fail("NATIVE_THINKING_MISMATCH");

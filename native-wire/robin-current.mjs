@@ -67,7 +67,7 @@ function imageAttachments(images) {
   return images.map((image, index) => {
     const extension = image?.mimeType === 'image/png' ? 'png' : image?.mimeType === 'image/jpeg' ? 'jpg' : image?.mimeType === 'image/webp' ? 'webp' : null;
     const id = image?.blobId;
-    if (!extension || Object.hasOwn(image, 'data') || typeof id !== 'string' || !id.length || Buffer.byteLength(id) > 4096 || /\s|[\x00-\x1f\x7f]/u.test(id) || Buffer.from(id).toString('utf8') !== id) throw new TypeError('Invalid native image');
+    if (!extension || Object.hasOwn(image, 'data') || typeof id !== 'string' || !id.length || Buffer.byteLength(id) > 4096 || /\s|[\x00-\x1f\x7f]/u.test(id) || !id.isWellFormed()) throw new TypeError('Invalid native image');
     const blob = Buffer.concat([string(1, id), varintField(2, 1), string(3, image.mimeType), varintField(4, 1)]);
     return message(3, Buffer.concat([message(1, blob), string(2, `image-${index + 1}.${extension}`)]));
   });

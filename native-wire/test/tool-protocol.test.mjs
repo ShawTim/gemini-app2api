@@ -220,3 +220,28 @@ test('createToolCallSplitter exposes read-only state across text, tool_fence, or
   assert.equal(s.state, 'suppressed');
   assert.equal(s.flush().length, 0);
 });
+
+test('parseBoundedJson sticky regex and isWellFormed handle scalars, valid pairs, NUL/BOM/U+FFFD and lone surrogates equivalently', () => {
+  const parsed = parseBoundedJson('{"t":true,"f":false,"n":null,"i":-42,"d":0.25,"e":-1.5e+2,"E":2E-1,"pair":"\\ud83d\\ude00","nul":"\\u0000","bom":"\\ufeff","repl":"\\ufffd"}');
+  assert.equal(parsed.t, true);
+  assert.equal(parsed.f, false);
+  assert.equal(parsed.n, null);
+  assert.equal(parsed.i, -42);
+  assert.equal(parsed.d, 0.25);
+  assert.equal(parsed.e, -150);
+  assert.equal(parsed.E, 0.2);
+  assert.equal(parsed.pair, '😀');
+  assert.equal(parsed.nul, '\u0000');
+  assert.equal(parsed.bom, '\ufeff');
+  assert.equal(parsed.repl, '\ufffd');
+  for (const badSurrogate of ['"\\ud800"', '"\\udfff"', '"ok\\ud83d"', '"\\ude00ok"']) {
+    assert.throws(
+      () => parseBoundedJson(badSurrogate),
+      error => error.code === 'INVALID_TOOL_JSON' && error.toolProtocolReason === 'invalid_surrogate',
+    );
+  }
+  assert.throws(
+    () => parseBoundedJson('"\\u12"'),
+    error => error.code === 'INVALID_TOOL_JSON' && error.toolProtocolReason === 'invalid_escape',
+  );
+});

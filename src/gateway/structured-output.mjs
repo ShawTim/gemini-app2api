@@ -16,7 +16,7 @@ function assertOnlyKeys(obj, allowed, code = 'INVALID_RESPONSE_FORMAT') {
 }
 
 function validUtf8String(value) {
-  return typeof value === 'string' && Buffer.from(value).toString('utf8') === value;
+  return typeof value === 'string' && value.isWellFormed();
 }
 
 function parseJsonSchemaSpec(spec) {

@@ -4,6 +4,7 @@
  * This does not change the legacy provider, shared codecs or research transport.
  */
 import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { parse } from '../native-wire/protobuf.mjs';
 import { decodeClientGenerateResponse } from '../native-wire/robin-current.mjs';
 import { ProtocolError, protocolError, compileToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
@@ -289,6 +290,7 @@ export class NativeDirectProvider {
       getAccessToken: () => this.authManager.getValidAccessToken(accountId),
       openTurn: this.openTurn, query: messages[0].content,
       allowNativeTools: true, timeoutMs: Math.min(timeoutMs, 180000), signal: context.signal,
+      ...(context.timing ? { timing: context.timing } : {}),
     });
     if (!report.ok) {
       const status = ['NATIVE_RATE_LIMITED','NATIVE_QUOTA_EXHAUSTED'].includes(report.errorCode) ? 429
@@ -407,6 +409,7 @@ export class NativeDirectProvider {
     const attributionVerified = () => attributionMatches(observedAttribution);
     let snapshotId = null, revisionCount = 0, quotaObservation = null, quotaFrames = 0;
     let emptyResponseReason = null, outputObserved = false, responseLimitReason = null, outputFailureReason = null;
+    let firstVerifiedTextMarked = false;
     const outputShape = { nativeShareableTextBytes: 0, nativeThoughtsPresent: false, nativeThoughtBytes: 0, nativeStructuredOutputPresent: false, nativeRefusalPresent: false };
     const incremental = context.incrementalOutput === true && !body.response_format;
     const identity = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model: body.model,
@@ -544,7 +547,12 @@ export class NativeDirectProvider {
     try {
       if (images.some(image => image.url)) {
         phase = 'upload';
-        images = await bounded(this.downloadImages(images, { signal: controller.signal, timeoutMs: Math.min(timeoutMs, 30000) }));
+        const downloadStart = performance.now();
+        try {
+          images = await bounded(this.downloadImages(images, { signal: controller.signal, timeoutMs: Math.min(timeoutMs, 30000) }));
+        } finally {
+          observeNative(context.timing, 'imageDownload', performance.now() - downloadStart);
+        }
         ({ messages, images } = buildCanonicalPrompt(body, images));
         messages = appendRecovery(messages);
       }
@@ -554,18 +562,29 @@ export class NativeDirectProvider {
       catch (error) { if (error instanceof ProtocolError || ['NATIVE_PERMISSION_OR_AUTH','NATIVE_CREDENTIAL_REQUIRED','OAUTH_REFRESH_FAILED','ACCOUNT_LOGIN_REQUIRED'].includes(error?.code)) throw safeFailure(error); fail('NATIVE_AUTH_FAILED', 503); }
       if (controller.signal.aborted) await deadline;
       phase = 'upload';
-      let { attachments, usedCachedKeys } = await bounded(this.#resolveImageAttachments(accountId, token, images, { signal: controller.signal, timeoutMs }));
+      let attachments = [], usedCachedKeys = [];
+      if (images.length) {
+        const uploadStart = performance.now();
+        try {
+          ({ attachments, usedCachedKeys } = await bounded(this.#resolveImageAttachments(accountId, token, images, { signal: controller.signal, timeoutMs })));
+        } finally {
+          observeNative(context.timing, 'imageUpload', performance.now() - uploadStart);
+        }
+      }
       if (controller.signal.aborted) await deadline;
       // The product injects its independent transport; historical research ledgers are untouched.
       const STALE_BLOB_CODES = new Set(['NATIVE_HTTP_REJECTED', 'NATIVE_INVALID_STATUS', 'NATIVE_PRECONDITION_REQUIRED', 'NATIVE_TURN_FAILED']);
       for (let blobAttempt = 0; ; blobAttempt++) {
         phase = 'open';
+        let markOpenHeaders = null;
+        try { markOpenHeaders = context.timing?.openStart?.() ?? null; } catch {}
         turn = this.openTurn(token, { messages, images: attachments, temporaryChat: true,
           modeCategory: isAutoModel ? null : modeCategory,
           thinkingLevel: isAutoModel ? null : body.thinking_level,
           ...(isAutoModel ? { smartModelSelection: true } : {}),
           timeoutMs, signal: controller.signal,
           emitHeaders: incremental,
+          ...(typeof markOpenHeaders === 'function' ? { onHeaders: () => { try { markOpenHeaders(); } catch {} } } : {}),
           ...(context.nativeDiagnostic ? { diagnostic: context.nativeDiagnostic } : {}) });
         iterator = turn.events[Symbol.asyncIterator]();
         try {
@@ -707,7 +726,11 @@ export class NativeDirectProvider {
         }
         if (item.done) break;
         const event = item.value;
-        if (incremental && event.type === 'headers') { await deliver({ start: true, response: identity }); continue; }
+        if (incremental && event.type === 'headers') {
+          observeNative(context.timing, 'headers');
+          await deliver({ start: true, response: identity });
+          continue;
+        }
         if (event.type === 'frame') {
           frames++;
           received += event.bytes?.length ?? RESPONSE_LIMITS.wireBytes + 1;
@@ -827,6 +850,10 @@ export class NativeDirectProvider {
               allowThoughtRebase = false;
             }
           }
+          if (!firstVerifiedTextMarked && !downgrade && !outputShape.nativeRefusalPresent && modeMatches(observedMode) && attributionVerified() && rawText.trim().length > 0) {
+            firstVerifiedTextMarked = true;
+            observeNative(context.timing, 'firstVerifiedText');
+          }
           if (incremental && !liveToolError && modeMatches(observedMode) && attributionVerified() && (rebased || liveSyncedLength < rawText.length)) {
             if (rebased) {
               await publish([]);
@@ -924,7 +951,13 @@ export class NativeDirectProvider {
           try { turn?.cancel(); } catch {}
           turn = null; iterator = null; ended = false; grpc = null; httpStatus = null;
           phase = 'upload';
-          ({ attachments, usedCachedKeys } = await bounded(this.#resolveImageAttachments(accountId, token, images, { signal: controller.signal, timeoutMs, bypassCache: true })));
+          observeNative(context.timing, 'blobRetry');
+          const retryUploadStart = performance.now();
+          try {
+            ({ attachments, usedCachedKeys } = await bounded(this.#resolveImageAttachments(accountId, token, images, { signal: controller.signal, timeoutMs, bypassCache: true })));
+          } finally {
+            observeNative(context.timing, 'imageUpload', performance.now() - retryUploadStart);
+          }
           if (controller.signal.aborted) await deadline;
         }
       }

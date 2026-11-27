@@ -5,7 +5,7 @@ import http2 from 'node:http2';
 import { deflateSync } from 'node:zlib';
 import { normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, PROMPT_MAX_BYTES } from '../src/openai-contract.mjs';
 import { measurePromptImagePayload } from '../src/openai-usage.mjs';
-import { decodeImageDataUrl, collectImageInputs, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../src/image-input.mjs';
+import { decodeImageDataUrl, collectImageInputs, createCrc32, jsCrc32, hasCanonicalBase64Tail, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../src/image-input.mjs';
 import { buildConsumerToolInitial } from '../native-wire/consumer-tool-codec.mjs';
 import { buildClientGenerate, GrpcMessageReader, frameGrpcMessage } from '../native-wire/robin-current.mjs';
 import { parse } from '../native-wire/protobuf.mjs';
@@ -533,4 +533,47 @@ test('Responses function_call_output accepts array output with input_text/input_
   assert.equal((await retryRes.json()).choices[0].message.content, 'RECOVERED');
   assert.deepEqual(uploadCalls, [{ count: 2, concurrency: undefined }, { count: 1, concurrency: 1 }]);
   assert.deepEqual(fRetry.seen[0].images.map(x => x.blobId), ['blob_first_ok', 'blob_retry_0']);
+});
+
+test('CRC32 native feature detection matches JS fallback and canonical base64 tail validation is exact across all 64 sextets', () => {
+  const nativeFn = createCrc32();
+  const fallbackFn = createCrc32({});
+  assert.equal(fallbackFn, jsCrc32);
+  for (const sample of [Buffer.alloc(0), Buffer.from([0]), Buffer.from('IHDR'), PNG, png({ padding: 4096 })]) {
+    assert.equal(nativeFn(sample), jsCrc32(sample));
+    assert.equal(fallbackFn(sample), jsCrc32(sample));
+  }
+  // Exhaustively verify all 64 Base64 alphabet characters for both '=' and '==' tail positions
+  // against the full round-trip oracle Buffer.from(s, 'base64').toString('base64') === s.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  for (const ch of alphabet) {
+    const twoPad = `A${ch}==`;
+    const oracleTwo = Buffer.from(twoPad, 'base64').toString('base64') === twoPad;
+    assert.equal(hasCanonicalBase64Tail(twoPad), oracleTwo, `two-pad mismatch for ${twoPad}`);
+
+    const onePad = `AA${ch}=`;
+    const oracleOne = Buffer.from(onePad, 'base64').toString('base64') === onePad;
+    assert.equal(hasCanonicalBase64Tail(onePad), oracleOne, `one-pad mismatch for ${onePad}`);
+  }
+  assert.equal(hasCanonicalBase64Tail(''), false);
+  assert.equal(hasCanonicalBase64Tail('AAA'), false);
+  assert.equal(hasCanonicalBase64Tail('AAAA'), true);
+
+  // Flip a non-zero padding bit on a real padded PNG so Buffer.from decodes identical bytes,
+  // verifying decodeImageDataUrl still rejects the non-canonical encoding.
+  let paddedPng = null;
+  for (let pad = 0; pad < 6; pad++) {
+    const candidate = png({ padding: pad });
+    const b64 = candidate.toString('base64');
+    if (b64.endsWith('=')) { paddedPng = { candidate, b64 }; break; }
+  }
+  assert.ok(paddedPng, 'expected to find a padded PNG');
+  const padCount = paddedPng.b64.endsWith('==') ? 2 : 1;
+  const idx = paddedPng.b64.length - padCount - 1;
+  const origChar = paddedPng.b64[idx];
+  const mutatedChar = alphabet[(alphabet.indexOf(origChar) + 1) & 63];
+  const nonCanonicalB64 = paddedPng.b64.slice(0, idx) + mutatedChar + paddedPng.b64.slice(idx + 1);
+  assert.deepEqual(Buffer.from(nonCanonicalB64, 'base64'), paddedPng.candidate);
+  assert.notEqual(Buffer.from(nonCanonicalB64, 'base64').toString('base64'), nonCanonicalB64);
+  rejected(() => decodeImageDataUrl(`data:image/png;base64,${nonCanonicalB64}`), 'INVALID_IMAGE_DATA_URL');
 });

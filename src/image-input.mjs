@@ -1,3 +1,4 @@
+import zlib from 'node:zlib';
 import { parseRemoteImageUrl } from './image-url.mjs';
 import { protocolError } from './tool-protocol.mjs';
 
@@ -9,14 +10,44 @@ export const MAX_TOTAL_IMAGE_URL_BYTES = Math.ceil(MAX_TOTAL_IMAGE_BYTES / 3) * 
 const MAX_PIXELS = 40_000_000;
 const fail = (code, status = 400) => { throw protocolError(code, status); };
 const pngMagic = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-const crcTable = Uint32Array.from({ length: 256 }, (_, value) => {
-  for (let i = 0; i < 8; i++) value = value & 1 ? (value >>> 1) ^ 0xedb88320 : value >>> 1;
-  return value >>> 0;
-});
-function crc32(bytes) {
+let crcTable = null;
+export function jsCrc32(bytes) {
+  if (!crcTable) {
+    crcTable = Uint32Array.from({ length: 256 }, (_, value) => {
+      for (let i = 0; i < 8; i++) value = value & 1 ? (value >>> 1) ^ 0xedb88320 : value >>> 1;
+      return value >>> 0;
+    });
+  }
   let value = 0xffffffff;
   for (const byte of bytes) value = crcTable[(value ^ byte) & 255] ^ (value >>> 8);
   return (value ^ 0xffffffff) >>> 0;
+}
+// Node 22 added zlib.crc32() in 22.2.0 while package.json supports >=22.0.0;
+// feature-detect once and keep the standard JS implementation as fallback.
+export function createCrc32(zlibModule = zlib) {
+  return typeof zlibModule?.crc32 === 'function'
+    ? bytes => zlibModule.crc32(bytes) >>> 0
+    : jsCrc32;
+}
+const crc32 = createCrc32();
+function base64Sextet(code) {
+  if (code >= 65 && code <= 90) return code - 65;       // A-Z
+  if (code >= 97 && code <= 122) return code - 71;      // a-z
+  if (code >= 48 && code <= 57) return code + 4;        // 0-9
+  if (code === 43) return 62;                           // +
+  if (code === 47) return 63;                           // /
+  return -1;
+}
+export function hasCanonicalBase64Tail(b64) {
+  const len = b64.length;
+  if (!len || (len & 3)) return false;
+  if (b64.charCodeAt(len - 1) !== 61) return true;
+  if (b64.charCodeAt(len - 2) === 61) {
+    const sextet = base64Sextet(b64.charCodeAt(len - 3));
+    return sextet >= 0 && (sextet & 0x0f) === 0;
+  }
+  const sextet = base64Sextet(b64.charCodeAt(len - 2));
+  return sextet >= 0 && (sextet & 0x03) === 0;
 }
 // Structural checks only: the gateway never decompresses or renders caller images.
 function dimensions(bytes, mimeType) {
@@ -91,10 +122,12 @@ export function decodeImageDataUrl(url) {
   if (!url.startsWith('data:')) fail('UNSUPPORTED_IMAGE_URL');
   if (Buffer.byteLength(url) > MAX_IMAGE_URL_BYTES) fail('IMAGE_TOO_LARGE', 413);
   const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]*={0,2})$/i.exec(url);
-  if (!match || !match[2].length || match[2].length % 4) fail('INVALID_IMAGE_DATA_URL');
-  const mimeType = match[1].toLowerCase(), data = Buffer.from(match[2], 'base64');
-  if (!data.length || data.toString('base64') !== match[2]) fail('INVALID_IMAGE_DATA_URL');
-  return { ...decodeImageBytes(data, mimeType), url: `data:${mimeType};base64,${match[2]}` };
+  if (!match || !hasCanonicalBase64Tail(match[2])) fail('INVALID_IMAGE_DATA_URL');
+  const b64 = match[2];
+  const pad = b64.charCodeAt(b64.length - 1) === 61 ? (b64.charCodeAt(b64.length - 2) === 61 ? 2 : 1) : 0;
+  const mimeType = match[1].toLowerCase(), data = Buffer.from(b64, 'base64');
+  if (!data.length || data.length !== (b64.length / 4) * 3 - pad) fail('INVALID_IMAGE_DATA_URL');
+  return { ...decodeImageBytes(data, mimeType), url: `data:${mimeType};base64,${b64}` };
 }
 export function decodeImageBytes(data, mimeType) {
   if (!Buffer.isBuffer(data) || !data.length) fail('INVALID_IMAGE_BYTES');

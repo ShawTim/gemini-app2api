@@ -14,7 +14,7 @@ function sliceCodeUnitsSafe(text, maxChars = CITATION_LIMITS.MAX_TITLE_CHARS) {
 }
 
 function cleanPlainTitle(value, { stripHtml = false } = {}) {
-  if (typeof value !== 'string' || Buffer.from(value, 'utf8').toString('utf8') !== value) return '';
+  if (typeof value !== 'string' || !value.isWellFormed()) return '';
   let text = stripHtml ? value.replace(/<[^>]*>/g, '') : value;
   text = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
   return sliceCodeUnitsSafe(text, CITATION_LIMITS.MAX_TITLE_CHARS);

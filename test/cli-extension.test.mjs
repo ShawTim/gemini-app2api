@@ -13,6 +13,7 @@ import {
 } from '../extensions/cli/cli.js';
 import { createMcpAuthManager, writeStoredCredential } from '../extensions/mcp/auth.js';
 import { createMcpToolHandlers } from '../extensions/mcp/tools.js';
+import { createReadonlyToolExecutor } from '../extensions/cli/readonly-tools.js';
 
 const ONE_PIXEL_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8b0AAAAASUVORK5CYII=',
@@ -1470,4 +1471,39 @@ test('Carbon review regressions: src/**/*.ts glob, emoji grep truncation, symlin
     assert.equal(cap.out, '');
     assert.equal(JSON.parse(fs.readFileSync(searchOut, 'utf8')).content, 'Found it');
   }
+});
+
+test('readonly grep preserves case-insensitive matching and cursor BFS order', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-grep-case-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'a', 'nested'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'b'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'root.txt'), 'NOTHING_HERE\n');
+  fs.writeFileSync(path.join(dir, 'a', 'upper.txt'), 'LINE1\nFOO_BAR_TARGET\n');
+  fs.writeFileSync(path.join(dir, 'a', 'nested', 'deep.txt'), 'foo_bar_target\n');
+  fs.writeFileSync(path.join(dir, 'b', 'mixed.txt'), 'Foo_Bar_Target\n');
+
+  const exec = createReadonlyToolExecutor(dir);
+  const caseSensitive = exec.execute('grep', { pattern: 'foo_bar_target' });
+  assert.equal(caseSensitive.ok, true);
+  assert.match(caseSensitive.output, /a\/nested\/deep\.txt:1: foo_bar_target/);
+  assert.doesNotMatch(caseSensitive.output, /FOO_BAR_TARGET|Foo_Bar_Target/);
+
+  const caseInsensitive = exec.execute('grep', { pattern: 'foo_bar_target', case_sensitive: false });
+  assert.equal(caseInsensitive.ok, true);
+  // BFS order: a/upper.txt and b/mixed.txt (depth 1) appear before a/nested/deep.txt (depth 2).
+  const lines = caseInsensitive.output.split('\n');
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /^a\/upper\.txt:2: FOO_BAR_TARGET$/);
+  assert.match(lines[1], /^b\/mixed\.txt:1: Foo_Bar_Target$/);
+  assert.match(lines[2], /^a\/nested\/deep\.txt:1: foo_bar_target$/);
+
+  const found = exec.execute('find', {});
+  assert.equal(found.ok, true);
+  assert.deepEqual(found.output.split('\n'), [
+    'root.txt',
+    'a/upper.txt',
+    'b/mixed.txt',
+    'a/nested/deep.txt',
+  ]);
 });

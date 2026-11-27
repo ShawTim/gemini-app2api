@@ -32,7 +32,7 @@ function jsonTree(
     state.bytes = (state.bytes || 0) + n;
     if (state.bytes > maxBytes) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, paramPrefix ? `${paramPrefix}.bytes` : null);
   };
-  if (typeof value === 'string') { if (Buffer.from(value).toString('utf8') !== value) throw error('INVALID_TOOL_STRING'); add(Buffer.byteLength(value)); return; }
+  if (typeof value === 'string') { if (!value.isWellFormed()) throw error('INVALID_TOOL_STRING'); add(Buffer.byteLength(value)); return; }
   if (value === null || typeof value === 'boolean') { add(4); return; }
   if (typeof value === 'number') { if (!Number.isFinite(value)) throw declaration('Non-finite JSON number'); add(8); return; }
   if (typeof value !== 'object') throw declaration('Value is not plain JSON');

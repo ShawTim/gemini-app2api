@@ -64,9 +64,11 @@ function abortReasonFault(signal) {
     ? fault('NATIVE_TURN_TIMEOUT', 504)
     : fault('REQUEST_CANCELLED', 499);
 }
-async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
+async function write(res, chunk, signal = null, writeTimeoutMs = 30000, onWrite = null) {
   if (res.destroyed || res.writableEnded) throw fault('REQUEST_CANCELLED', 499);
-  if (res.write(chunk) !== false) return;
+  const flushed = res.write(chunk);
+  if (typeof onWrite === 'function') try { onWrite(); } catch {}
+  if (flushed !== false) return;
   if (signal?.aborted) {
     if (!res.destroyed && !res.writableEnded) res.destroy?.();
     throw abortReasonFault(signal);
@@ -103,7 +105,7 @@ async function write(res, chunk, signal = null, writeTimeoutMs = 30000) {
     else if (signal?.aborted) onAbort();
   });
 }
-export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, ignoredTokenParameters = [], parallelToolCalls = true, responseToolIdentities = undefined, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000 } = {}) {
+export function createResponseDelivery(res, { route = 'chat', stream = false, includeUsage = false, model, thinkingLevel, reasoningEffort, ignoredTokenParameters = [], parallelToolCalls = true, responseToolIdentities = undefined, promptChars, imageCount = 0, deferEmptyStart = false, signal = null, writeTimeoutMs = 30000, keepaliveMs = 15000, keepaliveHeadersDelayMs = 45000, onFirstPublishedText = null } = {}) {
   let meta = { id: 'chatcmpl-' + crypto.randomBytes(16).toString('hex'), created: Math.floor(Date.now() / 1000), model,
     ...(responseToolIdentities ? { [RESPONSE_TOOL_IDENTITIES]: responseToolIdentities } : {}),
     requestedThinkingLevel: thinkingLevel,
@@ -112,7 +114,12 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // Monotonic wire lifecycle: 'pending' -> 'comments_only' -> 'events_started' -> 'settled'.
   // discard() clears attempt buffers without rewinding wirePhase.
   let wirePhase = 'pending', eventsEverStarted = false, content = '', calls = [], bytes = 0, sequence = 0, message = null;
-  let publishedLength = 0, publishedBytes = 0;
+  let publishedLength = 0, publishedBytes = 0, firstTextPublished = false;
+  const noteFirstPublishedText = () => {
+    if (firstTextPublished) return;
+    firstTextPublished = true;
+    if (typeof onFirstPublishedText === 'function') try { onFirstPublishedText(); } catch {}
+  };
   let keepaliveTimer = null, deferredHeaderTimer = null;
   const isSettled = () => wirePhase === 'settled';
   const hasWireHeaders = () => wirePhase === 'comments_only' || wirePhase === 'events_started';
@@ -200,8 +207,8 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // value read from Google.
   const estimateUsage = (outputBytes = bytes) => estimateTokenUsage({ promptChars, imageCount, outputBytes });
   const output = [];
-  const sendWire = async chunk => {
-    await write(res, chunk, signal, writeTimeoutMs);
+  const sendWire = async (chunk, onWrite = null) => {
+    await write(res, chunk, signal, writeTimeoutMs, onWrite);
     armKeepalive();
   };
   const responseId = () => meta.id.startsWith('resp_') ? meta.id : 'resp_' + meta.id.replace(/^chatcmpl-/, '');
@@ -214,10 +221,10 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     usage: status === 'in_progress' ? null : toResponsesUsage(estimateUsage()),
     parallel_tool_calls: parallelToolCalls, ...(meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
     ...(meta.requestedReasoningEffort === undefined ? {} : { reasoning: { effort: meta.requestedReasoningEffort } }) });
-  const sendChat = (delta, finish_reason = null) => sendWire('data: ' + JSON.stringify({ ...chatBase(),
+  const sendChat = (delta, finish_reason = null, onWrite = null) => sendWire('data: ' + JSON.stringify({ ...chatBase(),
     ...(finish_reason && meta.nativeSearch ? { native_search: meta.nativeSearch } : {}),
-    choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: null } : {}) }) + '\n\n');
-  const sendResponse = (type, data) => sendWire('event: ' + type + '\ndata: ' + JSON.stringify({ type, sequence_number: sequence++, ...data }) + '\n\n');
+    choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: null } : {}) }) + '\n\n', onWrite);
+  const sendResponse = (type, data, onWrite = null) => sendWire('event: ' + type + '\ndata: ' + JSON.stringify({ type, sequence_number: sequence++, ...data }) + '\n\n', onWrite);
   async function finishResponseItems() {
     for (const item of output) {
       if (item.status === 'completed') continue;
@@ -238,7 +245,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
   // Emit one text delta on the client format and count what the caller actually saw.
   async function emitText(delta) {
     if (!stream || !delta) return;
-    if (route === 'chat') { await sendChat({ content: delta }); publishedBytes += Buffer.byteLength(delta); return; }
+    if (route === 'chat') { await sendChat({ content: delta }, null, noteFirstPublishedText); publishedBytes += Buffer.byteLength(delta); return; }
     if (!message) {
       message = { id: 'msg_' + crypto.randomBytes(12).toString('hex'), type: 'message', status: 'in_progress', role: 'assistant',
         content: [{ type: 'output_text', text: '', annotations: [], logprobs: [] }] };
@@ -248,7 +255,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
         part: { type: 'output_text', text: '', annotations: [], logprobs: [] } });
     }
     message.content[0].text = content;
-    await sendResponse('response.output_text.delta', { item_id: message.id, output_index: output.indexOf(message), content_index: 0, delta, logprobs: [] });
+    await sendResponse('response.output_text.delta', { item_id: message.id, output_index: output.indexOf(message), content_index: 0, delta, logprobs: [] }, noteFirstPublishedText);
     publishedBytes += Buffer.byteLength(delta);
   }
   // Flush text the prefix gate is still holding.
@@ -339,6 +346,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
       if (resultCalls.length > 32 || outputBytes > MAX) throw fault('RESPONSE_TOO_LARGE', 502);
       wirePhase = 'settled';
       (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...result, parallelToolCalls, usage: estimateUsage(outputBytes) });
+      if (typeof result.content === 'string' && result.content.length > 0) noteFirstPublishedText();
       return;
     }
     if (wirePhase !== 'events_started') meta = { ...meta, ...result };
@@ -406,6 +414,7 @@ export function createResponseDelivery(res, { route = 'chat', stream = false, in
     if (!stream) {
       wirePhase = 'settled';
       (route === 'responses' ? writeResponsesResponse : writeChatResponse)(res, { ...partial, calls: partialCalls, parallelToolCalls, incomplete: true, incompleteDetails: { reason: 'upstream_interrupted', code: detail.code }, outputError: detail });
+      if (typeof partial.content === 'string' && partial.content.length > 0) noteFirstPublishedText();
       return true;
     }
     if (needsStart) await start(partial);

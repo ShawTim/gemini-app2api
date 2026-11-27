@@ -59,6 +59,7 @@ export function openDirectTurn(
     allowNativeTools = false,
     emitHeaders = false,
     diagnostic,
+    onHeaders,
   } = {},
   { connect = connectHttp2 } = {},
 ) {
@@ -366,6 +367,7 @@ export function openDirectTurn(
     request.on("response", headers => {
       lastInboundAt = Date.now();
       note('peer_headers', { httpStatus: Number(headers[':status']), grpcStatus: Number(headers['grpc-status']) });
+      if (typeof onHeaders === 'function') try { onHeaders(); } catch {}
       status(headers);
       if (emitHeaders && !closed && httpStatus === 200) push({ type: 'headers', httpStatus });
     });

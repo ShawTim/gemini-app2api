@@ -486,8 +486,10 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
     let truncatedByWalk = false;
 
     const queue = [{ abs: absPath, rel: relPosix === '.' ? '' : relPosix }];
-    while (queue.length > 0 && results.length < maxResults) {
-      const current = queue.shift();
+    let queueHead = 0;
+    while (queueHead < queue.length && results.length < maxResults) {
+      const current = queue[queueHead];
+      queue[queueHead++] = undefined;
       let dirents;
       try {
         dirents = readDirSafe(current.abs);
@@ -560,6 +562,7 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
         return;
       }
       scannedBytes += Buffer.byteLength(text, 'utf8');
+      if (caseSensitive && !text.includes(needle)) return;
       const lines = text.split(/\r?\n/);
       for (let i = 0; i < lines.length; i++) {
         if (testLine(lines[i])) {
@@ -576,8 +579,10 @@ export function createReadonlyToolExecutor(cwd = process.cwd(), enabledTools = R
       scanFile(absPath, relPosix);
     } else if (stat.isDirectory()) {
       const queue = [{ abs: absPath, rel: relPosix === '.' ? '' : relPosix }];
-      while (queue.length > 0 && matches.length < maxMatches && !truncatedByWalk && !truncatedByBytes) {
-        const current = queue.shift();
+      let queueHead = 0;
+      while (queueHead < queue.length && matches.length < maxMatches && !truncatedByWalk && !truncatedByBytes) {
+        const current = queue[queueHead];
+        queue[queueHead++] = undefined;
         let dirents;
         try {
           dirents = readDirSafe(current.abs);

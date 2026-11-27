@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixture } from "./gateway-fixture.mjs";
+import { EventEmitter } from "node:events";
+import { fixture, textFrame, tools, toolBlock } from "./gateway-fixture.mjs";
+import { createRequestTimings, MAX_TIMING_ATTEMPTS } from "../src/gateway/request-timings.mjs";
+import { createResponseDelivery } from "../src/gateway/response-delivery.mjs";
 import { safeNativeEvidence } from "../src/gateway/native-evidence.mjs";
 import { lengthDelimited as m, varintField as v } from "../native-wire/protobuf.mjs";
 import { ModelTelemetry, classifyTelemetryError, measureOutputBytes } from "../src/gateway/model-telemetry.mjs";
@@ -782,5 +785,328 @@ test("real native transport NATIVE_CREDENTIAL_REQUIRED guard preserves HTTP 503 
     assert.equal(accountNeon.errorCounts.other, 0);
   } finally {
     await f.close();
+  }
+});
+
+test("createRequestTimings tracks monotonic logical vs physical attempt stages and bounds attempts", () => {
+  let now = 1000;
+  const t = createRequestTimings({ monotonic: () => now });
+
+  // Attempt 1: remote download, upload, headers, verified text, then fails before publishing.
+  now = 1005;
+  const a1 = t.startAttempt();
+  a1.imageDownload(12.4);
+  a1.imageUpload(30.6);
+  now = 1050;
+  a1.openStart();
+  now = 1085;
+  a1.headers();
+  a1.headers(); // duplicate headers on same open must be ignored
+  now = 1140;
+  a1.firstVerifiedText();
+  now = 1160;
+  a1.finish(false);
+
+  // Attempt 2: stale blob retry + succeeds + publishes mid-stream.
+  now = 1170;
+  const a2 = t.startAttempt();
+  a2.imageUpload(5);
+  a2.openStart();
+  now = 1190;
+  a2.headers();
+  a2.blobRetry();
+  a2.imageUpload(22);
+  now = 1220;
+  a2.openStart();
+  now = 1255;
+  a2.headers();
+  now = 1310;
+  a2.firstVerifiedText();
+  now = 1345;
+  t.markFirstPublishedText();
+  now = 1360;
+  a2.finish(true);
+
+  now = 1370;
+  const snap = t.snapshot();
+  assert.equal(snap.totalMs, 370);
+  assert.equal(snap.imageDownloadMs, 12);
+  assert.equal(snap.imageUploadMs, 58); // 31 + 5 + 22
+  assert.equal(snap.openToHeadersMs, 35); // second open of attempt 2 (1255 - 1220)
+  assert.equal(snap.firstVerifiedTextMs, 140); // logical first verified (attempt 1: 1140 - 1000)
+  assert.equal(snap.firstPublishedTextMs, 345); // logical first published (1345 - 1000)
+  assert.equal(snap.attempts.length, 2);
+  assert.deepEqual(snap.attempts[0], {
+    attempt: 1,
+    startedAtMs: 5,
+    durationMs: 155,
+    imageDownloadMs: 12,
+    imageUploadMs: 31,
+    openToHeadersMs: 35,
+    firstVerifiedTextMs: 135,
+    firstPublishedTextMs: null,
+    blobRetries: 0,
+    outcome: "error",
+  });
+  assert.deepEqual(snap.attempts[1], {
+    attempt: 2,
+    startedAtMs: 170,
+    durationMs: 190,
+    imageDownloadMs: null,
+    imageUploadMs: 27,
+    openToHeadersMs: 35,
+    firstVerifiedTextMs: 140,
+    firstPublishedTextMs: 175,
+    blobRetries: 1,
+    outcome: "ok",
+  });
+
+  // Verify attempt cap.
+  const capped = createRequestTimings({ monotonic: () => now });
+  for (let i = 0; i < MAX_TIMING_ATTEMPTS + 4; i++) {
+    const a = capped.startAttempt();
+    a.finish(true);
+  }
+  const capSnap = capped.snapshot();
+  assert.equal(capSnap.attempts.length, MAX_TIMING_ATTEMPTS);
+  assert.equal(capSnap.omittedAttempts, 4);
+});
+
+test("gateway request timings distinguish streaming published text from headers/keepalive/tool-only turns without leaking PII", async (t) => {
+  const f = await fixture({ accountCount: 1, allowFailover: false });
+  t.after(() => f.close());
+
+  // 1. Streaming text > 2048B publishes mid-stream and records openToHeadersMs, firstVerifiedTextMs, firstPublishedTextMs.
+  const longText = "A".repeat(2600);
+  f.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      opts.onHeaders?.();
+      yield { type: "headers", httpStatus: 200 };
+      yield { type: "frame", bytes: textFrame(longText, 3, 2) };
+      yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const streamRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-argon", stream: true, messages: [{ role: "user", content: "PRIVATE_TIMING_PROMPT" }] },
+  });
+  assert.equal(streamRes.status, 200);
+  await streamRes.text();
+  const streamRow = f.app.overview().requests[0];
+  assert.ok(streamRow.timings);
+  assert.equal(streamRow.durationMs, streamRow.timings.totalMs);
+  assert.equal(streamRow.timings.imageDownloadMs, null);
+  assert.equal(streamRow.timings.imageUploadMs, null);
+  assert.ok(Number.isInteger(streamRow.timings.openToHeadersMs) && streamRow.timings.openToHeadersMs >= 0);
+  assert.ok(Number.isInteger(streamRow.timings.firstVerifiedTextMs) && streamRow.timings.firstVerifiedTextMs >= 0);
+  assert.ok(Number.isInteger(streamRow.timings.firstPublishedTextMs) && streamRow.timings.firstPublishedTextMs >= streamRow.timings.firstVerifiedTextMs);
+  assert.equal(streamRow.timings.attempts.length, 1);
+  assert.equal(streamRow.timings.attempts[0].outcome, "ok");
+  assert.ok(Number.isInteger(streamRow.timings.attempts[0].firstPublishedTextMs));
+
+  // 2. Streaming tool-call-only turn (headers + role + tool call, zero prose text):
+  // SSE headers / role / tool_calls must NOT count as firstPublishedTextMs.
+  f.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      opts.onHeaders?.();
+      yield { type: "headers", httpStatus: 200 };
+      yield { type: "frame", bytes: textFrame(toolBlock, 3, 2) };
+      yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const toolRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-argon", stream: true, tools, tool_choice: "required", messages: [{ role: "user", content: "PRIVATE_TIMING_TOOL" }] },
+  });
+  assert.equal(toolRes.status, 200);
+  await toolRes.text();
+  const toolRow = f.app.overview().requests[0];
+  assert.equal(toolRow.toolCalls, 1);
+  assert.equal(toolRow.timings.firstPublishedTextMs, null);
+  assert.equal(toolRow.timings.attempts[0].firstPublishedTextMs, null);
+
+  // 3. Non-streaming buffered turn records logical firstPublishedTextMs on JSON write.
+  f.app.provider.openTurn = (_token, opts) => ({
+    events: (async function* () {
+      opts.onHeaders?.();
+      yield { type: "frame", bytes: textFrame("PRIVATE_TIMING_REPLY", 3, 2) };
+      yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+    })(),
+    cancel() {},
+  });
+  const jsonRes = await f.api("/v1/chat/completions", {
+    method: "POST",
+    body: { model: "gemini-argon", stream: false, messages: [{ role: "user", content: "PRIVATE_TIMING_BUFFERED" }] },
+  });
+  assert.equal(jsonRes.status, 200);
+  const jsonBody = await jsonRes.json();
+  assert.equal(jsonBody.timings, undefined);
+  const jsonRow = f.app.overview().requests[0];
+  assert.ok(Number.isInteger(jsonRow.timings.openToHeadersMs) && jsonRow.timings.openToHeadersMs >= 0);
+  assert.ok(Number.isInteger(jsonRow.timings.firstVerifiedTextMs));
+  assert.ok(Number.isInteger(jsonRow.timings.firstPublishedTextMs));
+  assert.equal(jsonRow.timings.attempts[0].firstPublishedTextMs, null);
+
+  // Privacy: timings never contain prompt/reply/identity/URLs.
+  assert.doesNotMatch(JSON.stringify(f.app.overview().requests.map(r => r.timings)), /PRIVATE|TIMING|acc-|http/);
+});
+
+test("request timings reject post-finish/superseded open callbacks, mark write acceptance before drain, cover native_search and short-output retries", async (t) => {
+  // 1. Late headers after finish() and stale openStart() callback after blob retry are ignored.
+  {
+    let now = 100;
+    const timing = createRequestTimings({ monotonic: () => now });
+    const a1 = timing.startAttempt();
+    const markFirstOpen = a1.openStart();
+    now = 110;
+    a1.finish(false);
+    now = 130;
+    markFirstOpen();
+    a1.headers();
+    a1.firstVerifiedText();
+    const snap1 = timing.snapshot();
+    assert.equal(snap1.attempts[0].durationMs, 10);
+    assert.equal(snap1.attempts[0].openToHeadersMs, null);
+    assert.equal(snap1.attempts[0].firstVerifiedTextMs, null);
+
+    // Superseded open callback must not consume the new open's headers slot.
+    now = 200;
+    const a2 = timing.startAttempt();
+    const staleOpen = a2.openStart();
+    a2.blobRetry();
+    now = 220;
+    const freshOpen = a2.openStart();
+    now = 230;
+    staleOpen(); // stale open arrives late: must be ignored
+    assert.equal(timing.snapshot().openToHeadersMs, null);
+    now = 255;
+    freshOpen(); // fresh open arrives: 255 - 220 = 35ms
+    a2.finish(true);
+    const snap2 = timing.snapshot();
+    assert.equal(snap2.openToHeadersMs, 35);
+    assert.equal(snap2.attempts[1].openToHeadersMs, 35);
+  }
+
+  // 2. Backpressured res.write() === false records firstPublishedTextMs at write acceptance (10ms), not drain (50ms).
+  {
+    let now = 0;
+    const timing = createRequestTimings({ monotonic: () => now });
+    let resolveTextWritten;
+    const textWritten = new Promise(resolve => { resolveTextWritten = resolve; });
+    const mockRes = Object.assign(new EventEmitter(), {
+      headersSent: false,
+      destroyed: false,
+      writableEnded: false,
+      writableNeedDrain: false,
+      chunks: [],
+      writeHead() { this.headersSent = true; },
+      flushHeaders() {},
+      removeHeader() {},
+      write(chunk) {
+        this.chunks.push(String(chunk));
+        // Backpressure ONLY on the real text delta chunk (not role chunk).
+        if (String(chunk).includes("BACKPRESSURE_TEXT")) {
+          this.writableNeedDrain = true;
+          resolveTextWritten();
+          return false;
+        }
+        return true;
+      },
+      end() { this.writableEnded = true; },
+    });
+    const delivery = createResponseDelivery(mockRes, {
+      route: "chat",
+      stream: true,
+      model: "gemini-neon",
+      onFirstPublishedText: () => timing.markFirstPublishedText(),
+    });
+    now = 5;
+    await delivery.accept({ start: true, response: { model: "gemini-neon" } });
+    assert.equal(timing.snapshot().firstPublishedTextMs, null, "role chunk must not trigger firstPublishedTextMs");
+    now = 10;
+    const writePromise = delivery.accept({ content: "BACKPRESSURE_TEXT" + "X".repeat(2100) });
+    await textWritten;
+    // Write acceptance has already been marked at 10ms while drain is still pending!
+    assert.equal(timing.snapshot().firstPublishedTextMs, 10);
+    now = 50;
+    mockRes.writableNeedDrain = false;
+    mockRes.emit("drain");
+    await writePromise;
+    assert.equal(timing.snapshot().firstPublishedTextMs, 10);
+    delivery.close();
+  }
+
+  // 3. Real pool + delivery short-output retry: Attempt 1 held behind PREFIX_BYTES and reset, Attempt 2 publishes.
+  {
+    const f = await fixture({ accountCount: 2, allowFailover: true, allowAutomaticRecovery: true });
+    t.after(() => f.close());
+    let calls = 0;
+    f.app.provider.openTurn = (_token, opts) => {
+      const attemptNo = ++calls;
+      return {
+        events: (async function* () {
+          opts.onHeaders?.();
+          yield { type: "headers", httpStatus: 200 };
+          if (attemptNo === 1) {
+            yield { type: "frame", bytes: textFrame("Short held prefix", 3, 2) };
+            throw Object.assign(new Error("synthetic reset"), { code: "NATIVE_STREAM_RESET", status: 502 });
+          }
+          yield { type: "frame", bytes: textFrame("Recovered " + "B".repeat(2200), 3, 2) };
+          yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+        })(),
+        cancel() {},
+      };
+    };
+    const res = await f.api("/v1/chat/completions", {
+      method: "POST",
+      body: { model: "gemini-argon", stream: true, messages: [{ role: "user", content: "retry short prefix" }] },
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    const row = f.app.overview().requests[0];
+    assert.equal(row.providerAttempts, 2);
+    assert.equal(row.timings.attempts.length, 2);
+    assert.equal(row.timings.attempts[0].outcome, "error");
+    assert.ok(Number.isInteger(row.timings.attempts[0].firstVerifiedTextMs));
+    assert.equal(row.timings.attempts[0].firstPublishedTextMs, null);
+    assert.equal(row.timings.attempts[1].outcome, "ok");
+    assert.ok(Number.isInteger(row.timings.attempts[1].firstVerifiedTextMs));
+    assert.ok(Number.isInteger(row.timings.attempts[1].firstPublishedTextMs));
+    assert.ok(row.timings.firstPublishedTextMs >= row.timings.attempts[1].startedAtMs);
+  }
+
+  // 4. native_search forwards the same attempt timing observer into inner runTurn.
+  {
+    const f = await fixture({ accountCount: 1, allowFailover: false });
+    t.after(() => f.close());
+    const searchFrame = m(1003, m(1, Buffer.concat([
+      m(1, Buffer.concat([m(1, Buffer.from("resp_search_1")), m(2, m(1, Buffer.from("Verified search answer")))])),
+      m(8, m(2, Buffer.concat([m(1, Buffer.from("google")), v(3, 4)]))),
+      m(30, Buffer.from("Used 4 Neon High model")),
+      v(9, 1), v(41, 3), v(42, 2),
+    ])));
+    f.app.provider.openTurn = (_token, opts) => ({
+      events: (async function* () {
+        opts.onHeaders?.();
+        yield { type: "frame", bytes: searchFrame };
+        await new Promise(r => setTimeout(r, 25));
+        yield { type: "end", httpStatus: 200, grpcStatus: 0 };
+      })(),
+      cancel() {},
+    });
+    const res = await f.api("/v1/chat/completions", {
+      method: "POST",
+      body: { model: "gemini-argon", native_search: true, messages: [{ role: "user", content: "search timing test" }] },
+    });
+    assert.equal(res.status, 200);
+    await res.json();
+    const row = f.app.overview().requests[0];
+    assert.ok(Number.isInteger(row.timings.openToHeadersMs) && row.timings.openToHeadersMs >= 0);
+    assert.ok(Number.isInteger(row.timings.firstVerifiedTextMs) && row.timings.firstVerifiedTextMs >= 0);
+    assert.ok(Number.isInteger(row.timings.firstPublishedTextMs) && row.timings.firstPublishedTextMs >= row.timings.firstVerifiedTextMs);
+    // firstVerifiedTextMs was recorded BEFORE the 25ms tail wait before stream end.
+    assert.ok(row.timings.totalMs - row.timings.firstVerifiedTextMs >= 15, `expected verified text before 25ms tail wait: ${JSON.stringify(row.timings)}`);
   }
 });

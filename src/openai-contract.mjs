@@ -136,7 +136,7 @@ function requestBudget(root) {
 }
 function text(value, { nullable = false } = {}) {
   if (nullable && value === null) return null;
-  if (typeof value !== 'string' || Buffer.from(value).toString('utf8') !== value) fail('INVALID_TEXT');
+  if (typeof value !== 'string' || !value.isWellFormed()) fail('INVALID_TEXT');
   if (value.length > MAX_CHARS || Buffer.byteLength(value) > PROMPT_MAX_BYTES) fail('PROMPT_TOO_LARGE', 413);
   return value;
 }
@@ -145,7 +145,7 @@ function text(value, { nullable = false } = {}) {
 function strippedText(value, param = null) {
   if (typeof value !== 'string') fail('INVALID_TEXT', 400, param);
   if (Buffer.byteLength(value) > PROMPT_MAX_BYTES) fail('REQUEST_TOO_LARGE', 413, param);
-  if (Buffer.from(value).toString('utf8') !== value) fail('INVALID_TEXT', 400, param);
+  if (!value.isWellFormed()) fail('INVALID_TEXT', 400, param);
   return value;
 }
 function id(value) {
@@ -160,7 +160,7 @@ function validateUrlCitation(citation) {
     fail('UNSUPPORTED_ANNOTATIONS');
   }
   if (!isSafeWebUrl(citation.url)) fail('UNSUPPORTED_ANNOTATIONS');
-  if (typeof citation.title !== 'string' || Buffer.from(citation.title).toString('utf8') !== citation.title || citation.title.length > 512) {
+  if (typeof citation.title !== 'string' || !citation.title.isWellFormed() || citation.title.length > 512) {
     fail('UNSUPPORTED_ANNOTATIONS');
   }
   if (!Number.isSafeInteger(citation.start_index) || !Number.isSafeInteger(citation.end_index) || citation.start_index < 0 || citation.end_index < citation.start_index) {
@@ -301,7 +301,7 @@ const SERVICE_TIERS = new Set(['auto', 'default', 'flex', 'priority', 'scale']);
 const VERBOSITY_VALUES = new Set(['low', 'medium', 'high']);
 const TRUNCATION_VALUES = new Set(['auto', 'disabled']);
 function validBoundedUtf8(value, maxBytes) {
-  return typeof value === 'string' && Buffer.from(value).toString('utf8') === value && Buffer.byteLength(value, 'utf8') <= maxBytes;
+  return typeof value === 'string' && value.isWellFormed() && Buffer.byteLength(value, 'utf8') <= maxBytes;
 }
 function validBoundedChars(value, maxChars, maxBytes = maxChars * 4) {
   return validBoundedUtf8(value, maxBytes) && Array.from(value).length <= maxChars;

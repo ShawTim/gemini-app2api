@@ -34,6 +34,9 @@ export const TOOL_JSON_REASONS = Object.freeze([
   'invalid_syntax',
 ]);
 
+const JSON_SCALAR_RE = /(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/y;
+const HEX4_RE = /[0-9a-fA-F]{4}/y;
+
 /** Bounded JSON parser: rejects duplicate keys, non-finite numbers and deep or
  * oversized trees, rather than silently overwriting ambiguous arguments. */
 export function parseBoundedJson(text, { status = 400 } = {}) {
@@ -45,7 +48,13 @@ export function parseBoundedJson(text, { status = 400 } = {}) {
   if (typeof text !== 'string') bad('invalid_syntax');
   if (Buffer.byteLength(text) > TOOL_LIMITS.bytes) bad('limit_exceeded');
   let pos = 0, nodes = 0;
-  const ws = () => { while (/[\t\n\r ]/.test(text[pos] ?? '\0')) pos++; };
+  const ws = () => {
+    while (pos < text.length) {
+      const code = text.charCodeAt(pos);
+      if (code === 32 || code === 9 || code === 10 || code === 13) pos++;
+      else break;
+    }
+  };
   const string = () => {
     const start = pos++;
     while (pos < text.length) {
@@ -53,7 +62,7 @@ export function parseBoundedJson(text, { status = 400 } = {}) {
       if (ch === '"') {
         let result;
         try { result = JSON.parse(text.slice(start, pos)); } catch { bad('invalid_syntax'); }
-        if (Buffer.from(result).toString('utf8') !== result) bad('invalid_surrogate');
+        if (!result.isWellFormed()) bad('invalid_surrogate');
         return result;
       }
       if (ch === '\n' || ch === '\r') bad('raw_newline_in_string');
@@ -62,7 +71,8 @@ export function parseBoundedJson(text, { status = 400 } = {}) {
         if (pos >= text.length) bad('unterminated_json');
         const esc = text[pos++];
         if (esc === 'u') {
-          if (!/^[0-9a-fA-F]{4}/.test(text.slice(pos, pos + 4))) bad('invalid_escape');
+          HEX4_RE.lastIndex = pos;
+          if (!HEX4_RE.test(text)) bad('invalid_escape');
           pos += 4;
         } else if (!'"\\/bfnrt'.includes(esc)) {
           bad('invalid_escape');
@@ -105,7 +115,8 @@ export function parseBoundedJson(text, { status = 400 } = {}) {
         if (separator !== ',') bad(childWasString ? 'unexpected_token_after_string' : 'invalid_syntax');
       }
     }
-    const token = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(pos));
+    JSON_SCALAR_RE.lastIndex = pos;
+    const token = JSON_SCALAR_RE.exec(text);
     if (!token) bad('invalid_syntax');
     pos += token[0].length;
     const result = JSON.parse(token[0]);

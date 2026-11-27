@@ -321,3 +321,26 @@ test('normal process exit waits for the single result timer and keeps known non-
   assert.equal(report.attempts[0].events[0].code, 'NATIVE_PRECONDITION_REQUIRED');
   assert.ok(report.cleanupWindowMs >= 290);
 });
+
+test('unarmed fast-path does not cache misses and claims immediately when armed live at runtime', async t => {
+  const directory = temporary(t);
+  const diag = new NativeDiagnostic(directory);
+  // Repeated unarmed claims return null without creating files.
+  for (let i = 0; i < 5; i++) assert.equal(diag.claim(id()), null);
+  assert.deepEqual(fs.readdirSync(directory), []);
+  // Non-existent dir or regular-file path also returns null cleanly.
+  assert.equal(new NativeDiagnostic(path.join(directory, 'missing-dir')).claim(id()), null);
+  const regularFile = path.join(directory, 'not-a-dir');
+  fs.writeFileSync(regularFile, 'x', { mode: 0o600 });
+  assert.equal(new NativeDiagnostic(regularFile).claim(id()), null);
+  fs.unlinkSync(regularFile);
+  // Arm live on the same NativeDiagnostic instance: the very next claim must succeed.
+  arm(directory);
+  const reqId = id();
+  const trace = diag.claim(reqId);
+  assert.ok(trace, 'live arm must be claimed on the immediate next request');
+  trace.finish({ status: 200, providerAttempts: 1 });
+  const report = await result(directory);
+  assert.equal(report.requestId, reqId);
+  assert.equal(report.status, 200);
+});

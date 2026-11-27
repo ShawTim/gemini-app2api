@@ -107,11 +107,13 @@ export class NativeDiagnostic {
     let fd;
     try {
       if (!this.directory || !/^req_[a-f0-9-]{36}$/.test(requestId)) return null;
+      const armPath = path.join(this.directory, NATIVE_DIAGNOSTIC_FILES.arm);
+      const armStat = fs.lstatSync(armPath, { throwIfNoEntry: false });
+      if (!armStat || !privateRegular(armStat)) return null;
       const directory = fs.lstatSync(this.directory);
       if (!directory.isDirectory() || (directory.mode & 0o077) !== 0) return null;
       const files = Object.fromEntries(Object.entries(NATIVE_DIAGNOSTIC_FILES).map(([key, name]) => [key, path.join(this.directory, name)]));
       if (fs.existsSync(files.claimed) || fs.existsSync(files.result)) return null;
-      if (!privateRegular(fs.lstatSync(files.arm))) return null;
       fd = fs.openSync(files.arm, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
       const stat = fs.fstatSync(fd);
       if (!privateRegular(stat) || stat.size > 256 || stat.size < 1) return null;
