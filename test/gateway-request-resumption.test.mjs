@@ -185,3 +185,74 @@ test('serialization-limit failures discard buffered output and do not retain a n
   assert.equal(connection.res.bytes.toString(), '{"error":"RESUMABLE_OUTPUT_LIMIT"}');
   assert.equal(registry.snapshot().retained, 0); registry.close();
 });
+
+test('lazy parsed-body digest preserves JSON equivalence and key-order isolation while stringifying once per request', async t => {
+  // 1. Unit verification: bodyScope stringifies once across has(), hasBodyCandidate(), and run().
+  const registry = new RequestResumption();
+  const otherRegistry = new RequestResumption();
+  let stringifies = 0;
+  const countedBody = {
+    model: 'gemini-neon',
+    toJSON() { stringifies++; return { model: 'gemini-neon', messages: [{ role: 'user', content: 'counted' }] }; },
+  };
+  const scope = registry.scopeBody(countedBody);
+  assert.equal(stringifies, 0, 'scopeBody must be lazy');
+  assert.equal(registry.has({ owner: 'o', sessionId: 's', route: 'chat', body: countedBody, bodyScope: scope }), false);
+  assert.equal(registry.hasBodyCandidate({ owner: 'o', route: 'chat', body: countedBody, bodyScope: scope }), false);
+  assert.equal(stringifies, 1);
+  const conn = wire();
+  let release;
+  const work = registry.run({ ...conn, owner: 'o', sessionId: 's', route: 'chat', body: countedBody, bodyScope: scope }, async (_req, res) => {
+    await new Promise(r => { release = r; });
+    res.end('ok');
+  });
+  await until(() => release);
+  assert.equal(stringifies, 1, 'run() must reuse the scoped body digest for both session key and bodyKey');
+  // Cross-instance bodyScope must be ignored (cannot forge digest across instances).
+  const foreignScope = otherRegistry.scopeBody({ model: 'different' });
+  assert.equal(registry.has({ owner: 'o', sessionId: 's', route: 'chat', body: countedBody, bodyScope: foreignScope }), true);
+  // Same-instance bodyScope created for bodyA must be ignored when passed with a different bodyB.
+  const otherBody = { model: 'gemini-neon', messages: [{ role: 'user', content: 'completely-different' }] };
+  assert.equal(registry.has({ owner: 'o', sessionId: 's', route: 'chat', body: otherBody, bodyScope: scope }), false);
+  assert.equal(registry.hasBodyCandidate({ owner: 'o', route: 'chat', body: otherBody, bodyScope: scope }), false);
+  // Direct call without bodyScope never returns stale digest after caller mutates body.
+  const mutable = { x: 1 };
+  const conn2 = wire();
+  let release2;
+  const work2 = registry.run({ ...conn2, owner: 'o', sessionId: 's2', route: 'chat', body: mutable }, async (_req, res) => {
+    await new Promise(r => { release2 = r; });
+    res.end('ok2');
+  });
+  await until(() => release2);
+  assert.equal(registry.has({ owner: 'o', sessionId: 's2', route: 'chat', body: mutable }), true);
+  mutable.x = 2;
+  assert.equal(registry.has({ owner: 'o', sessionId: 's2', route: 'chat', body: mutable }), false);
+  release(); release2();
+  await Promise.all([work, work2]);
+  registry.close(); otherRegistry.close();
+
+  // 2. End-to-end HTTP: whitespace/escape/number-formatting equivalent JSON matches on busy follower;
+  // swapped key order stays isolated.
+  const f = await fixture({ turns: ['Leader answer', 'Swapped key order answer'], delay: 120, allowAutomaticRecovery: true, allowFailover: false });
+  t.after(() => f.close());
+  f.store.updateSettings({ maxConcurrent: 1 });
+  const rawLeader = '{"model":"gemini-argon","messages":[{"role":"user","content":"a"}],"temperature":1}';
+  const rawEquiv = '{ "model" : "gemini-argon", "messages" : [ { "role" : "user", "content" : "\\u0061" } ], "temperature" : 1.0 }';
+  const rawSwapped = '{"messages":[{"content":"a","role":"user"}],"model":"gemini-argon","temperature":1}';
+  const headers = { Authorization: 'Bearer ' + f.key.key, 'Content-Type': 'application/json', 'X-Session-ID': 'equiv-session' };
+
+  const leaderReq = fetch(f.base + '/v1/chat/completions', { method: 'POST', headers, body: rawLeader });
+  await until(() => f.seen.length === 1);
+  // Busy follower with formatting-equivalent JSON must attach & resume without 429 or second generation.
+  const equivReq = fetch(f.base + '/v1/chat/completions', { method: 'POST', headers, body: rawEquiv });
+  // Swapped key order while busy must NOT match leader (rejected with 429 while maxConcurrent=1).
+  const swappedBusy = await fetch(f.base + '/v1/chat/completions', { method: 'POST', headers, body: rawSwapped });
+  assert.equal(swappedBusy.status, 429);
+  const [leaderRes, equivRes] = await Promise.all([leaderReq, equivReq]);
+  assert.equal(leaderRes.status, 200);
+  assert.equal(equivRes.status, 200);
+  assert.equal(equivRes.headers.get('x-gemini-request-resumed'), 'true');
+  assert.equal(f.seen.length, 1);
+  assert.equal((await equivRes.json()).choices[0].message.content, 'Leader answer');
+  await leaderRes.json();
+});

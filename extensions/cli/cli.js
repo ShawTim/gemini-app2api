@@ -810,25 +810,33 @@ export async function runGeminiCli(
 
       if (parsed.tools) {
         const gateway = resolveGatewayConfig(env);
-        const normalizedAsk = normalizeAskGeminiArgs(
-          {
-            prompt,
-            ...(system !== undefined ? { system } : {}),
-            ...(parsed.model !== undefined ? { model: parsed.model } : {}),
-            ...(parsed.thinking !== undefined ? { thinking_level: parseThinkingArg(parsed.thinking) } : {}),
-            ...(parsed.images.length ? { images: buildImageArgs(parsed.images) } : {}),
-          },
-          {
-            allowedModels: gateway ? NATIVE_MODELS : Object.keys(MODEL_SPECS),
+        const allowedModels = gateway ? NATIVE_MODELS : Object.keys(MODEL_SPECS);
+        const askArgs = {
+          prompt,
+          ...(system !== undefined ? { system } : {}),
+          ...(parsed.model !== undefined ? { model: parsed.model } : {}),
+          ...(parsed.thinking !== undefined ? { thinking_level: parseThinkingArg(parsed.thinking) } : {}),
+          ...(parsed.images.length ? { images: buildImageArgs(parsed.images) } : {}),
+        };
+        let imageCache;
+        let normalizedAsk;
+        if (parsed.images.length && typeof handlers.loadLocalOrInlineImagePartsAsync === 'function') {
+          normalizeAskGeminiArgs(askArgs, { allowedModels, loadImages: () => [] });
+          imageCache = typeof handlers.createImageCache === 'function' ? handlers.createImageCache() : undefined;
+          const preloaded = await handlers.loadLocalOrInlineImagePartsAsync(askArgs.images, { imageCache });
+          normalizedAsk = normalizeAskGeminiArgs(askArgs, { allowedModels, loadImages: () => preloaded });
+        } else {
+          normalizedAsk = normalizeAskGeminiArgs(askArgs, {
+            allowedModels,
             ...(typeof handlers.loadLocalOrInlineImageParts === 'function'
               ? { loadImages: handlers.loadLocalOrInlineImageParts }
               : {}),
-          },
-        );
+          });
+        }
         const userMsg = normalizedAsk.messages[normalizedAsk.messages.length - 1];
 
         result = await runReadonlyHarnessLoop({
-          runChatTurn: (payload, opts) => handlers.runChatTurn(payload, opts),
+          runChatTurn: (payload, opts) => handlers.runChatTurn(payload, { ...opts, ...(imageCache?.size ? { imageCache } : {}) }),
           model: normalizedAsk.model,
           thinkingLevel: normalizedAsk.thinking_level,
           system,

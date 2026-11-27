@@ -245,3 +245,26 @@ test('parseBoundedJson sticky regex and isWellFormed handle scalars, valid pairs
     error => error.code === 'INVALID_TOOL_JSON' && error.toolProtocolReason === 'invalid_escape',
   );
 });
+
+test('compileToolPolicy returns an immutable read-only registry and buildToolInstruction rejects forged policy objects', () => {
+  const compiled = compileToolPolicy(tools, 'required');
+  assert.equal(Object.isFrozen(compiled), true);
+  assert.equal(Object.isFrozen(compiled.registry), true);
+  assert.equal(typeof compiled.registry.set, 'undefined');
+  assert.equal(typeof compiled.registry.delete, 'undefined');
+  assert.equal(typeof compiled.registry.clear, 'undefined');
+  assert.equal(compiled.registry.has('exec_command'), true);
+  assert.equal(compiled.registry.size, tools.length);
+  assert.equal(buildToolInstruction(tools, 'required', { policy: compiled }), buildToolInstruction(tools, 'required'));
+  // Forged plain object AND spread-cloned policy attempting to disable tools must be ignored.
+  const forged = { enabled: false, forced: null, choice: 'none', registry: new Map() };
+  const spreadClone = { ...compiled, enabled: false, choice: 'none' };
+  assert.equal(buildToolInstruction(tools, 'required', { policy: forged }), buildToolInstruction(tools, 'required'));
+  assert.equal(buildToolInstruction(tools, 'required', { policy: spreadClone }), buildToolInstruction(tools, 'required'));
+  // Compiled policy snapshot stays authoritative even if caller mutates tools/choice arrays afterward.
+  const mutableTools = structuredClone(tools);
+  const snapPolicy = compileToolPolicy(mutableTools, 'required');
+  const expectedInstruction = buildToolInstruction(mutableTools, 'required', { policy: snapPolicy });
+  mutableTools.pop();
+  assert.equal(buildToolInstruction(mutableTools, 'auto', { policy: snapPolicy }), expectedInstruction);
+});

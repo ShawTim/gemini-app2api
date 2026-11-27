@@ -644,3 +644,65 @@ test('MCP gemini_quota retries GetUserStatus once on SUBSCRIPTION_AUTH_REJECTED 
   assert.match(qRes.content[0].text, /Subscription: Free/);
   assert.match(qRes.content[0].text, /Daily limit/);
 });
+
+test('MCP async local image preload preserves symlink/regular-file guards, error precedence, and same-process cache handoff', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-async-img-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const pngPath = path.join(dir, 'pixel.png');
+  fs.writeFileSync(pngPath, makeTinyPng());
+  const symPath = path.join(dir, 'link.png');
+  fs.symlinkSync(pngPath, symPath);
+  const subDir = path.join(dir, 'subdir');
+  fs.mkdirSync(subDir);
+
+  let uploadedCount = 0;
+  const handlers = createMcpToolHandlers({
+    authManager: {
+      getValidCredential: async () => ({ access: 'tok-async-img', accountEpoch: 1 }),
+    },
+    env: {},
+    uploadImages: async (_tok, imgs) => {
+      uploadedCount += imgs.length;
+      return imgs.map((img, idx) => ({ blobId: `blob_async_${idx}`, mimeType: img.mimeType }));
+    },
+    openTurn: (_tok, opts) => ({
+      cancel() {},
+      events: (async function* () {
+        assert.equal(opts.images.length, 1);
+        assert.equal(opts.images[0].blobId, 'blob_async_0');
+        yield {
+          type: 'frame',
+          bytes: m(1003, m(1, Buffer.concat([
+            m(1, Buffer.concat([m(1, Buffer.from('resp_async_img')), m(2, m(1, Buffer.from('Async image ok')))])),
+            m(30, Buffer.from('Used 4 Neon High model')),
+            v(9, 1), v(41, 3), v(42, 2),
+          ]))),
+        };
+        yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+      })(),
+    }),
+  });
+
+  // 1. Valid local file loads asynchronously and populates private validated imageCache.
+  const cache = handlers.createImageCache();
+  const parts = await handlers.loadLocalOrInlineImagePartsAsync([{ path: pngPath }], { imageCache: cache });
+  assert.equal(parts.length, 1);
+  assert.equal(cache.size, 1);
+  assert.match(parts[0].image_url.url, /^data:image\/png;base64,/);
+
+  // 2. Symlink and directory are rejected asynchronously.
+  await assert.rejects(() => handlers.loadLocalOrInlineImagePartsAsync([{ path: symPath }]), { code: 'INVALID_IMAGE_PATH' });
+  await assert.rejects(() => handlers.loadLocalOrInlineImagePartsAsync([{ path: subDir }]), { code: 'INVALID_IMAGE_PATH' });
+
+  // 3. Invalid model rejects with UNSUPPORTED_MODEL BEFORE touching a missing image path on disk.
+  await assert.rejects(
+    () => handlers.runAskGemini({ prompt: 'hi', model: 'nonexistent-model', images: [{ path: path.join(dir, 'does-not-exist.png') }] }),
+    { code: 'UNSUPPORTED_MODEL' },
+  );
+
+  // 4. Direct runAskGemini succeeds end-to-end with async preloaded image.
+  const res = await handlers.runAskGemini({ prompt: 'describe', images: [{ path: pngPath }] });
+  assert.equal(res.content, 'Async image ok');
+  assert.equal(uploadedCount, 1);
+});

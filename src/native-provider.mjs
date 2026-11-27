@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { parse } from '../native-wire/protobuf.mjs';
 import { decodeClientGenerateResponse } from '../native-wire/robin-current.mjs';
-import { ProtocolError, protocolError, compileToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
+import { ProtocolError, protocolError, compileToolPolicy, isCompiledToolPolicy, createToolCallSplitter, validateToolCompletion } from './tool-protocol.mjs';
 import { MODEL_ALIASES, MODEL_MODES, MODEL_SPECS, NATIVE_MODELS, PROMPT_MAX_BYTES, CANONICAL_BUILT, canonicalModel, normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, writeChatResponse, writeResponsesResponse } from './openai-contract.mjs';
 import { RESPONSE_TOOL_IDENTITIES } from './responses-tool-namespaces.mjs';
 import { safeNativeEvidence } from './gateway/native-evidence.mjs';
@@ -361,7 +361,10 @@ export class NativeDirectProvider {
       context.preNormalized === true &&
       canonicalChatBody?.[CANONICAL_BUILT]?.allowAutoModel === this.allowAutoModel
         ? canonicalChatBody
-        : normalizeChatRequest(canonicalChatBody, { allowAutoModel: this.allowAutoModel });
+        : normalizeChatRequest(canonicalChatBody, {
+            allowAutoModel: this.allowAutoModel,
+            ...(context.imageCache ? { _imageCache: context.imageCache } : {}),
+          });
     if (body.native_search) return this.runNativeSearch(accountId, body, onDelta, { ...context, timeoutMs });
     const recoveryInstruction = toolRecoveryInstruction(context.recoveryCode, context.recoveryReason);
     const appendRecovery = promptMessages => {
@@ -375,8 +378,9 @@ export class NativeDirectProvider {
       return next;
     };
     if (this.allowTextSnapshotReplacement && body.tools.length) fail('NATIVE_TEXT_SNAPSHOT_TOOLS_FORBIDDEN', 400);
-    const policy = compileToolPolicy(body.tools, body.tool_choice);
-    let { messages, images } = body[CANONICAL_BUILT] ?? buildCanonicalPrompt(body);
+    const built = body[CANONICAL_BUILT];
+    const policy = isCompiledToolPolicy(built?.policy) ? built.policy : compileToolPolicy(body.tools, body.tool_choice);
+    let { messages, images } = built ?? buildCanonicalPrompt(body, undefined, undefined, policy);
     messages = appendRecovery(messages);
     const isAutoModel = this.allowAutoModel && body.model === 'gemini-auto';
     const modeCategory = isAutoModel ? null : MODEL_MODES[body.model];
@@ -553,7 +557,7 @@ export class NativeDirectProvider {
         } finally {
           observeNative(context.timing, 'imageDownload', performance.now() - downloadStart);
         }
-        ({ messages, images } = buildCanonicalPrompt(body, images));
+        ({ messages, images } = buildCanonicalPrompt(body, images, undefined, policy));
         messages = appendRecovery(messages);
       }
       phase = 'auth';

@@ -5,7 +5,7 @@ import http2 from 'node:http2';
 import { deflateSync } from 'node:zlib';
 import { normalizeChatRequest, normalizeResponsesRequest, buildCanonicalPrompt, PROMPT_MAX_BYTES } from '../src/openai-contract.mjs';
 import { measurePromptImagePayload } from '../src/openai-usage.mjs';
-import { decodeImageDataUrl, collectImageInputs, createCrc32, jsCrc32, hasCanonicalBase64Tail, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../src/image-input.mjs';
+import { decodeImageDataUrl, createValidatedImageCache, collectImageInputs, createCrc32, jsCrc32, hasCanonicalBase64Tail, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from '../src/image-input.mjs';
 import { buildConsumerToolInitial } from '../native-wire/consumer-tool-codec.mjs';
 import { buildClientGenerate, GrpcMessageReader, frameGrpcMessage } from '../native-wire/robin-current.mjs';
 import { parse } from '../native-wire/protobuf.mjs';
@@ -576,4 +576,30 @@ test('CRC32 native feature detection matches JS fallback and canonical base64 ta
   assert.deepEqual(Buffer.from(nonCanonicalB64, 'base64'), paddedPng.candidate);
   assert.notEqual(Buffer.from(nonCanonicalB64, 'base64').toString('base64'), nonCanonicalB64);
   rejected(() => decodeImageDataUrl(`data:image/png;base64,${nonCanonicalB64}`), 'INVALID_IMAGE_DATA_URL');
+});
+
+test('same-process validated image cache isolates private bytes, rejects forged maps and preserves lowercase data: scheme', () => {
+  const callerBuf = Buffer.from(PNG);
+  const cache = createValidatedImageCache();
+  const validEncoded = cache.encodeBytes(callerBuf, 'image/png');
+  assert.equal(validEncoded.mimeType, 'image/png');
+  assert.equal(validEncoded.width, 1);
+  assert.equal(validEncoded.height, 1);
+  assert.equal(Object.hasOwn(validEncoded, 'data'), false, 'private validated Buffer is never exposed to callers');
+
+  // Mutating caller Buffer after encodeBytes must NOT mutate stored validated bytes.
+  callerBuf.fill(0);
+  const normalized = normalizeChatRequest({ messages: [user([image(validEncoded.url)])] }, { _imageCache: cache });
+  assert.equal(normalized.messages[0].content[0].image_url.url, validEncoded.url);
+  const prompt = buildCanonicalPrompt(normalized, undefined, cache);
+  assert.deepEqual(prompt.images[0].data, PNG);
+
+  // Uppercase DATA: scheme must still be rejected even when lowercase data: is cached.
+  const uppercaseScheme = 'DATA:' + validEncoded.url.slice(5);
+  rejected(() => normalizeChatRequest({ messages: [user([image(uppercaseScheme)])] }, { _imageCache: cache }), 'UNSUPPORTED_IMAGE_URL');
+
+  // Forged plain Map placed into _imageCache must be ignored and fail closed.
+  const corruptUrl = 'data:image/png;base64,AB==';
+  const forgedCache = new Map([[corruptUrl, { mimeType: 'image/png', data: PNG, width: 1, height: 1, url: corruptUrl }]]);
+  rejected(() => normalizeChatRequest({ messages: [user([image(corruptUrl)])] }, { _imageCache: forgedCache }), 'INVALID_IMAGE_DATA_URL');
 });

@@ -227,6 +227,19 @@ function checkSchema(root, { rejectUnsupportedKeywords = false } = {}) {
 
 // Unknown optional metadata/validation keywords are ignored deliberately; known
 // constraints above are checked strictly. Arbitrary regex/pattern hints are never executed.
+const compiledToolSchemas = new WeakSet();
+const compiledOutputSchemas = new WeakSet();
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Array.isArray(value) ? value : Object.values(value)) {
+    deepFreeze(child);
+  }
+  return value;
+}
+
 export function compilePromptTools(tools = []) {
   if (!Array.isArray(tools)) throw declaration('Tools must be an array');
   if (tools.length > LIMITS.tools) throw error('TOOL_SIZE_LIMIT', 'TOOL_SIZE_LIMIT', 400, 'tools.count');
@@ -258,7 +271,11 @@ export function compilePromptTools(tools = []) {
       paramPrefix: 'tools',
     });
     checkSchema(parameters);
-    out.set(fn.name,{name:fn.name,parameters:clone(parameters)});
+    const compiledParameters = deepFreeze(clone(parameters));
+    if (compiledParameters && typeof compiledParameters === 'object') {
+      compiledToolSchemas.add(compiledParameters);
+    }
+    out.set(fn.name, Object.freeze({ name: fn.name, parameters: compiledParameters }));
   }
   return out;
 }
@@ -287,7 +304,11 @@ export function compileOutputSchema(schema) {
   } catch (e) {
     throw error(e?.code === 'TOOL_SIZE_LIMIT' ? 'OUTPUT_SCHEMA_SIZE_LIMIT' : 'UNSUPPORTED_OUTPUT_SCHEMA', e?.message || 'Unsupported output schema', 400);
   }
-  return clone(schema);
+  const compiled = deepFreeze(clone(schema));
+  if (compiled && typeof compiled === 'object') {
+    compiledOutputSchemas.add(compiled);
+  }
+  return compiled;
 }
 
 function parseFiniteDecimal(num) {
@@ -374,18 +395,22 @@ function validateValueAgainstSchema(value, schema, mismatchCode, mismatchMessage
 }
 
 export function validatePromptToolArguments(value, schema) {
-  jsonTree(schema,{nodes:0},0,new Set(),LIMITS.depth * 3 + 4);
-  checkSchema(schema);
+  if (!schema || typeof schema !== 'object' || !compiledToolSchemas.has(schema)) {
+    jsonTree(schema, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4);
+    checkSchema(schema);
+  }
   return validateValueAgainstSchema(value, schema, 'TOOL_ARGUMENT_SCHEMA_MISMATCH', 'Tool arguments do not match schema');
 }
 
 /** Validate parsed structured output JSON against a bounded JSON Schema. */
 export function validateOutputValue(value, schema) {
-  try {
-    jsonTree(schema, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4);
-    checkSchema(schema, { rejectUnsupportedKeywords: true });
-  } catch (e) {
-    throw mapOutputSchemaError(e);
+  if (!schema || typeof schema !== 'object' || !compiledOutputSchemas.has(schema)) {
+    try {
+      jsonTree(schema, { nodes: 0 }, 0, new Set(), LIMITS.depth * 3 + 4);
+      checkSchema(schema, { rejectUnsupportedKeywords: true });
+    } catch (e) {
+      throw mapOutputSchemaError(e);
+    }
   }
   return validateValueAgainstSchema(value, schema, 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH', 'Structured output does not match schema', { strictApplicability: true });
 }

@@ -64,6 +64,7 @@ export class RequestResumption {
   #secret = crypto.randomBytes(32);
   #entries = new Map();
   #bodyCounts = new Map();
+  #bodyScopes = new WeakMap();
   #bytes = 0;
   #resumed = 0;
   #detached = 0;
@@ -77,30 +78,57 @@ export class RequestResumption {
     if (count > 0) this.#bodyCounts.set(entry.bodyKey, count);
     else this.#bodyCounts.delete(entry.bodyKey);
   }
-  #key(owner, sessionId, route, body) {
-    return crypto.createHmac('sha256', this.#secret).update(JSON.stringify([owner, sessionId, route, body])).digest('hex');
+  // Private request-scoped lazy digest token bound strictly to this registry AND
+  // exact `body` object identity. Preserves JSON.stringify equivalence and key order.
+  scopeBody(body) {
+    const token = Object.freeze({});
+    this.#bodyScopes.set(token, { body, digest: null });
+    return token;
   }
-  #bodyKey(owner, route, body) {
-    return crypto.createHmac('sha256', this.#secret).update(JSON.stringify([owner, route, body])).digest('hex');
+  #digestOf(body, bodyScope) {
+    const rec = bodyScope && typeof bodyScope === 'object' ? this.#bodyScopes.get(bodyScope) : undefined;
+    if (rec && Object.is(rec.body, body)) {
+      if (rec.digest === null) {
+        rec.digest = crypto.createHmac('sha256', this.#secret)
+          .update(JSON.stringify(body === undefined ? null : body))
+          .digest('hex');
+      }
+      return rec.digest;
+    }
+    return crypto.createHmac('sha256', this.#secret)
+      .update(JSON.stringify(body === undefined ? null : body))
+      .digest('hex');
+  }
+  #key(owner, sessionId, route, body, bodyScope) {
+    return crypto.createHmac('sha256', this.#secret)
+      .update(JSON.stringify(['session', owner, sessionId, route, this.#digestOf(body, bodyScope)]))
+      .digest('hex');
+  }
+  #bodyKey(owner, route, body, bodyScope) {
+    return crypto.createHmac('sha256', this.#secret)
+      .update(JSON.stringify(['body', owner, route, this.#digestOf(body, bodyScope)]))
+      .digest('hex');
   }
   get size() { return this.#entries.size; }
-  has({ owner, sessionId, route, body }) {
-    return this.#entries.has(this.#key(owner, sessionId, route, body));
+  has({ owner, sessionId, route, body, bodyScope }) {
+    return this.#entries.has(this.#key(owner, sessionId, route, body, bodyScope));
   }
-  hasBodyCandidate({ owner, route, body }) {
-    return this.#bodyCounts.has(this.#bodyKey(owner, route, body));
+  hasBodyCandidate({ owner, route, body, bodyScope }) {
+    return this.#bodyCounts.has(this.#bodyKey(owner, route, body, bodyScope));
   }
   snapshot() { return { pending: [...this.#entries.values()].filter(e => !e.settled).length,
     retained: this.#entries.size, retainedBytes: this.#bytes, resumed: this.#resumed, detached: this.#detached }; }
   close() { for (const [key, entry] of this.#entries) this.#drop(key, entry); }
-  async run({ req, res, owner, sessionId, route, body }, execute) {
+  async run({ req, res, owner, sessionId, route, body, bodyScope }, execute) {
     if (req.aborted || res.destroyed) return;
-    const key = this.#key(owner, sessionId, route, body), streaming = body.stream === true;
+    const rec = bodyScope && typeof bodyScope === 'object' ? this.#bodyScopes.get(bodyScope) : undefined;
+    const scope = rec && Object.is(rec.body, body) ? bodyScope : this.scopeBody(body);
+    const key = this.#key(owner, sessionId, route, body, scope), streaming = body.stream === true;
     let entry = this.#entries.get(key), resumed = !!entry;
     if (!entry) {
       if (this.#entries.size >= this.maxEntries) throw fault('RESUMABLE_REQUEST_CAPACITY', 503);
       const response = new SharedResponse();
-      const bodyKey = this.#bodyKey(owner, route, body);
+      const bodyKey = this.#bodyKey(owner, route, body, scope);
       entry = { settled: false, attachments: new Set(), bytes: 0, timer: null, promise: null, response, delivered: false, bodyKey };
       this.#entries.set(key, entry);
       this.#bodyCounts.set(bodyKey, (this.#bodyCounts.get(bodyKey) ?? 0) + 1);

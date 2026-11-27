@@ -5,7 +5,7 @@ import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/nativ
 import { automaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
 import { validateStructuredOutputText } from '../../src/gateway/structured-output.mjs';
 import { MODEL_SPECS, NATIVE_MODELS } from '../../src/openai-contract.mjs';
-import { decodeImageBytes, decodeImageDataUrl, MAX_IMAGE_BYTES } from '../../src/image-input.mjs';
+import { createValidatedImageCache, decodeImageBytes, decodeImageDataUrl, MAX_IMAGE_BYTES } from '../../src/image-input.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
 import { fetchGoogleSubscription as defaultFetchGoogleSubscription } from '../../src/gateway/subscription-transport.mjs';
@@ -121,39 +121,126 @@ function readLocalImageBounded(filePath) {
   }
 }
 
-function loadLocalOrInlineImageParts(images) {
-  if (images === undefined) return [];
+async function readLocalImageBoundedAsync(filePath) {
+  const resolved = path.resolve(filePath);
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+  let handle;
+  try {
+    handle = await fs.promises.open(resolved, flags);
+  } catch (err) {
+    throw Object.assign(new Error(`Image file not found or symlink refused: ${filePath}`), {
+      code: 'INVALID_IMAGE_PATH',
+      cause: err,
+    });
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw Object.assign(new Error(`Image path is not a regular file: ${filePath}`), {
+        code: 'INVALID_IMAGE_PATH',
+      });
+    }
+    if (stat.size <= 0 || stat.size > MAX_IMAGE_BYTES) {
+      throw Object.assign(new Error(`Image file size must be between 1 byte and ${MAX_IMAGE_BYTES} bytes`), {
+        code: 'IMAGE_TOO_LARGE',
+      });
+    }
+    // Bounded read directly from the validated FileHandle to prevent TOCTOU swaps/growth.
+    const chunks = [];
+    let total = 0;
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    while (true) {
+      const { bytesRead } = await handle.read(buf, 0, buf.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > MAX_IMAGE_BYTES) {
+        throw Object.assign(new Error(`Image file exceeds maximum size (${MAX_IMAGE_BYTES} bytes)`), {
+          code: 'IMAGE_TOO_LARGE',
+        });
+      }
+      chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
+    }
+    if (total === 0) {
+      throw Object.assign(new Error('Image file is empty'), { code: 'INVALID_IMAGE_BYTES' });
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    try {
+      await handle.close();
+    } catch {}
+  }
+}
+
+function validateImageEntryList(images) {
+  if (images === undefined) return null;
   if (!Array.isArray(images)) {
     throw Object.assign(new Error('`images` must be an array'), { code: 'INVALID_ARGUMENTS' });
   }
   if (images.length > MAX_MCP_TOOL_IMAGES) {
     throw Object.assign(new Error(`Too many images (max ${MAX_MCP_TOOL_IMAGES})`), { code: 'IMAGE_COUNT_EXCEEDED' });
   }
+  return images;
+}
+
+function parseImageEntry(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) {
+    throw Object.assign(new Error('Each image entry must be an object with `path` or `url`'), {
+      code: 'INVALID_ARGUMENTS',
+    });
+  }
+  const hasPath = typeof item.path === 'string' && item.path.trim().length > 0;
+  const hasUrl = typeof item.url === 'string' && item.url.trim().length > 0;
+  if (hasPath === hasUrl) {
+    throw Object.assign(new Error('Each image entry must specify exactly one of `path` or `url`'), {
+      code: 'INVALID_ARGUMENTS',
+    });
+  }
+  return hasUrl ? { kind: 'url', value: item.url.trim() } : { kind: 'path', value: item.path.trim() };
+}
+
+function loadLocalOrInlineImageParts(images, { imageCache } = {}) {
+  const list = validateImageEntryList(images);
+  if (!list) return [];
   const parts = [];
-  for (const item of images) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw Object.assign(new Error('Each image entry must be an object with `path` or `url`'), {
-        code: 'INVALID_ARGUMENTS',
-      });
-    }
-    const hasPath = typeof item.path === 'string' && item.path.trim().length > 0;
-    const hasUrl = typeof item.url === 'string' && item.url.trim().length > 0;
-    if (hasPath === hasUrl) {
-      throw Object.assign(new Error('Each image entry must specify exactly one of `path` or `url`'), {
-        code: 'INVALID_ARGUMENTS',
-      });
-    }
-    if (hasUrl) {
-      const decoded = decodeImageDataUrl(item.url.trim());
+  for (const item of list) {
+    const entry = parseImageEntry(item);
+    if (entry.kind === 'url') {
+      const decoded = imageCache ? imageCache.decodeDataUrl(entry.value) : decodeImageDataUrl(entry.value);
       parts.push({ type: 'image_url', image_url: { url: decoded.url, detail: 'auto' } });
       continue;
     }
-    const bytes = readLocalImageBounded(item.path.trim());
-    const mimeType = detectImageMime(bytes, item.path.trim());
-    decodeImageBytes(bytes, mimeType);
+    const bytes = readLocalImageBounded(entry.value);
+    const mimeType = detectImageMime(bytes, entry.value);
+    const url = imageCache
+      ? imageCache.encodeBytes(bytes, mimeType).url
+      : (decodeImageBytes(bytes, mimeType), `data:${mimeType};base64,${bytes.toString('base64')}`);
     parts.push({
       type: 'image_url',
-      image_url: { url: `data:${mimeType};base64,${bytes.toString('base64')}`, detail: 'auto' },
+      image_url: { url, detail: 'auto' },
+    });
+  }
+  return parts;
+}
+
+async function loadLocalOrInlineImagePartsAsync(images, { imageCache } = {}) {
+  const list = validateImageEntryList(images);
+  if (!list) return [];
+  const parts = [];
+  for (const item of list) {
+    const entry = parseImageEntry(item);
+    if (entry.kind === 'url') {
+      const decoded = imageCache ? imageCache.decodeDataUrl(entry.value) : decodeImageDataUrl(entry.value);
+      parts.push({ type: 'image_url', image_url: { url: decoded.url, detail: 'auto' } });
+      continue;
+    }
+    const bytes = await readLocalImageBoundedAsync(entry.value);
+    const mimeType = detectImageMime(bytes, entry.value);
+    const url = imageCache
+      ? imageCache.encodeBytes(bytes, mimeType).url
+      : (decodeImageBytes(bytes, mimeType), `data:${mimeType};base64,${bytes.toString('base64')}`);
+    parts.push({
+      type: 'image_url',
+      image_url: { url, detail: 'auto' },
     });
   }
   return parts;
@@ -419,7 +506,7 @@ export function createMcpToolHandlers({
     }
   }
 
-  async function callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
+  async function callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache } = {}) {
     const cred = await authManager.getValidCredential({ signal });
     const tier = cred.subscriptionTier;
     const requestedModel = payload.model;
@@ -518,6 +605,7 @@ export function createMcpToolHandlers({
             }
           : {}),
         ...(recoveryCode ? { recoveryCode, recoveryReason } : {}),
+        ...(imageCache?.size ? { imageCache } : {}),
         signal,
         timeoutMs: attemptTimeout,
       });
@@ -594,24 +682,37 @@ export function createMcpToolHandlers({
     }
   }
 
-  async function executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
+  async function executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache } = {}) {
     const gateway = resolveGatewayConfig(env);
     if (gateway) return callViaGateway(gateway, payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
-    return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
+    return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
   }
 
   async function runAskGemini(args, { signal, onTextDelta, timeoutMs: reqTimeoutMs, responseFormat } = {}) {
     const gateway = resolveGatewayConfig(env);
-    const payload = normalizeAskGeminiArgs(args, {
-      allowedModels: gateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
-      loadImages: loadLocalOrInlineImageParts,
+    const allowedModels = gateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS;
+    // Validate non-image args synchronously first so argument/model errors precede filesystem reads.
+    let payload = normalizeAskGeminiArgs(args, {
+      allowedModels,
+      loadImages: () => [],
     });
+    let imageCache;
+    if (args?.images !== undefined) {
+      imageCache = createValidatedImageCache();
+      const preloadedParts = await loadLocalOrInlineImagePartsAsync(args.images, { imageCache });
+      if (preloadedParts.length > 0) {
+        payload = normalizeAskGeminiArgs(args, {
+          allowedModels,
+          loadImages: () => preloadedParts,
+        });
+      }
+    }
     if (responseFormat) payload.response_format = responseFormat;
-    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
+    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
   }
 
-  async function runChatTurn(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
-    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
+  async function runChatTurn(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache } = {}) {
+    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
   }
 
   async function runGeminiSearch(args, { signal, timeoutMs: reqTimeoutMs } = {}) {
@@ -777,6 +878,8 @@ export function createMcpToolHandlers({
     handleGeminiSearch,
     handleGeminiQuota,
     loadLocalOrInlineImageParts,
+    loadLocalOrInlineImagePartsAsync,
+    createImageCache: createValidatedImageCache,
     formatError: (err) => formatFriendlyMcpError(err, loginCommand),
   };
 }

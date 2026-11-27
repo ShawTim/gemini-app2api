@@ -85,3 +85,23 @@ test('nullable enums, JSON literals, unique objects, reference siblings and wild
   assert.equal(validatePromptToolArguments([1],{type:'array',prefixItems:[{type:'integer'}],items:false}),true);
   rejectsCode(()=>validatePromptToolArguments([1,2],{type:'array',prefixItems:[{type:'integer'}],items:false}),'TOOL_ARGUMENT_SCHEMA_MISMATCH');
 });
+
+test('compiled schemas are deeply frozen and private fast-path never weakens uncompiled schema validation', () => {
+  const compiled = compilePromptTools([tool('fn', { type: 'object', properties: { n: { type: 'integer' } }, required: ['n'] })]);
+  const entry = compiled.get('fn');
+  assert.equal(Object.isFrozen(entry), true);
+  assert.equal(Object.isFrozen(entry.parameters), true);
+  assert.equal(Object.isFrozen(entry.parameters.properties), true);
+  assert.equal(Object.isFrozen(entry.parameters.properties.n), true);
+  assert.throws(() => { entry.parameters.properties.n.type = 'string'; }, TypeError);
+  assert.equal(validatePromptToolArguments({ n: 42 }, entry.parameters), true);
+  rejectsCode(() => validatePromptToolArguments({ n: 'bad' }, entry.parameters), 'TOOL_ARGUMENT_SCHEMA_MISMATCH');
+  // Arbitrary uncompiled invalid schema passed directly is still rejected.
+  rejectsCode(() => validatePromptToolArguments({ n: 1 }, { type: 'bogus' }), 'UNSUPPORTED_TOOL_SCHEMA');
+  // Valid boolean root schemas (true / false) compile cleanly and preserve runtime validation semantics.
+  const boolCompiled = compilePromptTools([tool('allow_all', true), tool('deny_all', false)]);
+  assert.equal(boolCompiled.get('allow_all').parameters, true);
+  assert.equal(boolCompiled.get('deny_all').parameters, false);
+  assert.equal(validatePromptToolArguments({}, boolCompiled.get('allow_all').parameters), true);
+  rejectsCode(() => validatePromptToolArguments({}, boolCompiled.get('deny_all').parameters), 'TOOL_ARGUMENT_SCHEMA_MISMATCH');
+});

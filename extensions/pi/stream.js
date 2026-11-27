@@ -328,7 +328,8 @@ export function createGeminiStreamHandler({
 
         let body;
         let codec;
-        ({ payload: body, codec } = await buildChatPayload(model, context, options, {
+        let imageCache;
+        ({ payload: body, codec, imageCache } = await buildChatPayload(model, context, options, {
           getCurrentSystemPrompt,
           getCurrentTools,
           toToolDeclaration,
@@ -444,6 +445,7 @@ export function createGeminiStreamHandler({
               recoveryCode,
               recoveryReason,
               getOutputCommitState,
+              ...(imageCache?.size ? { imageCache } : {}),
             });
             if (turnResult?.thinkingLevel !== undefined && turnResult.thinkingLevel !== null) {
               observedThinking = turnResult.thinkingLevel;

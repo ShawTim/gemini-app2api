@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import {
-  decodeImageDataUrl,
+  createValidatedImageCache,
   MAX_IMAGES,
   MAX_IMAGE_BYTES,
   MAX_TOTAL_IMAGE_BYTES,
@@ -151,6 +151,7 @@ export function resolveThinkingLevel(options = {}, { simple = false } = {}) {
 function planImageBudget(messages) {
   const accepted = new Map();
   const degraded = new Map();
+  const decodedImages = createValidatedImageCache();
   let count = 0;
   let totalBytes = 0;
 
@@ -189,19 +190,20 @@ function planImageBudget(messages) {
         degraded.set(key, `[Image omitted: ${mimeType} exceeded ${Math.round(MAX_TOTAL_IMAGE_BYTES / (1024 * 1024))}MB total image budget]`);
         continue;
       }
+      let decoded;
       try {
-        decodeImageDataUrl(dataUrl);
+        decoded = decodedImages.decodeDataUrl(dataUrl);
       } catch (err) {
         degraded.set(key, `[Image omitted: invalid ${mimeType} (${err?.code || 'INVALID_IMAGE'})]`);
         continue;
       }
       count++;
       totalBytes += byteLength;
-      accepted.set(key, dataUrl);
+      accepted.set(key, decoded.url);
     }
   }
 
-  return { accepted, degraded };
+  return { accepted, degraded, decodedImages };
 }
 
 function serializeToolArguments(block) {
@@ -355,7 +357,7 @@ export async function buildChatPayload(
     };
   });
 
-  const { accepted: acceptedImages, degraded: degradedImages } = planImageBudget(rawMessages);
+  const { accepted: acceptedImages, degraded: degradedImages, decodedImages } = planImageBudget(rawMessages);
   const messages = [];
 
   const systemPrompt = sanitizeText(getCurrentSystemPrompt(rawMessages));
@@ -563,5 +565,5 @@ export async function buildChatPayload(
     }
   }
 
-  return { payload, codec };
+  return { payload, codec, imageCache: decodedImages };
 }

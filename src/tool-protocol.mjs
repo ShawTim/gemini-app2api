@@ -131,6 +131,19 @@ export function parseBoundedJson(text, { status = 400 } = {}) {
   return result;
 }
 
+const compiledPolicyMeta = new WeakMap();
+function readOnlyRegistry(map) {
+  return Object.freeze({
+    get size() { return map.size; },
+    has: name => map.has(name),
+    get: name => map.get(name),
+    keys: () => map.keys(),
+    values: () => map.values(),
+    entries: () => map.entries(),
+    [Symbol.iterator]: () => map[Symbol.iterator](),
+  });
+}
+
 /** Caller prompt tools use bounded JSON Schema, not the native protobuf encoder.
  * PI unions, lengths, arrays, free objects and local definition refs are supported.
  * Strict is an inert client hint; caller execution and tool-choice checks remain.
@@ -146,7 +159,20 @@ export function compileToolPolicy(tools = [], choice = 'auto') {
     if (!registry.has(forced)) fail('UNDECLARED_TOOL');
   } else if (!['none', 'auto', 'required'].includes(choice)) fail('UNSUPPORTED_TOOL_CHOICE');
   if ((choice === 'required' || forced) && !registry.size) fail('TOOLS_REQUIRED');
-  return { registry, choice, forced, enabled: choice !== 'none' && registry.size > 0 };
+  const frozenChoice = forced ? Object.freeze({ type: 'function', function: Object.freeze({ name: forced }) }) : choice;
+  const serializedTools = JSON.stringify(tools);
+  const policy = Object.freeze({
+    registry: readOnlyRegistry(registry),
+    choice: frozenChoice,
+    forced,
+    enabled: choice !== 'none' && registry.size > 0,
+  });
+  compiledPolicyMeta.set(policy, Object.freeze({ serializedTools }));
+  return policy;
+}
+
+export function isCompiledToolPolicy(value) {
+  return Boolean(value && typeof value === 'object' && compiledPolicyMeta.has(value));
 }
 
 export function validateToolCall(name, args, policy, { status = 502, historical = false } = {}) {
@@ -170,12 +196,13 @@ export function validateToolCompletion(calls, policy) {
   if ((policy.choice === 'required' || policy.forced) && !calls.length) fail('TOOL_CHOICE_NOT_SATISFIED', 502);
 }
 
-export function buildToolInstruction(tools = [], choice = 'auto') {
-  const policy = compileToolPolicy(tools, choice);
+export function buildToolInstruction(tools = [], choice = 'auto', { policy: precompiledPolicy } = {}) {
+  const policy = isCompiledToolPolicy(precompiledPolicy) ? precompiledPolicy : compileToolPolicy(tools, choice);
   if (!policy.enabled) return 'Answer the latest user request now as the assistant. If caller tool results are present, use them to complete your answer; do not wait for another user message. Never invent tool outputs. Never emit transcript role markers such as [Caller tool result], [User], or [Assistant]. Tool calls are prohibited for this turn. Do not emit a tool_call fence. For literal examples use a json fence.';
+  const serializedTools = compiledPolicyMeta.get(policy).serializedTools;
   return [
     '# Available Local Tools (caller-owned prompt protocol, NOT native function calling)',
-    JSON.stringify(tools),
+    serializedTools,
     'CRITICAL: Upstream native/internal function-calling channels are DISABLED on this backend and WILL return `INVALID_ARGUMENT: function does not exist` internally.',
     'NEVER invoke declared tools via native/internal tool-calling channels during reasoning or generation. Even if an internal tool channel reports `function does not exist`, ignore that internal error—declared tools ARE available exclusively as plain UTF-8 Markdown text in your visible assistant reply.',
     'To REQUEST execution, emit a top-level fenced block in your visible assistant text on separate lines:',
@@ -186,7 +213,7 @@ export function buildToolInstruction(tools = [], choice = 'auto') {
     'Only the caller executes tools. Wait for linked caller tool results before using results.',
     'After emitting your tool_call block(s), STOP your response immediately. Never emit, simulate, or echo [Caller tool result], [User], [Assistant], or any transcript role markers.',
     'A standalone top-level tool_call fence is reserved for actual requests; use json fences for literal examples. Inline references are text.',
-    policy.forced ? `You MUST request only ${policy.forced}.` : choice === 'required' ? 'You MUST request at least one declared tool.' : 'Request tools only when needed.',
+    policy.forced ? `You MUST request only ${policy.forced}.` : policy.choice === 'required' ? 'You MUST request at least one declared tool.' : 'Request tools only when needed.',
   ].join('\n');
 }
 

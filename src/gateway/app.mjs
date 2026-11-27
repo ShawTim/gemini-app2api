@@ -1113,6 +1113,7 @@ export function createGateway({
           if (req.aborted || res.destroyed) return;
           assertPromptByteLimit(body);
           const route = p.endsWith('responses') ? 'responses' : 'chat';
+          const bodyScope = allowAutomaticRecovery ? resumption.scopeBody(body) : null;
           // Check resumption followers before rejecting busy slots, and reject new
           // overloaded requests before expensive schema/image normalization.
           const explicitIdentity = resolveSessionIdentity(req.headers, null);
@@ -1128,9 +1129,9 @@ export function createGateway({
             allowAutomaticRecovery &&
             resumption.size > 0 &&
             explicitIdentity.sessionId !== undefined &&
-            resumption.has({ owner, sessionId: explicitIdentity.sessionId, route, body })
+            resumption.has({ owner, sessionId: explicitIdentity.sessionId, route, body, bodyScope })
           ) {
-            return await resumption.run({ req, res, owner, sessionId: explicitIdentity.sessionId, route, body }, (input, output) =>
+            return await resumption.run({ req, res, owner, sessionId: explicitIdentity.sessionId, route, body, bodyScope }, (input, output) =>
               runResumableLeader(input, output, { owner, route }));
           }
           const maybePiResumptionFollower =
@@ -1139,7 +1140,7 @@ export function createGateway({
             explicitIdentity.sessionId === undefined &&
             typeof body.prompt_cache_key === 'string' &&
             body.prompt_cache_key.length > 0 &&
-            resumption.hasBodyCandidate({ owner, route, body });
+            resumption.hasBodyCandidate({ owner, route, body, bodyScope });
           if (active >= settings.maxConcurrent && !maybePiResumptionFollower) {
             throw fault("GATEWAY_BUSY", 429);
           }
@@ -1150,10 +1151,10 @@ export function createGateway({
             ? explicitIdentity
             : resolveSessionIdentity(req.headers, canonical);
           if (allowAutomaticRecovery && identity.sessionId !== undefined) {
-            if (active >= settings.maxConcurrent && !resumption.has({ owner, sessionId: identity.sessionId, route, body })) {
+            if (active >= settings.maxConcurrent && !resumption.has({ owner, sessionId: identity.sessionId, route, body, bodyScope })) {
               throw fault("GATEWAY_BUSY", 429);
             }
-            return await resumption.run({ req, res, owner, sessionId: identity.sessionId, route, body }, (input, output) =>
+            return await resumption.run({ req, res, owner, sessionId: identity.sessionId, route, body, bodyScope }, (input, output) =>
               runResumableLeader(input, output, { owner, route, canonical, identity }));
           }
           if (active >= settings.maxConcurrent) throw fault("GATEWAY_BUSY", 429);

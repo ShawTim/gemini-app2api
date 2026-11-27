@@ -116,6 +116,76 @@ function dimensions(bytes, mimeType) {
   }
   fail('UNSUPPORTED_IMAGE_FORMAT');
 }
+const validatedImageCaches = new WeakMap();
+
+function lookupValidatedCache(cacheHandle, url) {
+  if (typeof url !== 'string' || !url.startsWith('data:')) return null;
+  const store = cacheHandle && typeof cacheHandle === 'object' ? validatedImageCaches.get(cacheHandle) : undefined;
+  if (!store) return null;
+  const rec = store.get(url);
+  if (!rec) return null;
+  if (rec.url === url) return { mimeType: rec.mimeType, data: rec.data, width: rec.width, height: rec.height, url: rec.url };
+  const comma = rec.url.indexOf(',');
+  if (
+    comma > 0 &&
+    url.length === rec.url.length &&
+    url.indexOf(',') === comma &&
+    url.slice(0, comma).toLowerCase() === rec.url.slice(0, comma) &&
+    url.slice(comma) === rec.url.slice(comma)
+  ) {
+    return { mimeType: rec.mimeType, data: rec.data, width: rec.width, height: rec.height, url: rec.url };
+  }
+  return null;
+}
+
+/**
+ * Unforgeable, request-scoped in-process cache of validated image bytes.
+ * Validated Buffers stay private inside this module so callers cannot mutate
+ * bytes or metadata after validation. Never cross an HTTP trust boundary.
+ */
+export function createValidatedImageCache() {
+  const store = new Map();
+  const handle = Object.freeze({
+    get size() { return store.size; },
+    decodeDataUrl(url) {
+      const existing = lookupValidatedCache(handle, url);
+      if (existing) {
+        return { mimeType: existing.mimeType, width: existing.width, height: existing.height, url: existing.url };
+      }
+      const decoded = decodeImageDataUrl(url);
+      const record = Object.freeze({
+        mimeType: decoded.mimeType,
+        data: decoded.data,
+        width: decoded.width,
+        height: decoded.height,
+        url: decoded.url,
+      });
+      store.set(url, record);
+      store.set(record.url, record);
+      return { mimeType: record.mimeType, width: record.width, height: record.height, url: record.url };
+    },
+    encodeBytes(data, mimeType) {
+      if (!Buffer.isBuffer(data) || !data.length) fail('INVALID_IMAGE_BYTES');
+      // Copy caller Buffer before validating so later caller mutations cannot alter stored bytes.
+      const ownBytes = Buffer.from(data);
+      const decoded = decodeImageBytes(ownBytes, mimeType);
+      const url = `data:${decoded.mimeType};base64,${ownBytes.toString('base64')}`;
+      if (Buffer.byteLength(url) > MAX_IMAGE_URL_BYTES) fail('IMAGE_TOO_LARGE', 413);
+      const record = Object.freeze({
+        mimeType: decoded.mimeType,
+        data: ownBytes,
+        width: decoded.width,
+        height: decoded.height,
+        url,
+      });
+      store.set(url, record);
+      return { mimeType: record.mimeType, width: record.width, height: record.height, url };
+    },
+  });
+  validatedImageCaches.set(handle, store);
+  return handle;
+}
+
 /** Inline decoder only; remote downloads separately reuse decodeImageBytes. */
 export function decodeImageDataUrl(url) {
   if (typeof url !== 'string') fail('INVALID_IMAGE_URL');
@@ -139,12 +209,20 @@ export function decodeImageBytes(data, mimeType) {
 export function normalizeImageUrl(url, detail, decodedCache) {
   if (detail !== undefined && detail !== 'auto') fail('UNSUPPORTED_IMAGE_DETAIL');
   if (typeof url === 'string' && /^https?:/i.test(url)) return parseRemoteImageUrl(url).href;
-  const cached = decodedCache?.get(url);
+  const cached = lookupValidatedCache(decodedCache, url);
   if (cached) return cached.url;
+  const store = decodedCache && typeof decodedCache === 'object' ? validatedImageCaches.get(decodedCache) : undefined;
   const decoded = decodeImageDataUrl(url);
-  if (decodedCache) {
-    decodedCache.set(url, decoded);
-    decodedCache.set(decoded.url, decoded);
+  if (store) {
+    const record = Object.freeze({
+      mimeType: decoded.mimeType,
+      data: decoded.data,
+      width: decoded.width,
+      height: decoded.height,
+      url: decoded.url,
+    });
+    store.set(url, record);
+    store.set(record.url, record);
   }
   return decoded.url;
 }
@@ -157,7 +235,7 @@ export function collectImageInputs(messages, resolvedImages, decodedCache) {
       if (message.role !== 'user' || part.type !== 'image_url') fail('UNSUPPORTED_IMAGE_ROLE');
       if (images.length >= MAX_IMAGES) fail('IMAGE_COUNT_EXCEEDED', 413);
       const url = part.image_url?.url;
-      const decoded = resolvedImages ? resolvedImages[images.length] : /^https?:/i.test(url) ? { url: parseRemoteImageUrl(url).href } : (decodedCache?.get(url) ?? decodeImageDataUrl(url));
+      const decoded = resolvedImages ? resolvedImages[images.length] : /^https?:/i.test(url) ? { url: parseRemoteImageUrl(url).href } : (lookupValidatedCache(decodedCache, url) ?? decodeImageDataUrl(url));
       const { data, mimeType, width, height } = decoded;
       if ((total += (data?.length ?? 0)) > MAX_TOTAL_IMAGE_BYTES) fail('IMAGES_TOO_LARGE', 413);
       images.push(data ? { data, mimeType, width, height } : decoded);
