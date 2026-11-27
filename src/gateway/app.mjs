@@ -534,8 +534,6 @@ export function createGateway({
         providerAttempts++;
         let attemptDiagnostic = null;
         try { attemptDiagnostic = diagnostic?.attempt(); } catch {}
-        let attemptTiming = null;
-        try { attemptTiming = requestTimings.startAttempt(); } catch {}
         if (!res.headersSent) {
           res.setHeader("X-Gemini-Provider-Attempts", String(providerAttempts));
           res.setHeader("X-Gemini-Failover-Count", String(providerAttempts - 1));
@@ -543,6 +541,8 @@ export function createGateway({
           if (context.failoverReason) res.setHeader("X-Gemini-Failover-Reason", context.failoverReason);
           if (providerFailures.length) res.setHeader('X-Gemini-Recovery-Errors', [...new Set(providerFailures.map(f => f.code))].join(','));
         }
+        let attemptTiming = null;
+        try { attemptTiming = requestTimings.startAttempt(); } catch {}
         try {
           const turnResult = await provider.runTurn(acc, canonical, event => delivery.accept(event), { ...context, timeoutMs: settings.timeoutMs,
             preNormalized: true, incrementalOutput: true, deferToolCalls: true, outputMode: outputStreaming ? 'stream' : 'buffered',

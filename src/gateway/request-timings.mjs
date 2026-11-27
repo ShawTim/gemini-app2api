@@ -11,6 +11,9 @@ const elapsedMs = (start, end) => Math.max(0, Math.round(end - start));
  *   plus any upstream upload) whenever images are present (null for text-only turns).
  * - firstPublishedTextMs reflects server-side res.write() acceptance (not drain or
  *   client render), and excludes SSE headers, keepalive comments, role chunks, and tool calls.
+ *   Note: attempts[i].firstPublishedTextMs only records mid-attempt streaming writes (null for
+ *   buffered turns or < PREFIX_BYTES streams flushed in delivery.complete()); top-level
+ *   firstPublishedTextMs covers both.
  */
 export function createRequestTimings({ monotonic = () => performance.now() } = {}) {
   const requestStart = monotonic();

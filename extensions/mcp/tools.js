@@ -698,7 +698,7 @@ export function createMcpToolHandlers({
     });
     let imageCache;
     if (args?.images !== undefined) {
-      imageCache = createValidatedImageCache();
+      if (!gateway) imageCache = createValidatedImageCache();
       const preloadedParts = await loadLocalOrInlineImagePartsAsync(args.images, { imageCache });
       if (preloadedParts.length > 0) {
         payload = normalizeAskGeminiArgs(args, {

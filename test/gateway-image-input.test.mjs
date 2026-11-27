@@ -594,6 +594,11 @@ test('same-process validated image cache isolates private bytes, rejects forged 
   const prompt = buildCanonicalPrompt(normalized, undefined, cache);
   assert.deepEqual(prompt.images[0].data, PNG);
 
+  // Mixed-case MIME/base64 header with lowercase data: scheme hits the cache and canonicalizes to lowercase.
+  const mixedCaseMime = 'data:IMAGE/PNG;BASE64,' + validEncoded.url.slice(validEncoded.url.indexOf(',') + 1);
+  const mixedNormalized = normalizeChatRequest({ messages: [user([image(mixedCaseMime)])] }, { _imageCache: cache });
+  assert.equal(mixedNormalized.messages[0].content[0].image_url.url, validEncoded.url);
+
   // Uppercase DATA: scheme must still be rejected even when lowercase data: is cached.
   const uppercaseScheme = 'DATA:' + validEncoded.url.slice(5);
   rejected(() => normalizeChatRequest({ messages: [user([image(uppercaseScheme)])] }, { _imageCache: cache }), 'UNSUPPORTED_IMAGE_URL');

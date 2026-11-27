@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compilePromptTools, validatePromptToolArguments } from '../src/prompt-tool-schema.mjs';
+import { compilePromptTools, compileOutputSchema, validatePromptToolArguments, validateOutputValue } from '../src/prompt-tool-schema.mjs';
 
 const tool = (name, parameters) => ({type:'function',function:{name,parameters}});
 const rejectsCode = (fn, code, param) => assert.throws(fn, e => e.code === code && (param === undefined || e.param === param));
@@ -104,4 +104,15 @@ test('compiled schemas are deeply frozen and private fast-path never weakens unc
   assert.equal(boolCompiled.get('deny_all').parameters, false);
   assert.equal(validatePromptToolArguments({}, boolCompiled.get('allow_all').parameters), true);
   rejectsCode(() => validatePromptToolArguments({}, boolCompiled.get('deny_all').parameters), 'TOOL_ARGUMENT_SCHEMA_MISMATCH');
+
+  // compileOutputSchema returns a deeply frozen schema and stays isolated from compiledToolSchemas.
+  const compiledOut = compileOutputSchema({ type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false });
+  assert.equal(Object.isFrozen(compiledOut), true);
+  assert.equal(Object.isFrozen(compiledOut.properties.ok), true);
+  assert.equal(validateOutputValue({ ok: true }, compiledOut), true);
+  rejectsCode(() => validateOutputValue({ ok: 'nope' }, compiledOut), 'STRUCTURED_OUTPUT_SCHEMA_MISMATCH');
+  rejectsCode(() => validateOutputValue({ ok: true }, { type: 'bogus' }), 'UNSUPPORTED_OUTPUT_SCHEMA');
+  // Cross-WeakSet isolation: a tool-compiled schema with an unsupported output keyword is still rejected by validateOutputValue.
+  const toolOnly = compilePromptTools([tool('loose', { type: 'object', properties: { s: { type: 'string', pattern: '^[a-z]+$' } } })]);
+  rejectsCode(() => validateOutputValue({ s: 'abc' }, toolOnly.get('loose').parameters), 'UNSUPPORTED_OUTPUT_SCHEMA');
 });

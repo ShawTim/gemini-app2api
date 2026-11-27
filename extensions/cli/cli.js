@@ -822,7 +822,7 @@ export async function runGeminiCli(
         let normalizedAsk;
         if (parsed.images.length && typeof handlers.loadLocalOrInlineImagePartsAsync === 'function') {
           normalizeAskGeminiArgs(askArgs, { allowedModels, loadImages: () => [] });
-          imageCache = typeof handlers.createImageCache === 'function' ? handlers.createImageCache() : undefined;
+          imageCache = !gateway && typeof handlers.createImageCache === 'function' ? handlers.createImageCache() : undefined;
           const preloaded = await handlers.loadLocalOrInlineImagePartsAsync(askArgs.images, { imageCache });
           normalizedAsk = normalizeAskGeminiArgs(askArgs, { allowedModels, loadImages: () => preloaded });
         } else {
