@@ -1247,7 +1247,7 @@ test('OpenCode fetch: byte-bounded SSE backpressure pauses slow consumer without
   let producedFrames = 0;
   const customFetch = createOpenCodeFetch({
     resolveAccessToken: async () => ({ accessToken: 'tok-bp', subscriptionTier: 'pro' }),
-    keepaliveMs: 10,
+    keepaliveMs: 5,
     sseHighWaterBytes: 300,
     sseMaxBufferedBytes: 64 * 1024,
     openTurn: () => ({
@@ -1258,7 +1258,6 @@ test('OpenCode fetch: byte-bounded SSE backpressure pauses slow consumer without
           producedFrames = i + 1;
           acc += `CHUNK_${String(i).padStart(2, '0')}_${'X'.repeat(180)}\n`;
           yield { type: 'frame', bytes: makeFrame(acc, { mode: 3, thinking: 2 }) };
-          await new Promise(r => setImmediate(r));
         }
         yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
       })(),
@@ -1273,8 +1272,9 @@ test('OpenCode fetch: byte-bounded SSE backpressure pauses slow consumer without
   });
   assert.equal(res.status, 200);
 
-  // Give upstream a moment to push until backpressure engages while consumer hasn't started reading yet.
-  await new Promise(r => setTimeout(r, 40));
+  // Give upstream ~80ms (~15 keepalive ticks) while consumer hasn't started reading yet.
+  // Without coalescing under backpressure, >10 keepalive comments would accumulate.
+  await new Promise(r => setTimeout(r, 80));
   const pausedCount = producedFrames;
   assert.ok(pausedCount < 12, `expected backpressure to pause upstream before frame 12, got ${pausedCount}`);
 
@@ -1294,7 +1294,7 @@ test('OpenCode fetch: byte-bounded SSE backpressure pauses slow consumer without
   }
   assert.match(wire, /data: \[DONE\]/);
   const keepaliveCount = (wire.match(/: keepalive/g) || []).length;
-  assert.ok(keepaliveCount <= 1, `expected keepalive coalescing under backpressure, got ${keepaliveCount}`);
+  assert.ok(keepaliveCount <= 2, `expected keepalive coalescing under backpressure, got ${keepaliveCount}`);
 
   // 2. Cancelling a paused slow consumer wakes blocked onDelta and cancels upstream immediately.
   let cancelledUpstream = false;
