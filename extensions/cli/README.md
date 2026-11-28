@@ -37,7 +37,7 @@ gemini-app login --remote
 
 Credentials are saved locally with `0600` permissions at `~/.gemini-app2api-cli/auth.json`.
 
-> Already signed in with `mcp-gemini-app` or running a local `gemini-app2api` multi-account gateway? See [Reuse Existing Auth or Local Gateway](#reuse-existing-auth-or-local-gateway).
+> Already signed in with `mcp-gemini-app` or Pi? See [Reuse Existing Auth](#reuse-existing-auth).
 
 ### 2. Run one-shot, structured, or read-only workspace commands
 
@@ -88,9 +88,9 @@ When `--tools` is enabled (`readonly`, `all`, or a subset of `read,grep,find,ls`
 | `gemini-app ask [options] [prompt...]` | Ask Gemini with optional stdin, `-f`/`--file`, `-i`/`--image`, `--schema`, `--tools`, `--cwd`, `--max-turns`, `--verbose`, `-m`/`--model`, `-s`/`--system`, `--system-file`, `-t`/`--thinking`, `-o`/`--output`, `--stream`/`--no-stream`, `--json`, `--timeout`. |
 | `gemini-app search [options] [query...]` | Run a Google Search-grounded query via Gemini Neon (`native_search`) with optional `-s`/`--system`, `--system-file`, `--no-sources`, `-o`/`--output`, `--json`, `--timeout`. |
 | `gemini-app quota [--json] [--timeout <sec>]` | Print subscription tier (`Free`, `AI Plus`, `AI Pro`, `AI Ultra`) and remaining quota windows. |
-| `gemini-app models [--json]` | List available models, context windows, and capabilities for the active mode (`oauth` or `gateway`). |
+| `gemini-app models [--json]` | List available models, context windows, and capabilities. |
 | `gemini-app login [--remote] [--accept-terms]` | Sign in via localhost OAuth (or paste redirect URL with `--remote`). |
-| `gemini-app status` | Print auth mode and token status as JSON (exits `0` when ready, `1` when not signed in). |
+| `gemini-app status` | Print auth status and token validity as JSON (exits `0` when ready, `1` when not signed in). |
 | `gemini-app logout [--json]` | Remove locally stored CLI credentials. |
 
 ### Exit Codes
@@ -100,15 +100,7 @@ When `--tools` is enabled (`readonly`, `all`, or a subset of `read,grep,find,ls`
 - `2`: Invalid CLI usage / arguments / invalid `--schema`
 - `130`: Interrupted by `SIGINT` (Ctrl-C)
 
-## Reuse Existing Auth or Local Gateway
-
-### Route through a local `gemini-app2api` multi-account gateway
-
-```bash
-export GEMINI_GATEWAY_URL="http://127.0.0.1:18989"
-export GEMINI_GATEWAY_API_KEY="your-gateway-key"
-gemini-app ask --tools readonly "Inspect this repo via gateway pool"
-```
+## Reuse Existing Auth
 
 ### Reuse existing `mcp-gemini-app` or Pi `auth.json` (read-only)
 
@@ -127,7 +119,6 @@ If your coding agent already has bash access and you prefer zero resident MCP pr
 
 - `GEMINI_CLI_HOME`: Override credential directory (default: `~/.gemini-app2api-cli`).
 - `GEMINI_CLI_AUTH_PATH`: Explicit path to `auth.json` (supports read-only reuse of MCP or Pi credentials).
-- `GEMINI_GATEWAY_URL` / `GEMINI_GATEWAY_API_KEY`: Optional local/remote `gemini-app2api` gateway override.
 - `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`: Standard outbound HTTP(S) proxy tunneling.
 
 ## Requirements

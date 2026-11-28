@@ -23,8 +23,6 @@ Usage:
 Optional environment variables:
   GEMINI_MCP_HOME         Custom credential directory (default: ~/.gemini-app2api-mcp)
   GEMINI_MCP_AUTH_PATH    Explicit path to auth.json
-  GEMINI_GATEWAY_URL      Route ask_gemini/gemini_search through a local gemini-app2api gateway
-  GEMINI_GATEWAY_API_KEY  API key for GEMINI_GATEWAY_URL
   HTTPS_PROXY / HTTP_PROXY / NO_PROXY
 `;
 
@@ -71,11 +69,11 @@ export async function runMcpCli(
   if (command === 'status') {
     const info = auth.status();
     stdout.write(JSON.stringify(info, null, 2) + '\n');
-    return info.mode === 'gateway' || info.signedIn ? 0 : 1;
+    return info.signedIn ? 0 : 1;
   }
 
   if (command === 'quota') {
-    const handlers = toolHandlers ?? createMcpToolHandlers({ authManager: auth, env });
+    const handlers = toolHandlers ?? createMcpToolHandlers({ authManager: auth });
     const res = await handlers.callTool('gemini_quota', {});
     const text = res.content?.map((c) => c.text).join('\n') || '';
     if (res.isError) {
@@ -87,7 +85,7 @@ export async function runMcpCli(
   }
 
   if (command === 'serve') {
-    const handlers = toolHandlers ?? createMcpToolHandlers({ authManager: auth, env });
+    const handlers = toolHandlers ?? createMcpToolHandlers({ authManager: auth });
     const server = createMcpServer({ toolHandlers: handlers });
     const runner = server.startStdio({ input: stdin, output: stdout });
     const onSignal = () => runner.stop();

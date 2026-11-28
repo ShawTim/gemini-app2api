@@ -42,4 +42,4 @@ Use `gemini-app` (installed via `npm i -g gemini-app-cli` or run with `npx -y ge
 1. Prefer `--json` or `--schema` when consuming output programmatically in scripts.
 2. Use `--tools readonly --cwd <repo>` for multi-file read-only codebase reviews instead of manually concatenating dozens of files.
 3. Pass `-f <path>` for targeted text files and `-i <path>` (up to 16 PNG/JPEG/WebP files) for image inspection.
-4. If `gemini-app status` exits `1`, ask the user to run `gemini-app login` (or set `GEMINI_GATEWAY_URL`). Never print or inspect `~/.gemini-app2api-cli/auth.json`.
+4. If `gemini-app status` exits `1`, ask the user to run `gemini-app login`. Never print or inspect `~/.gemini-app2api-cli/auth.json`.

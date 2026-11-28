@@ -15,7 +15,6 @@ import { resolveOAuthConfig } from '../pi/auth.js';
 
 export const DEFAULT_MCP_HOME_DIRNAME = '.gemini-app2api-mcp';
 export const DEFAULT_AUTH_FILENAME = 'auth.json';
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 function computeExpiresAtMs(expiresInSeconds) {
   const ttlSeconds = Number.isFinite(expiresInSeconds) && expiresInSeconds > 0 ? expiresInSeconds : 3600;
@@ -35,35 +34,6 @@ export function resolveAuthFilePath(
   const homeOverride = typeof env?.[homeEnv] === 'string' ? env[homeEnv].trim() : '';
   const dir = homeOverride ? path.resolve(homeOverride) : path.join(os.homedir(), defaultHomeDirname);
   return path.join(dir, DEFAULT_AUTH_FILENAME);
-}
-
-export function resolveGatewayConfig(env = process.env) {
-  const rawUrl = typeof env?.GEMINI_GATEWAY_URL === 'string' ? env.GEMINI_GATEWAY_URL.trim() : '';
-  if (!rawUrl) return null;
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw Object.assign(new Error('Invalid GEMINI_GATEWAY_URL: expected an http:// (loopback) or https:// URL'), {
-      code: 'INVALID_GATEWAY_URL',
-    });
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw Object.assign(new Error('Invalid GEMINI_GATEWAY_URL: only credential-free http:// or https:// URLs are allowed'), {
-      code: 'INVALID_GATEWAY_URL',
-    });
-  }
-  if (parsed.protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
-    throw Object.assign(
-      new Error('Invalid GEMINI_GATEWAY_URL: cleartext http:// is allowed only for loopback hosts; use https:// for remote gateways'),
-      { code: 'INVALID_GATEWAY_URL' },
-    );
-  }
-  const apiKey = typeof env?.GEMINI_GATEWAY_API_KEY === 'string' ? env.GEMINI_GATEWAY_API_KEY.trim() : '';
-  return {
-    baseUrl: parsed.origin + parsed.pathname.replace(/\/+$/, ''),
-    apiKey,
-  };
 }
 
 function assertNotSymlink(targetPath) {
@@ -639,7 +609,7 @@ export function createMcpAuthManager({
     const stored = loadCredential();
     if (!stored) {
       throw Object.assign(
-        new Error(`Not signed in to Google Gemini. Run \`${loginCommand}\` in your terminal first (or set GEMINI_GATEWAY_URL).`),
+        new Error(`Not signed in to Google Gemini. Run \`${loginCommand}\` in your terminal first.`),
         { code: expectedAccountEpoch !== undefined ? 'OAUTH_LOGGED_OUT' : 'MCP_AUTH_REQUIRED' },
       );
     }
@@ -751,12 +721,9 @@ export function createMcpAuthManager({
   }
 
   function status() {
-    const gateway = resolveGatewayConfig(env);
     const stored = loadCredential();
     return {
-      mode: gateway ? 'gateway' : 'oauth',
-      gatewayUrl: gateway?.baseUrl ?? null,
-      gatewayApiKeyConfigured: Boolean(gateway?.apiKey),
+      mode: 'oauth',
       authPath: resolvedAuthPath,
       signedIn: Boolean(stored),
       readOnlyExternal: Boolean(stored?.readOnlyExternal),

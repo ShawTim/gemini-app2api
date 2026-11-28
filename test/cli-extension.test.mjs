@@ -37,28 +37,29 @@ function makeStdin(text = '', { isTTY = false } = {}) {
   return stream;
 }
 
-function makeFakeSseResponse(lines, { status = 200, contentType = 'text/event-stream; charset=utf-8' } = {}) {
-  const payload = lines.join('\n') + '\n';
+function makeDirectAuth(tier = 'pro') {
   return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: new Headers({ 'content-type': contentType }),
-    body: Readable.from([Buffer.from(payload, 'utf8')]),
-    async json() {
-      return JSON.parse(payload);
-    },
+    getValidCredential: async ({ forceRefresh = false } = {}) => ({
+      type: 'oauth',
+      refresh: 'r-cli-test',
+      access: forceRefresh ? 'tok-refreshed' : 'tok-initial',
+      expires: Date.now() + 600_000,
+      subscriptionTier: tier,
+      accountEpoch: 1,
+    }),
   };
 }
 
-function makeJsonResponse(body, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: new Headers({ 'content-type': 'application/json' }),
-    async json() {
-      return body;
-    },
-  };
+function makeNativeFrame(text, { responseId = 'resp-1', complete = true } = {}) {
+  const str = (n, value) => m(n, Buffer.from(value));
+  const inner = [
+    m(1, Buffer.concat([str(1, responseId), m(2, str(1, text))])),
+    v(9, complete ? 1 : 0),
+    str(30, 'Used 4 Neon High model'),
+    v(41, 3),
+    v(42, 2),
+  ];
+  return m(1003, m(1, Buffer.concat(inner)));
 }
 
 test('CLI help, version, unknown commands, and usage validation return clean exit codes without hanging', async () => {
@@ -108,7 +109,7 @@ test('CLI help, version, unknown commands, and usage validation return clean exi
   }
 });
 
-test('models command reflects oauth vs gateway mode in text and JSON', async () => {
+test('models command lists direct oauth models in text and JSON (ignoring GEMINI_GATEWAY_URL)', async () => {
   const oauthCap = makeCapture();
   assert.equal(await runGeminiCli(['models', '--json'], { stdout: oauthCap.stdout, stderr: oauthCap.stderr, env: {} }), 0);
   const oauthData = JSON.parse(oauthCap.out);
@@ -131,18 +132,18 @@ test('models command reflects oauth vs gateway mode in text and JSON', async () 
     default: false,
   });
 
-  const gwCap = makeCapture();
+  const envCap = makeCapture();
   assert.equal(
     await runGeminiCli(['models', '--json'], {
-      stdout: gwCap.stdout,
-      stderr: gwCap.stderr,
+      stdout: envCap.stdout,
+      stderr: envCap.stderr,
       env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' },
     }),
     0,
   );
-  const gwData = JSON.parse(gwCap.out);
-  assert.equal(gwData.mode, 'gateway');
-  assert.equal(gwData.models.some((m) => m.id === 'gemini-auto'), false);
+  const envData = JSON.parse(envCap.out);
+  assert.equal(envData.mode, 'oauth');
+  assert.equal(envData.models.some((m) => m.id === 'gemini-auto'), true);
 
   const textCap = makeCapture();
   assert.equal(await runGeminiCli(['models'], { stdout: textCap.stdout, stderr: textCap.stderr, env: {} }), 0);
@@ -268,107 +269,96 @@ test('ask supports positional prompts, stdin piping, -- separator, --system-file
   }
 });
 
-test('ask streams SSE chunks from gateway and detects truncated streams cleanly', async () => {
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989', GEMINI_GATEWAY_API_KEY: 'test-key' };
-
-  // Clean SSE stream with [DONE]
+test('ask streams direct native deltas and fails closed on truncated direct streams', async () => {
+  // Clean multi-frame direct native stream
   {
-    let seenRequest = null;
     const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
+      authManager: makeDirectAuth(),
       clientLabel: CLI_AUTH_OWNER,
       loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async (url, init) => {
-        seenRequest = { url, body: JSON.parse(init.body), auth: init.headers.Authorization };
-        return makeFakeSseResponse([
-          'data: {"id":"c1","model":"gemini-neon","choices":[{"index":0,"delta":{"content":"Part 1 "}}]}',
-          'data: {"id":"c1","model":"gemini-neon","choices":[{"index":0,"delta":{"content":"Part 2"},"finish_reason":"stop"}]}',
-          'data: [DONE]',
-        ]);
-      },
+      openTurn: () => ({
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 0, ended: true }),
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeNativeFrame('Part 1 ', { complete: false }) };
+          yield { type: 'frame', bytes: makeNativeFrame('Part 1 Part 2', { complete: true }) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      }),
     });
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', 'hello'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
       toolHandlers: handlers,
     });
-    assert.equal(code, 0);
+    assert.equal(code, 0, cap.err);
     assert.equal(cap.out, 'Part 1 Part 2\n');
     assert.equal(cap.err, '');
-    assert.equal(seenRequest.body.stream, true);
-    assert.equal(seenRequest.auth, 'Bearer test-key');
   }
 
-  // Truncated SSE stream (no finish_reason, no [DONE]) exits 1
+  // Truncated direct stream (complete: false, no end event) exits 1
   {
     const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
+      authManager: makeDirectAuth(),
       clientLabel: CLI_AUTH_OWNER,
       loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async () =>
-        makeFakeSseResponse([
-          'data: {"id":"c2","model":"gemini-neon","choices":[{"index":0,"delta":{"content":"Halfway"}}]}',
-        ]),
+      openTurn: () => ({
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: null, ended: false }),
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeNativeFrame('Halfway', { complete: false }) };
+        })(),
+      }),
     });
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', 'hello'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
       toolHandlers: handlers,
     });
     assert.equal(code, 1);
-    assert.equal(cap.out, 'Halfway\n');
-    assert.match(cap.err, /stream_truncated/);
+    assert.match(cap.err, /INCOMPLETE_NATIVE_RESPONSE/);
   }
 });
 
 test('search renders citations, honors --no-sources, and emits structured JSON with sources', async () => {
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
-  const handlers = createMcpToolHandlers({
-    authManager: createCliAuthManager({ env }),
-    env,
-    clientLabel: CLI_AUTH_OWNER,
-    loginCommand: 'npx gemini-app-cli login',
-    fetchImpl: async (_url, init) => {
-      const req = JSON.parse(init.body);
-      assert.equal(req.native_search, true);
-      assert.equal(req.stream, false);
-      return makeJsonResponse({
+  const seenQueries = [];
+  const handlers = {
+    async runGeminiSearch(args) {
+      seenQueries.push(args);
+      return {
+        content: 'Node 24 is Active LTS.',
         model: 'gemini-neon',
-        choices: [
-          {
-            message: {
-              role: 'assistant',
-              content: 'Node 24 is Active LTS.',
-              annotations: [
-                { type: 'url_citation', url_citation: { title: 'Node Releases', url: 'https://nodejs.org/en/about/previous-releases' } },
-                { type: 'url_citation', url_citation: { title: 'Duplicate', url: 'https://nodejs.org/en/about/previous-releases' } },
-              ],
-            },
-          },
+        annotations: [
+          { type: 'url_citation', url_citation: { title: 'Node Releases', url: 'https://nodejs.org/en/about/previous-releases' } },
+          { type: 'url_citation', url_citation: { title: 'Duplicate', url: 'https://nodejs.org/en/about/previous-releases' } },
         ],
-      });
+        usage: null,
+        incomplete: false,
+        incompleteReason: null,
+        streamed: false,
+      };
     },
-  });
+    formatError: (e) => e.message,
+  };
 
   // Default text includes Sources
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['search', 'Node 24 LTS'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
       toolHandlers: handlers,
     });
     assert.equal(code, 0);
+    assert.equal(seenQueries.at(-1).query, 'Node 24 LTS');
     assert.match(cap.out, /Node 24 is Active LTS\./);
     assert.match(cap.out, /### Sources/);
     assert.match(cap.out, /\[Node Releases\]\(https:\/\/nodejs\.org\/en\/about\/previous-releases\)/);
@@ -378,7 +368,7 @@ test('search renders citations, honors --no-sources, and emits structured JSON w
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['search', '--no-sources'], {
-      env,
+      env: {},
       stdin: makeStdin('Node 24 LTS'),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -392,7 +382,7 @@ test('search renders citations, honors --no-sources, and emits structured JSON w
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['search', '--json', 'Node 24 LTS'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -495,91 +485,6 @@ test('direct auth-required error mentions npx gemini-app-cli login', async (t) =
   });
   assert.equal(code, 1);
   assert.match(cap.err, /npx gemini-app-cli login/);
-});
-
-test('gateway incomplete:true SSE frame, bad JSON, and bad SSE frames all exit 1', async () => {
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
-
-  // Actual response-delivery.mjs wire shape: incomplete: true + finish_reason: "stop" + [DONE]
-  {
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async () =>
-        makeFakeSseResponse([
-          'data: {"id":"c3","model":"gemini-neon","choices":[{"index":0,"delta":{"content":"Usable prefix."}}]}',
-          'data: {"id":"c3","model":"gemini-neon","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"incomplete":true,"incomplete_details":{"reason":"upstream_interrupted","code":"NATIVE_STREAM_RESET"}}',
-          'data: [DONE]',
-        ]),
-    });
-    const cap = makeCapture();
-    const code = await runGeminiCli(['ask', 'hello'], {
-      env,
-      stdin: makeStdin('', { isTTY: true }),
-      stdout: cap.stdout,
-      stderr: cap.stderr,
-      toolHandlers: handlers,
-    });
-    assert.equal(code, 1);
-    assert.equal(cap.out, 'Usable prefix.\n');
-    assert.match(cap.err, /NATIVE_STREAM_RESET/);
-  }
-
-  // Malformed JSON on non-streaming HTTP 200 exits 1 (never 0 with empty string)
-  {
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async () => ({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        async json() {
-          throw new SyntaxError('Unexpected end of JSON input');
-        },
-      }),
-    });
-    const cap = makeCapture();
-    const code = await runGeminiCli(['ask', '--no-stream', 'hello'], {
-      env,
-      stdin: makeStdin('', { isTTY: true }),
-      stdout: cap.stdout,
-      stderr: cap.stderr,
-      toolHandlers: handlers,
-    });
-    assert.equal(code, 1);
-    assert.equal(cap.out, '');
-    assert.match(cap.err, /INVALID_GATEWAY_RESPONSE/);
-  }
-
-  // Malformed JSON inside SSE data: line exits 1
-  {
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async () =>
-        makeFakeSseResponse([
-          'data: {broken-json',
-          'data: [DONE]',
-        ]),
-    });
-    const cap = makeCapture();
-    const code = await runGeminiCli(['ask', 'hello'], {
-      env,
-      stdin: makeStdin('', { isTTY: true }),
-      stdout: cap.stdout,
-      stderr: cap.stderr,
-      toolHandlers: handlers,
-    });
-    assert.equal(code, 1);
-    assert.match(cap.err, /INVALID_GATEWAY_SSE/);
-  }
 });
 
 test('direct streaming honors getOutputCommitState before/after 2 KiB commit threshold and retries 403 once', async () => {
@@ -708,7 +613,7 @@ test('direct streaming honors getOutputCommitState before/after 2 KiB commit thr
   }
 });
 
-test('CLI rejects missing value before flags, hard-linked output, invalid models as exit 2, JSON init errors, and aborts open stdin pipes', async (t) => {
+test('CLI rejects missing value before flags, hard-linked output, invalid models as exit 2, JSON errors, and aborts open stdin pipes', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-cli-edge-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -734,25 +639,11 @@ test('CLI rejects missing value before flags, hard-linked output, invalid models
     assert.equal(JSON.parse(cap.err).ok, false);
   }
 
-  // Invalid GEMINI_GATEWAY_URL during handler init still honors --json error contract
-  {
-    const cap = makeCapture();
-    const code = await runGeminiCli(['models', '--json'], {
-      env: { GEMINI_GATEWAY_URL: 'ftp://bad.example' },
-      stdout: cap.stdout,
-      stderr: cap.stderr,
-    });
-    assert.equal(code, 1);
-    const errObj = JSON.parse(cap.err);
-    assert.equal(errObj.ok, false);
-    assert.equal(errObj.code, 'INVALID_GATEWAY_URL');
-  }
-
   // Invalid model name exits 2 (usage error)
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '-m', 'not-a-real-model', 'hi'], {
-      env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' },
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -843,21 +734,22 @@ test('ask supports -f/--file attachments and --schema validated structured outpu
     }),
   );
 
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
-  let seenReq = null;
-  let gatewayReply = '{"verdict":"pass","score":95}';
+  let seenTurn = null;
+  let directReply = '{"verdict":"pass","score":95}';
   const handlers = createMcpToolHandlers({
-    authManager: createCliAuthManager({ env }),
-    env,
+    authManager: makeDirectAuth(),
     clientLabel: CLI_AUTH_OWNER,
     loginCommand: 'npx gemini-app-cli login',
-    fetchImpl: async (_url, init) => {
-      seenReq = JSON.parse(init.body);
-      return makeJsonResponse({
-        model: 'gemini-neon',
-        choices: [{ message: { role: 'assistant', content: gatewayReply } }],
-        usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
-      });
+    openTurn: (_token, opts) => {
+      seenTurn = opts;
+      return {
+        cancel() {},
+        getSafeStatus: () => ({ httpStatus: 200, grpcStatus: 0, ended: true }),
+        events: (async function* () {
+          yield { type: 'frame', bytes: makeNativeFrame(directReply) };
+          yield { type: 'end', httpStatus: 200, grpcStatus: 0 };
+        })(),
+      };
     },
   });
 
@@ -865,17 +757,17 @@ test('ask supports -f/--file attachments and --schema validated structured outpu
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '-f', codeFile, '--schema', schemaFile, 'Audit this'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
       toolHandlers: handlers,
     });
     assert.equal(code, 0, cap.err);
-    assert.equal(seenReq.stream, false);
-    assert.equal(seenReq.response_format.type, 'json_schema');
-    assert.match(seenReq.messages[0].content, /BEGIN ATTACHMENT_/);
-    assert.match(seenReq.messages[0].content, /export const answer = 42;/);
+    assert.equal(seenTurn.emitHeaders, false);
+    const fullPrompt = seenTurn.messages.map((x) => x.content).join('\n');
+    assert.match(fullPrompt, /BEGIN ATTACHMENT_/);
+    assert.match(fullPrompt, /export const answer = 42;/);
     assert.deepEqual(JSON.parse(cap.out), { verdict: 'pass', score: 95 });
   }
 
@@ -889,7 +781,7 @@ test('ask supports -f/--file attachments and --schema validated structured outpu
       properties: { verdict: { type: 'string' }, score: { type: 'integer' } },
     });
     const code = await runGeminiCli(['ask', '--schema', inlineSchema, '--json', 'Check'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -901,12 +793,12 @@ test('ask supports -f/--file attachments and --schema validated structured outpu
     assert.deepEqual(out.parsed, { verdict: 'pass', score: 95 });
   }
 
-  // 3. Schema mismatch from gateway fails closed with exit 1
+  // 3. Schema mismatch from upstream fails closed with exit 1
   {
-    gatewayReply = '{"verdict":"maybe","score":"bad"}';
+    directReply = '{"verdict":"maybe","score":"bad"}';
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '--schema', schemaFile, 'Audit'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -921,7 +813,7 @@ test('ask supports -f/--file attachments and --schema validated structured outpu
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '--schema', '{broken', 'Audit'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -935,7 +827,7 @@ test('ask supports -f/--file attachments and --schema validated structured outpu
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '-f', binFile, 'Inspect'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -981,64 +873,57 @@ test('read-only workspace harness (--tools readonly) executes multi-turn ls/find
     assert.equal(code, 2, `Expected exit 2 for ${JSON.stringify(badArgs)}, got ${code}`);
   }
 
-  // Multi-turn gateway harness loop exercising ls, find, grep, read + symlink/escape/.env denial + final --schema
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
+  // Multi-turn harness loop exercising ls, find, grep, read + symlink/escape/.env denial + final --schema
   const requests = [];
-  const handlers = createMcpToolHandlers({
-    authManager: createCliAuthManager({ env }),
-    env,
-    clientLabel: CLI_AUTH_OWNER,
-    loginCommand: 'npx gemini-app-cli login',
-    fetchImpl: async (_url, init) => {
-      const req = JSON.parse(init.body);
-      requests.push(req);
+  const handlers = {
+    async runChatTurn(payload) {
+      requests.push(structuredClone(payload));
       if (requests.length === 1) {
-        return makeJsonResponse({
+        return {
           model: 'gemini-neon',
-          choices: [{
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [
-                { id: 'c1', type: 'function', function: { name: 'ls', arguments: '{"path":"."}' } },
-                { id: 'c2', type: 'function', function: { name: 'find', arguments: '{"pattern":"*.mjs"}' } },
-                { id: 'c3', type: 'function', function: { name: 'grep', arguments: '{"pattern":"refreshToken"}' } },
-              ],
-            },
-          }],
+          content: '',
+          toolCalls: [
+            { id: 'c1', type: 'function', function: { name: 'ls', arguments: '{"path":"."}' } },
+            { id: 'c2', type: 'function', function: { name: 'find', arguments: '{"pattern":"*.mjs"}' } },
+            { id: 'c3', type: 'function', function: { name: 'grep', arguments: '{"pattern":"refreshToken"}' } },
+          ],
+          annotations: [],
           usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 },
-        });
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
       }
       if (requests.length === 2) {
-        return makeJsonResponse({
+        return {
           model: 'gemini-neon',
-          choices: [{
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [
-                { id: 'c4', type: 'function', function: { name: 'read', arguments: '{"path":"src/auth.mjs"}' } },
-                { id: 'c5', type: 'function', function: { name: 'read', arguments: '{"path":".env"}' } },
-                { id: 'c6', type: 'function', function: { name: 'read', arguments: '{"path":"src/escape-link.txt"}' } },
-                { id: 'c7', type: 'function', function: { name: 'read', arguments: '{"path":"../escape.txt"}' } },
-              ],
-            },
-          }],
+          content: '',
+          toolCalls: [
+            { id: 'c4', type: 'function', function: { name: 'read', arguments: '{"path":"src/auth.mjs"}' } },
+            { id: 'c5', type: 'function', function: { name: 'read', arguments: '{"path":".env"}' } },
+            { id: 'c6', type: 'function', function: { name: 'read', arguments: '{"path":"src/escape-link.txt"}' } },
+            { id: 'c7', type: 'function', function: { name: 'read', arguments: '{"path":"../escape.txt"}' } },
+          ],
+          annotations: [],
           usage: { prompt_tokens: 150, completion_tokens: 40, total_tokens: 190 },
-        });
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
       }
-      return makeJsonResponse({
+      return {
         model: 'gemini-neon',
-        choices: [{
-          message: {
-            role: 'assistant',
-            content: JSON.stringify({ file: 'src/auth.mjs', functionName: 'refreshToken' }),
-          },
-        }],
+        content: JSON.stringify({ file: 'src/auth.mjs', functionName: 'refreshToken' }),
+        toolCalls: [],
+        annotations: [],
         usage: { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220 },
-      });
+        incomplete: false,
+        incompleteReason: null,
+        streamed: false,
+      };
     },
-  });
+    formatError: (e) => e.message,
+  };
 
   const schema = JSON.stringify({
     type: 'object',
@@ -1051,7 +936,7 @@ test('read-only workspace harness (--tools readonly) executes multi-turn ls/find
   const code = await runGeminiCli(
     ['ask', '--tools', 'readonly', '--cwd', dir, '--max-turns', '5', '--verbose', '--schema', schema, '--json', 'Find token refresh'],
     {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -1086,28 +971,26 @@ test('read-only workspace harness (--tools readonly) executes multi-turn ls/find
 
   // Max turns exceeded fails cleanly with exit 1
   {
-    const loopHandlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async () =>
-        makeJsonResponse({
+    const loopHandlers = {
+      async runChatTurn() {
+        return {
           model: 'gemini-neon',
-          choices: [{
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [{ id: 'loop1', type: 'function', function: { name: 'ls', arguments: '{}' } }],
-            },
-          }],
-        }),
-    });
+          content: '',
+          toolCalls: [{ id: 'loop1', type: 'function', function: { name: 'ls', arguments: '{}' } }],
+          annotations: [],
+          usage: null,
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
+      },
+      formatError: (e) => e.message,
+    };
     const loopCap = makeCapture();
     const loopCode = await runGeminiCli(
       ['ask', '--tools', 'ls', '--cwd', dir, '--max-turns', '2', '--json', 'Loop forever'],
       {
-        env,
+        env: {},
         stdin: makeStdin('', { isTTY: true }),
         stdout: loopCap.stdout,
         stderr: loopCap.stderr,
@@ -1138,7 +1021,7 @@ test('read-only tools harden glob/grep termination, case-folded & cwd-root secre
   {
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '-f', badUtf8, 'Inspect'], {
-      env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' },
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -1148,44 +1031,45 @@ test('read-only tools harden glob/grep termination, case-folded & cwd-root secre
   }
 
   // 2. When --cwd IS ~/.gemini-app2api-cli, reading auth.json is still denied; case-folded .ENV / NTFS / trailing-dot / regex grep / evil glob all safe
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
   {
     const seen = [];
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async (_url, init) => {
-        const req = JSON.parse(init.body);
-        seen.push(req);
+    const handlers = {
+      async runChatTurn(payload) {
+        seen.push(structuredClone(payload));
         if (seen.length === 1) {
-          return makeJsonResponse({
+          return {
             model: 'gemini-neon',
-            choices: [{
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  { id: '', type: 'function', function: { name: 'read', arguments: '{"path":"auth.json"}' } },
-                  { id: 'dup', type: 'function', function: { name: 'read', arguments: '{"path":".ENV"}' } },
-                  { id: 'dup', type: 'function', function: { name: 'read', arguments: '{"path":".env."}' } },
-                  { id: 'ntfs', type: 'function', function: { name: 'read', arguments: '{"path":"foo:stream"}' } },
-                  { id: 're', type: 'function', function: { name: 'grep', arguments: '{"pattern":"(a+)+$","regex":true}' } },
-                ],
-              },
-            }],
-          });
+            content: '',
+            toolCalls: [
+              { id: '', type: 'function', function: { name: 'read', arguments: '{"path":"auth.json"}' } },
+              { id: 'dup', type: 'function', function: { name: 'read', arguments: '{"path":".ENV"}' } },
+              { id: 'dup', type: 'function', function: { name: 'read', arguments: '{"path":".env."}' } },
+              { id: 'ntfs', type: 'function', function: { name: 'read', arguments: '{"path":"foo:stream"}' } },
+              { id: 're', type: 'function', function: { name: 'grep', arguments: '{"pattern":"(a+)+$","regex":true}' } },
+            ],
+            annotations: [],
+            usage: null,
+            incomplete: false,
+            incompleteReason: null,
+            streamed: false,
+          };
         }
-        return makeJsonResponse({
+        return {
           model: 'gemini-neon',
-          choices: [{ message: { role: 'assistant', content: 'all blocked' } }],
-        });
+          content: 'all blocked',
+          toolCalls: [],
+          annotations: [],
+          usage: null,
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
       },
-    });
+      formatError: (e) => e.message,
+    };
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '--tools', 'readonly', '--cwd', credDir, '--json', 'Probe'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -1210,37 +1094,40 @@ test('read-only tools harden glob/grep termination, case-folded & cwd-root secre
   // 3. Linear-time glob handles multi-wildcard pathological pattern quickly without backtracking hang
   {
     const seen = [];
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async (_url, init) => {
-        seen.push(JSON.parse(init.body));
+    const handlers = {
+      async runChatTurn(payload) {
+        seen.push(structuredClone(payload));
         if (seen.length === 1) {
-          return makeJsonResponse({
+          return {
             model: 'gemini-neon',
-            choices: [{
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  { id: 'g1', type: 'function', function: { name: 'find', arguments: '{"pattern":"*a*a*a*a*a*a*a*a*a*a*b"}' } },
-                ],
-              },
-            }],
-          });
+            content: '',
+            toolCalls: [
+              { id: 'g1', type: 'function', function: { name: 'find', arguments: '{"pattern":"*a*a*a*a*a*a*a*a*a*a*b"}' } },
+            ],
+            annotations: [],
+            usage: null,
+            incomplete: false,
+            incompleteReason: null,
+            streamed: false,
+          };
         }
-        return makeJsonResponse({
+        return {
           model: 'gemini-neon',
-          choices: [{ message: { role: 'assistant', content: 'done' } }],
-        });
+          content: 'done',
+          toolCalls: [],
+          annotations: [],
+          usage: null,
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
       },
-    });
+      formatError: (e) => e.message,
+    };
     const t0 = Date.now();
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '--tools', 'find', '--cwd', dir, 'Find'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -1332,47 +1219,48 @@ test('Carbon review regressions: src/**/*.ts glob, emoji grep truncation, symlin
   const symOutDir = path.join(dir, 'sym-out');
   fs.symlinkSync(realOutDir, symOutDir, 'dir');
 
-  const env = { GEMINI_GATEWAY_URL: 'http://127.0.0.1:18989' };
-
   // 1. src/**/*.ts matches both src/index.ts and src/a/b/deep.ts; emoji grep stays well-formed; call:bad normalized; ..notes.txt allowed
   {
     const seen = [];
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async (_url, init) => {
-        seen.push(JSON.parse(init.body));
+    const handlers = {
+      async runChatTurn(payload) {
+        seen.push(structuredClone(payload));
         if (seen.length === 1) {
-          return makeJsonResponse({
+          return {
             model: 'gemini-neon',
-            choices: [{
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  { id: 'call:bad/id', type: 'function', function: { name: 'find', arguments: '{"pattern":"src/**/*.ts"}' } },
-                  { id: 'c_rel', type: 'function', function: { name: 'find', arguments: '{"pattern":"./src/**/*.ts"}' } },
-                  { id: 'c_emoji', type: 'function', function: { name: 'grep', arguments: '{"pattern":"MATCH_ME","path":"emoji.txt"}' } },
-                  { id: 'c_dot', type: 'function', function: { name: 'read', arguments: '{"path":"..notes.txt"}' } },
-                ],
-              },
-            }],
-          });
+            content: '',
+            toolCalls: [
+              { id: 'call:bad/id', type: 'function', function: { name: 'find', arguments: '{"pattern":"src/**/*.ts"}' } },
+              { id: 'c_rel', type: 'function', function: { name: 'find', arguments: '{"pattern":"./src/**/*.ts"}' } },
+              { id: 'c_emoji', type: 'function', function: { name: 'grep', arguments: '{"pattern":"MATCH_ME","path":"emoji.txt"}' } },
+              { id: 'c_dot', type: 'function', function: { name: 'read', arguments: '{"path":"..notes.txt"}' } },
+            ],
+            annotations: [],
+            usage: null,
+            incomplete: false,
+            incompleteReason: null,
+            streamed: false,
+          };
         }
-        return makeJsonResponse({
+        return {
           model: 'gemini-neon',
-          choices: [{ message: { role: 'assistant', content: 'verified' } }],
-        });
+          content: 'verified',
+          toolCalls: [],
+          annotations: [],
+          usage: null,
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
       },
-    });
+      formatError: (e) => e.message,
+    };
     const outJsonPath = path.join(symOutDir, 'report.json');
     const cap = makeCapture();
     const code = await runGeminiCli(
       ['ask', '--tools', 'readonly', '--cwd', dir, '--json', '-o', outJsonPath, 'Check all'],
       {
-        env,
+        env: {},
         stdin: makeStdin('', { isTTY: true }),
         stdout: cap.stdout,
         stderr: cap.stderr,
@@ -1406,13 +1294,9 @@ test('Carbon review regressions: src/**/*.ts glob, emoji grep truncation, symlin
   // 2. Cumulative 256 KiB budget cleanly switches to budgetExhaustedNotice (never deadlocks to empty string)
   {
     const seen = [];
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async (_url, init) => {
-        seen.push(JSON.parse(init.body));
+    const handlers = {
+      async runChatTurn(payload) {
+        seen.push(structuredClone(payload));
         if (seen.length === 1) {
           // 12 reads of ~32 KiB each exceeds 256 KiB cumulative budget
           const calls = Array.from({ length: 12 }, (_, idx) => ({
@@ -1420,20 +1304,33 @@ test('Carbon review regressions: src/**/*.ts glob, emoji grep truncation, symlin
             type: 'function',
             function: { name: 'read', arguments: '{"path":"big.txt","offset":1,"limit":200}' },
           }));
-          return makeJsonResponse({
+          return {
             model: 'gemini-neon',
-            choices: [{ message: { role: 'assistant', content: null, tool_calls: calls } }],
-          });
+            content: '',
+            toolCalls: calls,
+            annotations: [],
+            usage: null,
+            incomplete: false,
+            incompleteReason: null,
+            streamed: false,
+          };
         }
-        return makeJsonResponse({
+        return {
           model: 'gemini-neon',
-          choices: [{ message: { role: 'assistant', content: 'budget-handled' } }],
-        });
+          content: 'budget-handled',
+          toolCalls: [],
+          annotations: [],
+          usage: null,
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
       },
-    });
+      formatError: (e) => e.message,
+    };
     const cap = makeCapture();
     const code = await runGeminiCli(['ask', '--tools', 'read', '--cwd', dir, 'Read lots'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,
@@ -1448,20 +1345,23 @@ test('Carbon review regressions: src/**/*.ts glob, emoji grep truncation, symlin
   // 3. search --json -o writes structured JSON to file
   {
     const searchOut = path.join(symOutDir, 'search.json');
-    const handlers = createMcpToolHandlers({
-      authManager: createCliAuthManager({ env }),
-      env,
-      clientLabel: CLI_AUTH_OWNER,
-      loginCommand: 'npx gemini-app-cli login',
-      fetchImpl: async () =>
-        makeJsonResponse({
+    const handlers = {
+      async runGeminiSearch() {
+        return {
           model: 'gemini-neon',
-          choices: [{ message: { role: 'assistant', content: 'Found it', annotations: [] } }],
-        }),
-    });
+          content: 'Found it',
+          annotations: [],
+          usage: null,
+          incomplete: false,
+          incompleteReason: null,
+          streamed: false,
+        };
+      },
+      formatError: (e) => e.message,
+    };
     const cap = makeCapture();
     const code = await runGeminiCli(['search', '--json', '-o', searchOut, 'test query'], {
-      env,
+      env: {},
       stdin: makeStdin('', { isTTY: true }),
       stdout: cap.stdout,
       stderr: cap.stderr,

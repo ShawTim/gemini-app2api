@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { deflateSync } from 'node:zlib';
 import { startLoopbackLogin as realStartLoopbackLogin, refreshNativeCredential as realRefreshNativeCredential } from '../native-wire/oauth-loopback.mjs';
 import { lengthDelimited as m, varintField as v } from '../native-wire/protobuf.mjs';
-import { createMcpAuthManager, resolveGatewayConfig, writeStoredCredential } from '../extensions/mcp/auth.js';
+import { createMcpAuthManager, writeStoredCredential } from '../extensions/mcp/auth.js';
 import { createMcpToolHandlers, MCP_TOOL_DEFINITIONS } from '../extensions/mcp/tools.js';
 import { createMcpServer } from '../extensions/mcp/server.js';
 import { runMcpCli } from '../extensions/mcp/cli.js';
@@ -173,7 +173,7 @@ test('MCP authManager performs real loopback login + scoped refresh + 0600 stora
   assert.equal(auth.status().signedIn, false);
 });
 
-test('ask_gemini, gemini_search, and gemini_quota work in direct mode, free-tier auto mode, and optional gateway mode', async (t) => {
+test('ask_gemini, gemini_search, and gemini_quota work in direct mode and free-tier auto mode (ignoring GEMINI_GATEWAY_URL)', async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-tools-test-'));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
   const imgPath = path.join(tmpDir, 'sample.png');
@@ -300,51 +300,19 @@ test('ask_gemini, gemini_search, and gemini_quota work in direct mode, free-tier
   assert.match(quotaRes.content[0].text, /AI Ultra/);
   assert.match(quotaRes.content[0].text, /Daily limit/);
 
-  // 6. Optional Gateway mode routes through GEMINI_GATEWAY_URL
-  const gwRequests = [];
-  const gwHandlers = createMcpToolHandlers({
-    authManager,
-    env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:49688/', GEMINI_GATEWAY_API_KEY: 'gw-test-key' },
-    fetchImpl: async (url, init) => {
-      gwRequests.push({ url, headers: init.headers, body: JSON.parse(init.body) });
-      return new Response(
-        JSON.stringify({
-          model: 'gemini-neon',
-          choices: [{ message: { content: 'from-gateway', annotations: [{ url_citation: { url: 'https://gw.test', title: 'GW' } }] } }],
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    },
-  });
-  const gwRes = await gwHandlers.callTool('gemini_search', { query: 'gateway search' });
-  assert.equal(gwRes.isError, undefined);
-  assert.match(gwRes.content[0].text, /from-gateway/);
-  assert.match(gwRes.content[0].text, /https:\/\/gw\.test/);
-  assert.equal(gwRequests[0].url, 'http://127.0.0.1:49688/v1/chat/completions');
-  assert.equal(gwRequests[0].headers.Authorization, 'Bearer gw-test-key');
-  assert.equal(gwRequests[0].body.native_search, true);
-
-  // 7. Reject credential-bearing and non-loopback cleartext GEMINI_GATEWAY_URL
-  assert.throws(() => resolveGatewayConfig({ GEMINI_GATEWAY_URL: 'http://user:pass@127.0.0.1:18989' }), { code: 'INVALID_GATEWAY_URL' });
-  assert.throws(() => resolveGatewayConfig({ GEMINI_GATEWAY_URL: 'http://remote.example.com:18989' }), { code: 'INVALID_GATEWAY_URL' });
-
-  // 8. Gateway mode routes gemini_quota to /mcp and omits gemini-auto from tool schema
-  const gwQuotaHandlers = createMcpToolHandlers({
-    authManager,
+  // 6. Direct-only contract: GEMINI_GATEWAY_URL in env is ignored; status stays oauth and tools include gemini-auto
+  const ignoredGwAuth = createMcpAuthManager({
+    authPath: path.join(os.tmpdir(), `mcp-unused-${Date.now()}.json`),
     env: { GEMINI_GATEWAY_URL: 'http://127.0.0.1:49688', GEMINI_GATEWAY_API_KEY: 'gw-key' },
-    fetchImpl: async (url) => {
-      assert.equal(url, 'http://127.0.0.1:49688/mcp');
-      return new Response(
-        JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: 'Pool: 9/9 ready' }] } }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    },
   });
-  const askToolEnum = gwQuotaHandlers.tools.find((x) => x.name === 'ask_gemini').inputSchema.properties.model.enum;
-  assert.equal(askToolEnum.includes('gemini-auto'), false);
-  const gwQuotaRes = await gwQuotaHandlers.callTool('gemini_quota', {});
-  assert.equal(gwQuotaRes.isError, undefined);
-  assert.equal(gwQuotaRes.content[0].text, 'Pool: 9/9 ready');
+  assert.equal(ignoredGwAuth.status().mode, 'oauth');
+  assert.equal(ignoredGwAuth.status().signedIn, false);
+  const directHandlers = createMcpToolHandlers({ authManager: ignoredGwAuth });
+  const askToolEnum = directHandlers.tools.find((x) => x.name === 'ask_gemini').inputSchema.properties.model.enum;
+  assert.equal(askToolEnum.includes('gemini-auto'), true);
+  const unsignedRes = await directHandlers.callTool('ask_gemini', { prompt: 'hello' });
+  assert.equal(unsignedRes.isError, true);
+  assert.match(unsignedRes.content[0].text, /npx mcp-gemini-app login/);
 });
 
 test('MCP authManager treats external multi-provider Pi auth.json as strictly read-only on refresh, login, and logout', async (t) => {

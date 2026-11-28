@@ -3,14 +3,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MODEL_SPECS, NATIVE_MODELS } from '../../src/openai-contract.mjs';
+import { MODEL_SPECS } from '../../src/openai-contract.mjs';
 import {
   formatMcpCitationsMarkdown,
   MAX_MCP_TOOL_IMAGES,
   normalizeAskGeminiArgs,
 } from '../../src/gateway/mcp-core.mjs';
 import { normalizeChatResponseFormat } from '../../src/gateway/structured-output.mjs';
-import { createMcpAuthManager, resolveGatewayConfig } from '../mcp/auth.js';
+import { createMcpAuthManager } from '../mcp/auth.js';
 import { createMcpToolHandlers } from '../mcp/tools.js';
 import { SUBSCRIPTION_LABELS } from '../pi/provider.js';
 import {
@@ -100,8 +100,6 @@ Options for \`search\`:
 Environment variables:
   GEMINI_CLI_HOME          Custom credential directory (default: ~/.gemini-app2api-cli)
   GEMINI_CLI_AUTH_PATH     Explicit path to auth.json (also reads MCP/Pi auth.json read-only)
-  GEMINI_GATEWAY_URL       Route requests through a local/remote gemini-app2api gateway
-  GEMINI_GATEWAY_API_KEY   API key for GEMINI_GATEWAY_URL
   HTTPS_PROXY / HTTP_PROXY / NO_PROXY
 
 Examples:
@@ -702,15 +700,13 @@ export async function runGeminiCli(
       toolHandlers ??
       createMcpToolHandlers({
         authManager: auth,
-        env,
         clientLabel: CLI_AUTH_OWNER,
         loginCommand: 'npx gemini-app-cli login',
       });
 
     if (command === 'models') {
       if (parsed.positionals.length) throw usageError('`models` does not accept positional arguments');
-      const gateway = resolveGatewayConfig(env);
-      const ids = gateway ? NATIVE_MODELS : Object.keys(MODEL_SPECS);
+      const ids = Object.keys(MODEL_SPECS);
       const list = ids.map((id) => ({
         id,
         contextWindow: MODEL_SPECS[id]?.contextWindow ?? null,
@@ -719,7 +715,7 @@ export async function runGeminiCli(
         default: id === 'gemini-neon',
       }));
       if (parsed.json) {
-        stdout.write(JSON.stringify({ ok: true, mode: gateway ? 'gateway' : 'oauth', models: list }, null, 2) + '\n');
+        stdout.write(JSON.stringify({ ok: true, mode: 'oauth', models: list }, null, 2) + '\n');
       } else {
         for (const m of list) {
           const ctx = m.contextWindow ? `${Math.round(m.contextWindow / 1000)}k` : '-';
@@ -760,7 +756,7 @@ export async function runGeminiCli(
       if (parsed.positionals.length) throw usageError('`status` does not accept positional arguments');
       const info = auth.status();
       stdout.write(JSON.stringify(info, null, 2) + '\n');
-      return info.mode === 'gateway' || info.signedIn ? 0 : 1;
+      return info.signedIn ? 0 : 1;
     }
 
     if (command === 'quota') {
@@ -809,8 +805,7 @@ export async function runGeminiCli(
       let result;
 
       if (parsed.tools) {
-        const gateway = resolveGatewayConfig(env);
-        const allowedModels = gateway ? NATIVE_MODELS : Object.keys(MODEL_SPECS);
+        const allowedModels = Object.keys(MODEL_SPECS);
         const askArgs = {
           prompt,
           ...(system !== undefined ? { system } : {}),
@@ -822,7 +817,7 @@ export async function runGeminiCli(
         let normalizedAsk;
         if (parsed.images.length && typeof handlers.loadLocalOrInlineImagePartsAsync === 'function') {
           normalizeAskGeminiArgs(askArgs, { allowedModels, loadImages: () => [] });
-          imageCache = !gateway && typeof handlers.createImageCache === 'function' ? handlers.createImageCache() : undefined;
+          imageCache = typeof handlers.createImageCache === 'function' ? handlers.createImageCache() : undefined;
           const preloaded = await handlers.loadLocalOrInlineImagePartsAsync(askArgs.images, { imageCache });
           normalizedAsk = normalizeAskGeminiArgs(askArgs, { allowedModels, loadImages: () => preloaded });
         } else {

@@ -3,8 +3,7 @@ import path from 'node:path';
 import { NativeDirectProvider } from '../../src/native-provider.mjs';
 import { openDirectTurn as defaultOpenDirectTurn } from '../../src/gateway/native-transport.mjs';
 import { automaticRecoveryKind } from '../../src/gateway/automatic-recovery.mjs';
-import { validateStructuredOutputText } from '../../src/gateway/structured-output.mjs';
-import { MODEL_SPECS, NATIVE_MODELS } from '../../src/openai-contract.mjs';
+import { MODEL_SPECS } from '../../src/openai-contract.mjs';
 import { createValidatedImageCache, decodeImageBytes, decodeImageDataUrl, MAX_IMAGE_BYTES } from '../../src/image-input.mjs';
 import { createImageBlobCache } from '../../src/gateway/image-upload.mjs';
 import { fetchGoogleUsageInfo as defaultFetchGoogleUsageInfo } from '../../src/gateway/quota-transport.mjs';
@@ -19,11 +18,9 @@ import {
   MAX_MCP_TOOL_IMAGES,
 } from '../../src/gateway/mcp-core.mjs';
 import { formatQuotaDisplay, SUBSCRIPTION_LABELS } from '../pi/provider.js';
-import { resolveGatewayConfig } from './auth.js';
 
 const DEFAULT_TIMEOUT_MS = 180_000;
 const STREAM_PREFIX_BYTES = 2048;
-const MAX_SSE_LINE_BYTES = 4 * 1024 * 1024;
 const ALLOWED_DIRECT_MODELS = Object.freeze(Object.keys(MODEL_SPECS));
 
 function splitCompleteCodePoints(str) {
@@ -272,12 +269,10 @@ function formatFriendlyMcpError(err, loginCommand = 'npx mcp-gemini-app login') 
 
 export function createMcpToolHandlers({
   authManager,
-  env = process.env,
   clientLabel = 'mcp-gemini-app',
   loginCommand = 'npx mcp-gemini-app login',
   openTurn = defaultOpenDirectTurn,
   uploadImages,
-  fetchImpl = globalThis.fetch,
   fetchGoogleUsageInfo,
   fetchGoogleSubscription,
   decodeUsageInfo = defaultDecodeUsageInfo,
@@ -287,224 +282,10 @@ export function createMcpToolHandlers({
   const usageFetch = fetchGoogleUsageInfo || defaultFetchGoogleUsageInfo;
   const subFetch = fetchGoogleSubscription || (fetchGoogleUsageInfo ? null : defaultFetchGoogleSubscription);
   const imageBlobCache = createImageBlobCache();
-  const initialGateway = resolveGatewayConfig(env);
   const tools = buildMcpToolDefinitions({
     allowLocalImagePaths: true,
-    models: initialGateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS,
+    models: ALLOWED_DIRECT_MODELS,
   });
-
-  function withOptionalTimeout(signal, reqTimeoutMs) {
-    if (!(reqTimeoutMs > 0)) {
-      return { signal, cleanup: () => {} };
-    }
-    const controller = new AbortController();
-    const onOuterAbort = () => controller.abort(signal?.reason ?? new Error('Request aborted'));
-    if (signal?.aborted) onOuterAbort();
-    else signal?.addEventListener('abort', onOuterAbort, { once: true });
-    const timer = setTimeout(
-      () => controller.abort(Object.assign(new Error('Gateway request timed out'), { code: 'REQUEST_TIMEOUT' })),
-      reqTimeoutMs,
-    );
-    timer.unref?.();
-    return {
-      signal: controller.signal,
-      cleanup: () => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onOuterAbort);
-      },
-    };
-  }
-
-  async function callViaGateway(gateway, payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs } = {}) {
-    const headers = { 'Content-Type': 'application/json' };
-    if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
-    const hasTools = Array.isArray(payload.tools) && payload.tools.length > 0;
-    const wantStream =
-      typeof onTextDelta === 'function' &&
-      !payload.native_search &&
-      !payload.response_format &&
-      !hasTools;
-    if (wantStream) headers.Accept = 'text/event-stream, application/json';
-
-    const scoped = withOptionalTimeout(signal, reqTimeoutMs);
-    try {
-      const res = await fetchImpl(`${gateway.baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ ...payload, stream: wantStream }),
-        signal: scoped.signal,
-      });
-      const contentType = String(res.headers?.get?.('content-type') || '').toLowerCase();
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        const code = data?.error?.code || `GATEWAY_HTTP_${res.status}`;
-        const message = data?.error?.message || `Gateway returned HTTP ${res.status}`;
-        throw Object.assign(new Error(message), { code, status: res.status });
-      }
-      if (!wantStream || !contentType.includes('text/event-stream') || !res.body) {
-        let data;
-        try {
-          data = await res.json();
-        } catch (err) {
-          if (scoped.signal?.aborted) {
-            throw scoped.signal.reason instanceof Error
-              ? scoped.signal.reason
-              : Object.assign(new Error('Gateway request aborted'), { code: 'REQUEST_ABORTED', cause: err });
-          }
-          throw Object.assign(new Error('Invalid JSON response from gateway'), {
-            code: 'INVALID_GATEWAY_RESPONSE',
-            cause: err,
-          });
-        }
-        if (
-          !data ||
-          typeof data !== 'object' ||
-          Array.isArray(data) ||
-          (!Array.isArray(data.choices) && !data.error && data.status !== 'incomplete' && data.incomplete !== true)
-        ) {
-          throw Object.assign(new Error('Unexpected JSON response shape from gateway'), {
-            code: 'INVALID_GATEWAY_RESPONSE',
-          });
-        }
-        const msg = data?.choices?.[0]?.message;
-        const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
-        let content = typeof msg?.content === 'string' ? msg.content : '';
-        const incomplete = data?.incomplete === true || data?.status === 'incomplete' || Boolean(data?.error);
-        if (!incomplete && payload.response_format && toolCalls.length === 0) {
-          content = validateStructuredOutputText(content, payload.response_format);
-        }
-        let streamed = false;
-        if (wantStream && !incomplete && content) {
-          onTextDelta(content);
-          streamed = true;
-        }
-        return {
-          content,
-          toolCalls,
-          model: data?.model || payload.model,
-          annotations: Array.isArray(msg?.annotations) ? msg.annotations : [],
-          usage: data?.usage ?? null,
-          incomplete,
-          incompleteReason: data?.error?.code || data?.incomplete_details?.code || data?.incomplete_details?.reason || null,
-          streamed,
-        };
-      }
-
-      const decoder = new TextDecoder('utf-8', { fatal: false });
-      let lineBuf = '';
-      let pendingSurrogate = '';
-      let content = '';
-      let model = payload.model;
-      let usage = null;
-      let annotations = [];
-      let incomplete = false;
-      let incompleteReason = null;
-      let sawDone = false;
-      let sawTerminalFinish = false;
-      let streamed = false;
-
-      const emitChunk = (text) => {
-        if (!text) return;
-        content += text;
-        const { ready, trailing } = splitCompleteCodePoints(pendingSurrogate + text);
-        pendingSurrogate = trailing;
-        if (ready) {
-          onTextDelta(ready);
-          streamed = true;
-        }
-      };
-
-      const processLine = (rawLine) => {
-        const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-        if (Buffer.byteLength(line, 'utf8') > MAX_SSE_LINE_BYTES) {
-          throw Object.assign(new Error('Gateway SSE line exceeded maximum size'), { code: 'GATEWAY_SSE_OVERFLOW' });
-        }
-        if (!line || line.startsWith(':')) return;
-        if (!line.startsWith('data:')) return;
-        const dataStr = line.slice(5).trim();
-        if (!dataStr) return;
-        if (dataStr === '[DONE]') {
-          sawDone = true;
-          return;
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(dataStr);
-        } catch (err) {
-          throw Object.assign(new Error('Malformed JSON in gateway SSE frame'), {
-            code: 'INVALID_GATEWAY_SSE',
-            cause: err,
-          });
-        }
-        if (parsed?.model) model = parsed.model;
-        if (parsed?.usage) usage = parsed.usage;
-        if (parsed?.error) {
-          incomplete = true;
-          incompleteReason = parsed.error.code || parsed.error.message || 'upstream_error';
-          return;
-        }
-        if (parsed?.incomplete === true || parsed?.status === 'incomplete') {
-          incomplete = true;
-          incompleteReason =
-            parsed?.incomplete_details?.code || parsed?.incomplete_details?.reason || incompleteReason || 'incomplete';
-        }
-        const choice = parsed?.choices?.[0];
-        if (choice?.delta?.content && typeof choice.delta.content === 'string') {
-          emitChunk(choice.delta.content);
-        }
-        if (Array.isArray(choice?.delta?.annotations) && choice.delta.annotations.length) {
-          annotations = choice.delta.annotations;
-        } else if (Array.isArray(choice?.message?.annotations) && choice.message.annotations.length) {
-          annotations = choice.message.annotations;
-        }
-        if (choice?.finish_reason === 'stop' || choice?.finish_reason === 'length') {
-          sawTerminalFinish = true;
-        } else if (choice?.finish_reason === 'error') {
-          incomplete = true;
-          incompleteReason = incompleteReason || 'stream_error';
-        }
-      };
-
-      for await (const rawChunk of res.body) {
-        const text = typeof rawChunk === 'string' ? rawChunk : decoder.decode(rawChunk, { stream: true });
-        lineBuf += text;
-        let nl;
-        while ((nl = lineBuf.indexOf('\n')) !== -1) {
-          processLine(lineBuf.slice(0, nl));
-          lineBuf = lineBuf.slice(nl + 1);
-          if (sawDone) break;
-        }
-        if (sawDone) break;
-        if (Buffer.byteLength(lineBuf, 'utf8') > MAX_SSE_LINE_BYTES) {
-          throw Object.assign(new Error('Gateway SSE line exceeded maximum size'), { code: 'GATEWAY_SSE_OVERFLOW' });
-        }
-      }
-      const tail = decoder.decode();
-      if (tail) lineBuf += tail;
-      if (lineBuf && !sawDone) processLine(lineBuf);
-      if (pendingSurrogate) {
-        onTextDelta('\uFFFD');
-        streamed = true;
-        pendingSurrogate = '';
-      }
-      if (!sawDone && !sawTerminalFinish && !incomplete) {
-        incomplete = true;
-        incompleteReason = 'stream_truncated';
-      }
-      return {
-        content,
-        toolCalls: [],
-        model,
-        annotations,
-        usage,
-        incomplete,
-        incompleteReason,
-        streamed,
-      };
-    } finally {
-      scoped.cleanup();
-    }
-  }
 
   async function callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache } = {}) {
     const cred = await authManager.getValidCredential({ signal });
@@ -682,42 +463,34 @@ export function createMcpToolHandlers({
     }
   }
 
-  async function executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache } = {}) {
-    const gateway = resolveGatewayConfig(env);
-    if (gateway) return callViaGateway(gateway, payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs });
-    return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
-  }
-
   async function runAskGemini(args, { signal, onTextDelta, timeoutMs: reqTimeoutMs, responseFormat } = {}) {
-    const gateway = resolveGatewayConfig(env);
-    const allowedModels = gateway ? NATIVE_MODELS : ALLOWED_DIRECT_MODELS;
     // Validate non-image args synchronously first so argument/model errors precede filesystem reads.
     let payload = normalizeAskGeminiArgs(args, {
-      allowedModels,
+      allowedModels: ALLOWED_DIRECT_MODELS,
       loadImages: () => [],
     });
     let imageCache;
     if (args?.images !== undefined) {
-      if (!gateway) imageCache = createValidatedImageCache();
+      imageCache = createValidatedImageCache();
       const preloadedParts = await loadLocalOrInlineImagePartsAsync(args.images, { imageCache });
       if (preloadedParts.length > 0) {
         payload = normalizeAskGeminiArgs(args, {
-          allowedModels,
+          allowedModels: ALLOWED_DIRECT_MODELS,
           loadImages: () => preloadedParts,
         });
       }
     }
     if (responseFormat) payload.response_format = responseFormat;
-    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
+    return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
   }
 
   async function runChatTurn(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache } = {}) {
-    return executeChat(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
+    return callDirectNative(payload, { signal, onTextDelta, timeoutMs: reqTimeoutMs, imageCache });
   }
 
   async function runGeminiSearch(args, { signal, timeoutMs: reqTimeoutMs } = {}) {
     const payload = normalizeGeminiSearchArgs(args);
-    return executeChat(payload, { signal, timeoutMs: reqTimeoutMs });
+    return callDirectNative(payload, { signal, timeoutMs: reqTimeoutMs });
   }
 
   async function handleAskGemini(args, { signal } = {}) {
@@ -761,38 +534,6 @@ export function createMcpToolHandlers({
   }
 
   async function handleGeminiQuota(_args, { signal, timeoutMs: reqTimeoutMs } = {}) {
-    const gateway = resolveGatewayConfig(env);
-    if (gateway) {
-      const headers = {
-        'Content-Type': 'application/json',
-        Accept: 'application/json, text/event-stream',
-      };
-      if (gateway.apiKey) headers.Authorization = `Bearer ${gateway.apiKey}`;
-      const scoped = withOptionalTimeout(signal, reqTimeoutMs);
-      try {
-        const res = await fetchImpl(`${gateway.baseUrl}/mcp`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'tools/call',
-            params: { name: 'gemini_quota', arguments: {} },
-          }),
-          signal: scoped.signal,
-        });
-        const data = await res.json().catch(() => null);
-        if (!res.ok || data?.error) {
-          const msg = data?.error?.message || `Gateway /mcp returned HTTP ${res.status}`;
-          throw Object.assign(new Error(msg), { code: `GATEWAY_HTTP_${res.status}` });
-        }
-        if (data?.result?.content) return data.result;
-        throw Object.assign(new Error('Invalid gateway /mcp quota response'), { code: 'INVALID_GATEWAY_RESPONSE' });
-      } finally {
-        scoped.cleanup();
-      }
-    }
-
     const quotaTimeoutMs = reqTimeoutMs ?? 10_000;
     const cred = await authManager.getValidCredential({ signal });
     const fetchSubOnly = async (accessToken) => {

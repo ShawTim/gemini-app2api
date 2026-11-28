@@ -49,28 +49,10 @@ claude mcp add gemini-app -- npx -y mcp-gemini-app
 }
 ```
 
-#### Optional: Route through an existing local `gemini-app2api` multi-account gateway
-If you already run `gemini-app2api` locally and want multi-account pooling and failover without a separate login:
-
-```json
-{
-  "mcpServers": {
-    "gemini-app": {
-      "command": "npx",
-      "args": ["-y", "mcp-gemini-app"],
-      "env": {
-        "GEMINI_GATEWAY_URL": "http://127.0.0.1:18989",
-        "GEMINI_GATEWAY_API_KEY": "your-gateway-key"
-      }
-    }
-  }
-}
-```
-
 ## CLI Utilities
 
 ```bash
-npx -y mcp-gemini-app status   # Check auth mode & token validity
+npx -y mcp-gemini-app status   # Check auth status & token validity
 npx -y mcp-gemini-app quota    # Print subscription tier & remaining quota
 npx -y mcp-gemini-app logout   # Remove locally stored credentials
 ```
@@ -78,8 +60,7 @@ npx -y mcp-gemini-app logout   # Remove locally stored credentials
 ## Environment Variables
 
 - `GEMINI_MCP_HOME`: Override credential directory (default: `~/.gemini-app2api-mcp`).
-- `GEMINI_MCP_AUTH_PATH`: Explicit path to `auth.json` (also supports pointing at an existing Pi `auth.json`).
-- `GEMINI_GATEWAY_URL` / `GEMINI_GATEWAY_API_KEY`: Optional local/remote `gemini-app2api` gateway override.
+- `GEMINI_MCP_AUTH_PATH`: Explicit path to `auth.json` (also supports pointing at an existing Pi or CLI `auth.json` read-only).
 - `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`: Standard outbound HTTP(S) proxy tunneling.
 
 ## Requirements
